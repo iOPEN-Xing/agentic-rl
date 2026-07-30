@@ -195,6 +195,8 @@ class DataParallelPPOCritic(BasePPOCritic):
         metrics = {}
 
         select_keys = ["input_ids", "responses", "response_mask", "attention_mask", "position_ids", "values", "returns"]
+        if "turn_value_mask" in data.batch:
+            select_keys.append("turn_value_mask")
         has_multi_modal_inputs = "multi_modal_inputs" in data.non_tensor_batch.keys()
         non_tensor_select_keys = ["multi_modal_inputs"] if has_multi_modal_inputs else []
 
@@ -222,6 +224,7 @@ class DataParallelPPOCritic(BasePPOCritic):
                     micro_batch_metrics = {}
                     model_inputs = {**micro_batch.batch, **micro_batch.non_tensor_batch}
                     response_mask = model_inputs["response_mask"]
+                    value_loss_mask = model_inputs.get("turn_value_mask", response_mask)
                     values = model_inputs["values"]
                     returns = model_inputs["returns"]
 
@@ -230,7 +233,7 @@ class DataParallelPPOCritic(BasePPOCritic):
                         vpreds=vpreds,
                         values=values,
                         returns=returns,
-                        response_mask=response_mask,
+                        response_mask=value_loss_mask,
                         cliprange_value=self.config.cliprange_value,
                         loss_agg_mode=self.config.loss_agg_mode,
                     )
@@ -248,7 +251,7 @@ class DataParallelPPOCritic(BasePPOCritic):
                         {
                             "critic/vf_loss": vf_loss.detach().item() * loss_scale_factor,
                             "critic/vf_clipfrac": vf_clipfrac.detach().item(),
-                            "critic/vpred_mean": masked_mean(vpreds, response_mask).detach().item(),
+                            "critic/vpred_mean": masked_mean(vpreds, value_loss_mask).detach().item(),
                         }
                     )
 

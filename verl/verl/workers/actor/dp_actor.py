@@ -393,6 +393,11 @@ class DataParallelPPOActor(BasePPOActor):
         # Include rollout_log_probs for computing rollout_corr metrics in bypass mode
         if "rollout_log_probs" in data.batch.keys():
             select_keys.append("rollout_log_probs")
+        loss_mode = self.config.policy_loss.get("loss_mode", "vanilla")
+        if loss_mode == "turn_ppo":
+            if "turn_ids" not in data.batch.keys():
+                raise ValueError("turn_ppo policy loss requires turn_ids in the training batch")
+            select_keys.append("turn_ids")
 
         has_multi_modal_inputs = "multi_modal_inputs" in data.non_tensor_batch.keys()
         non_tensor_select_keys = ["multi_modal_inputs"] if has_multi_modal_inputs else []
@@ -452,7 +457,6 @@ class DataParallelPPOActor(BasePPOActor):
                         else:
                             old_log_prob = model_inputs["old_log_probs"]
 
-                    loss_mode = self.config.policy_loss.get("loss_mode", "vanilla")
                     # vanilla -> verl.trainer.ppo.core_algos.compute_policy_loss_vanilla
 
                     # Extract pre-computed rollout correction weights if present
@@ -464,14 +468,20 @@ class DataParallelPPOActor(BasePPOActor):
                     policy_loss_fn = get_policy_loss_fn(loss_mode)
 
                     # Compute policy loss (any function is expected to return 2 values)
+                    policy_loss_kwargs = {
+                        "old_log_prob": old_log_prob,
+                        "log_prob": log_prob,
+                        "advantages": advantages,
+                        "response_mask": response_mask,
+                        "loss_agg_mode": loss_agg_mode,
+                        "config": self.config,
+                        "rollout_is_weights": rollout_is_weights,
+                    }
+                    if loss_mode == "turn_ppo":
+                        policy_loss_kwargs["turn_ids"] = model_inputs["turn_ids"]
+
                     pg_loss, pg_metrics = policy_loss_fn(
-                        old_log_prob=old_log_prob,
-                        log_prob=log_prob,
-                        advantages=advantages,
-                        response_mask=response_mask,
-                        loss_agg_mode=loss_agg_mode,
-                        config=self.config,
-                        rollout_is_weights=rollout_is_weights,
+                        **policy_loss_kwargs,
                     )
                     micro_batch_metrics.update(pg_metrics)
 

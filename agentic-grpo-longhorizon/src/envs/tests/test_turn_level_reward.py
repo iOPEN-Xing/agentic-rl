@@ -64,6 +64,17 @@ def test_progress_potential_rewards_verifiable_data_chain():
     assert -1.0 <= reward <= 1.0
 
 
+def test_progress_potential_does_not_leak_terminal_outcome():
+    state = _state([_action("get_user_details")])
+    failed_potential = _compute_progress_potential(state)
+
+    state["total_reward"] = 1.0
+    assert _compute_progress_potential(state) == pytest.approx(failed_potential)
+
+    state["done"] = True
+    assert _compute_progress_potential(state) == pytest.approx(0.0)
+
+
 def test_failed_placeholder_action_is_penalized():
     state = _state([
         _action(

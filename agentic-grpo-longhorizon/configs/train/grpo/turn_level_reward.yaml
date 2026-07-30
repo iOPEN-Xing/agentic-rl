@@ -1,4 +1,4 @@
-# Turn-level reward experiment.
+# Turn-PPO experiment with native terminal τ-bench reward.
 hydra:
   searchpath:
     - pkg://verl/trainer/config
@@ -10,7 +10,7 @@ defaults:
 data:
   train_files: experiments/vanilla/train.parquet
   val_files: experiments/vanilla/val.parquet
-  train_batch_size: 4
+  train_batch_size: 32
   max_prompt_length: 8192
   max_response_length: 12288
   return_raw_chat: true
@@ -33,13 +33,15 @@ actor_rollout_ref:
       param_offload: true
       model_dtype: bf16
     optim:
-      lr: 5.0e-6
+      lr: 1.0e-6
     use_kl_loss: true
     kl_loss_coef: 0.01
     kl_loss_type: low_var_kl
     use_fused_kernels: true
-    ppo_mini_batch_size: 4
+    ppo_mini_batch_size: 32
     ppo_micro_batch_size_per_gpu: 1
+    policy_loss:
+      loss_mode: turn_ppo
   rollout:
     name: vllm
     mode: async
@@ -51,8 +53,8 @@ actor_rollout_ref:
       max_user_turns: 15
       max_assistant_turns: 15
       tool_config_path: configs/tool_config/tau_bench_airline_tools.yaml
-      interaction_config_path: configs/interaction_config/tau_bench_airline_turn_reward.yaml
-    n: 8
+      interaction_config_path: configs/interaction_config/tau_bench_airline.yaml
+    n: 1
     temperature: 0.7
     top_p: 0.9
     tensor_model_parallel_size: 4
@@ -81,26 +83,41 @@ actor_rollout_ref:
         attn_implementation: flash_attention_2
     log_prob_micro_batch_size_per_gpu: 1
 
+critic:
+  model:
+    path: ${actor_rollout_ref.model.path}
+    tokenizer_path: ${actor_rollout_ref.model.path}
+    enable_gradient_checkpointing: true
+    fsdp_config:
+      optimizer_offload: true
+      param_offload: true
+      model_dtype: bf16
+    override_config:
+      attn_implementation: flash_attention_2
+  ppo_micro_batch_size_per_gpu: 1
+  optim:
+    lr: 1.0e-5
+
 algorithm:
-  adv_estimator: grpo
+  adv_estimator: turn_gae
+  gamma: 0.99
+  lam: 0.9
+  use_kl_in_reward: false
   kl_ctrl:
     kl_coef: 0.01
   rollout_correction:
     bypass_mode: true
   turn_level_reward:
-    enabled: true
-    outcome_weight: 1.0
-    turn_weight: 0.3
-    normalize_by_count: true
+    enabled: false
 
 trainer:
   total_epochs: 50
   total_training_steps: 500
   save_freq: 50
   test_freq: 100
-  default_local_dir: experiments/turn_level_reward/checkpoints
+  default_local_dir: experiments/turn_ppo/checkpoints
   logger: [console, wandb]
   project_name: agentic-grpo-longhorizon
-  experiment_name: turn_level_reward
+  experiment_name: turn_ppo
   n_gpus_per_node: 4
   nnodes: 1

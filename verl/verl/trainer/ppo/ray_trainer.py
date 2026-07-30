@@ -263,6 +263,23 @@ def compute_advantage(
                 config.pf_ppo.get("reweight_method"),
                 config.pf_ppo.get("weight_pow"),
             )
+    elif adv_estimator == AdvantageEstimator.TURN_GAE:
+        required_keys = {"token_level_rewards", "values", "response_mask", "turn_ids"}
+        missing_keys = sorted(required_keys - set(data.batch.keys()))
+        if missing_keys:
+            raise ValueError(f"turn_gae requires batch keys: {missing_keys}")
+
+        advantages, returns, turn_value_mask = core_algos.compute_turn_gae_advantage_return(
+            token_level_rewards=data.batch["token_level_rewards"],
+            values=data.batch["values"],
+            response_mask=data.batch["response_mask"],
+            turn_ids=data.batch["turn_ids"],
+            gamma=gamma,
+            lam=lam,
+        )
+        data.batch["advantages"] = advantages
+        data.batch["returns"] = returns
+        data.batch["turn_value_mask"] = turn_value_mask
     elif adv_estimator == AdvantageEstimator.GRPO:
         # Initialize the mask for GRPO calculation
         grpo_calculation_mask = data.batch["response_mask"]

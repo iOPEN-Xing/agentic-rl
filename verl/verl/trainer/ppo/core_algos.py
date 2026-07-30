@@ -96,6 +96,7 @@ class AdvantageEstimator(str, Enum):
     """
 
     GAE = "gae"
+    TURN_GAE = "turn_gae"
     GRPO = "grpo"
     REINFORCE_PLUS_PLUS = "reinforce_plus_plus"
     REINFORCE_PLUS_PLUS_BASELINE = "reinforce_plus_plus_baseline"
@@ -259,6 +260,131 @@ def compute_gae_advantage_return(
         returns = advantages + values
         advantages = verl_F.masked_whiten(advantages, response_mask)
     return advantages, returns
+
+
+def _validate_turn_ids(turn_ids: torch.Tensor, response_mask: torch.Tensor) -> list[list[int]]:
+    """Validate one-based, contiguous turn identity on trainable tokens."""
+    if turn_ids.shape != response_mask.shape:
+        raise ValueError(
+            f"turn_ids and response_mask must have identical shapes: {turn_ids.shape} != {response_mask.shape}"
+        )
+    if turn_ids.ndim != 2:
+        raise ValueError(f"turn_ids must be rank 2, got shape {tuple(turn_ids.shape)}")
+    if turn_ids.dtype == torch.bool or turn_ids.is_floating_point() or turn_ids.is_complex():
+        raise ValueError(f"turn_ids must use an integer dtype, got {turn_ids.dtype}")
+
+    active_mask = response_mask.bool()
+    if torch.any(turn_ids[active_mask] <= 0):
+        raise ValueError("every trainable response token must have a positive turn id")
+    if torch.any(turn_ids[~active_mask] != 0):
+        raise ValueError("environment and padding tokens must have turn id zero")
+
+    batch_turn_ids: list[list[int]] = []
+    for batch_index in range(turn_ids.shape[0]):
+        active_positions = torch.nonzero(active_mask[batch_index], as_tuple=False).flatten()
+        active_ids = turn_ids[batch_index][active_mask[batch_index]]
+        if active_ids.numel() == 0:
+            batch_turn_ids.append([])
+            continue
+        if int(active_ids[0].item()) != 1:
+            raise ValueError(f"turn ids must start from one at batch {batch_index}")
+        if active_ids.numel() > 1:
+            id_deltas = active_ids[1:] - active_ids[:-1]
+            if torch.any((id_deltas < 0) | (id_deltas > 1)):
+                raise ValueError(
+                    f"turn ids must be chronological and contiguous from one at batch {batch_index}"
+                )
+            position_deltas = active_positions[1:] - active_positions[:-1]
+            if torch.any((id_deltas == 0) & (position_deltas != 1)):
+                raise ValueError(
+                    f"tokens for each turn must form one contiguous assistant span at batch {batch_index}"
+                )
+        ids = list(range(1, int(active_ids[-1].item()) + 1))
+        batch_turn_ids.append(ids)
+    return batch_turn_ids
+
+
+@register_adv_est(AdvantageEstimator.TURN_GAE)
+def compute_turn_gae_advantage_return(
+    token_level_rewards: torch.Tensor,
+    values: torch.Tensor,
+    response_mask: torch.Tensor,
+    turn_ids: torch.Tensor,
+    gamma: float,
+    lam: float,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Compute GAE over assistant turns using a terminal trajectory reward.
+
+    veRL value predictions are shifted by one token. The value at the first
+    assistant token of a turn is therefore conditioned on the complete user or
+    tool observation immediately before that assistant response.
+
+    Source: Turn-PPO, Sections 2.3–2.4.
+    https://arxiv.org/html/2512.17008v2
+    """
+    if not 0.0 <= gamma <= 1.0:
+        raise ValueError(f"gamma must be in [0, 1], got {gamma}")
+    if not 0.0 <= lam <= 1.0:
+        raise ValueError(f"lambda must be in [0, 1], got {lam}")
+    if token_level_rewards.shape != response_mask.shape or values.shape != response_mask.shape:
+        raise ValueError(
+            "token_level_rewards, values, and response_mask must have identical shapes: "
+            f"{token_level_rewards.shape}, {values.shape}, {response_mask.shape}"
+        )
+
+    batch_turn_ids = _validate_turn_ids(turn_ids, response_mask)
+    with torch.no_grad():
+        raw_advantages = torch.zeros_like(values, dtype=torch.float32)
+        returns = torch.zeros_like(values, dtype=torch.float32)
+        turn_start_mask = torch.zeros_like(response_mask, dtype=torch.float32)
+        turn_value_mask = torch.zeros_like(response_mask, dtype=torch.float32)
+        turn_starts_by_batch: list[list[int]] = []
+
+        trajectory_rewards = token_level_rewards.to(torch.float32).sum(dim=-1)
+        for batch_index, ids in enumerate(batch_turn_ids):
+            if not ids:
+                turn_starts_by_batch.append([])
+                continue
+
+            starts = [
+                int(torch.nonzero(turn_ids[batch_index].eq(turn_id), as_tuple=False)[0].item())
+                for turn_id in ids
+            ]
+            turn_starts_by_batch.append(starts)
+            state_values = values[batch_index, starts].to(torch.float32)
+            turn_rewards = torch.zeros_like(state_values)
+            turn_rewards[-1] = trajectory_rewards[batch_index]
+
+            next_advantage = torch.zeros((), device=values.device, dtype=torch.float32)
+            for turn_offset in range(len(starts) - 1, -1, -1):
+                next_value = (
+                    state_values[turn_offset + 1]
+                    if turn_offset + 1 < len(starts)
+                    else torch.zeros((), device=values.device, dtype=torch.float32)
+                )
+                delta = turn_rewards[turn_offset] + gamma * next_value - state_values[turn_offset]
+                next_advantage = delta + gamma * lam * next_advantage
+
+                start = starts[turn_offset]
+                raw_advantages[batch_index, start] = next_advantage
+                returns[batch_index, start] = next_advantage + state_values[turn_offset]
+                turn_start_mask[batch_index, start] = 1.0
+                turn_value_mask[batch_index, start] = 1.0 / len(starts)
+
+        turn_count = int(turn_start_mask.sum().item())
+        if turn_count > 1:
+            normalized_start_advantages = verl_F.masked_whiten(raw_advantages, turn_start_mask)
+        else:
+            normalized_start_advantages = raw_advantages
+
+        advantages = torch.zeros_like(values, dtype=torch.float32)
+        for batch_index, (ids, starts) in enumerate(zip(batch_turn_ids, turn_starts_by_batch, strict=True)):
+            for turn_id, start in zip(ids, starts, strict=True):
+                advantages[batch_index, turn_ids[batch_index].eq(turn_id)] = normalized_start_advantages[
+                    batch_index, start
+                ]
+
+    return advantages, returns, turn_value_mask
 
 
 # NOTE(sgm): this implementation only consider outcome supervision, where the reward is a scalar.
@@ -1127,6 +1253,99 @@ def compute_policy_loss_vanilla(
         "actor/pg_clipfrac": pg_clipfrac.detach().item(),
         "actor/ppo_kl": ppo_kl.detach().item(),
         "actor/pg_clipfrac_lower": pg_clipfrac_lower.detach().item(),
+    }
+    return pg_loss, pg_metrics
+
+
+@register_policy_loss("turn_ppo")  # type: ignore[arg-type]
+def compute_policy_loss_turn_ppo(
+    old_log_prob: torch.Tensor,
+    log_prob: torch.Tensor,
+    advantages: torch.Tensor,
+    response_mask: torch.Tensor,
+    loss_agg_mode: str = "token-mean",
+    config: Optional[DictConfig | ActorConfig] = None,
+    rollout_is_weights: torch.Tensor | None = None,
+    turn_ids: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, dict[str, Any]]:
+    """Compute the Turn-PPO clipped objective over complete assistant responses.
+
+    The importance ratio is the product of token ratios in a turn. Losses are
+    summed over turns, normalized by the trajectory's total assistant-token
+    count, and then averaged over trajectories. This is the reduction in
+    Turn-PPO Table 1: each turn ratio already contains the gradient contribution
+    of every token in that response.
+
+    Source: Turn-PPO, Table 1 and Section 2.4.
+    https://arxiv.org/html/2512.17008v2
+    """
+    del loss_agg_mode  # Turn-PPO has a fixed trajectory-mean/token-normalized reduction.
+    if config is None:
+        raise ValueError("actor config is required for Turn-PPO policy loss")
+    if turn_ids is None:
+        raise ValueError("turn_ids are required for Turn-PPO policy loss")
+    if (
+        old_log_prob.shape != log_prob.shape
+        or log_prob.shape != advantages.shape
+        or log_prob.shape != response_mask.shape
+    ):
+        raise ValueError(
+            "old_log_prob, log_prob, advantages, and response_mask must have identical shapes: "
+            f"{old_log_prob.shape}, {log_prob.shape}, {advantages.shape}, {response_mask.shape}"
+        )
+    if rollout_is_weights is not None:
+        raise ValueError(
+            "Turn-PPO does not define an additional token/sequence rollout-IS "
+            "multiplier; disable rollout_is and use the turn PPO ratio directly"
+        )
+
+    batch_turn_ids = _validate_turn_ids(turn_ids, response_mask)
+    clip_ratio_low = config.clip_ratio_low if config.clip_ratio_low is not None else config.clip_ratio
+    clip_ratio_high = config.clip_ratio_high if config.clip_ratio_high is not None else config.clip_ratio
+    token_log_ratios = log_prob - old_log_prob
+
+    trajectory_losses: list[torch.Tensor] = []
+    trajectory_clip_fractions: list[torch.Tensor] = []
+    trajectory_kls: list[torch.Tensor] = []
+    turns_per_trajectory: list[int] = []
+
+    for batch_index, ids in enumerate(batch_turn_ids):
+        if not ids:
+            raise ValueError(f"Turn-PPO received a trajectory without assistant turns at batch {batch_index}")
+
+        turn_losses: list[torch.Tensor] = []
+        turn_was_clipped: list[torch.Tensor] = []
+        turn_kls: list[torch.Tensor] = []
+        for turn_id in ids:
+            token_mask = turn_ids[batch_index].eq(turn_id) & response_mask[batch_index].bool()
+            turn_log_ratio = token_log_ratios[batch_index][token_mask].sum()
+            stable_turn_log_ratio = torch.clamp(turn_log_ratio, min=-20.0, max=20.0)
+            turn_ratio = torch.exp(stable_turn_log_ratio)
+            turn_advantage = advantages[batch_index][token_mask][0]
+
+            pg_loss_unclipped = -turn_advantage * turn_ratio
+            clipped_ratio = torch.clamp(turn_ratio, 1 - clip_ratio_low, 1 + clip_ratio_high)
+            pg_loss_clipped = -turn_advantage * clipped_ratio
+            turn_loss = torch.maximum(pg_loss_unclipped, pg_loss_clipped)
+
+            turn_losses.append(turn_loss)
+            turn_was_clipped.append(torch.gt(pg_loss_clipped, pg_loss_unclipped).to(torch.float32))
+            turn_kls.append(-turn_log_ratio)
+
+        assistant_token_count = response_mask[batch_index].sum().clamp_min(1)
+        trajectory_losses.append(torch.stack(turn_losses).sum() / assistant_token_count)
+        trajectory_clip_fractions.append(torch.stack(turn_was_clipped).mean())
+        trajectory_kls.append(torch.stack(turn_kls).mean())
+        turns_per_trajectory.append(len(ids))
+
+    pg_loss = torch.stack(trajectory_losses).mean()
+    pg_clipfrac = torch.stack(trajectory_clip_fractions).mean()
+    ppo_kl = torch.stack(trajectory_kls).mean()
+    pg_metrics = {
+        "actor/pg_clipfrac": pg_clipfrac.detach().item(),
+        "actor/ppo_kl": ppo_kl.detach().item(),
+        "actor/pg_clipfrac_lower": 0.0,
+        "actor/turn_ppo_turns_per_sequence": sum(turns_per_trajectory) / len(turns_per_trajectory),
     }
     return pg_loss, pg_metrics
 

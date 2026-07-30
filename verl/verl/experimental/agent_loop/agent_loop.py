@@ -29,8 +29,9 @@ from pydantic import BaseModel, ConfigDict
 from tensordict import TensorDict
 from transformers import AutoProcessor, AutoTokenizer
 
-from verl.experimental.agent_loop.reward_utils import materialize_turn_rewards
 from verl.experimental.agent_loop.prometheus_utils import update_prometheus_config
+from verl.experimental.agent_loop.reward_utils import materialize_turn_rewards
+from verl.experimental.agent_loop.turn_ppo_utils import materialize_turn_ids
 from verl.experimental.agent_loop.utils import resolve_config_path
 from verl.experimental.reward import RewardManagerWorker
 from verl.protocol import DataProto
@@ -577,6 +578,12 @@ class AgentLoopWorkerBase:
             )
             batch["turn_level_rewards"] = turn_level_rewards
             batch["turn_level_reward_mask"] = turn_level_reward_mask
+
+        assistant_turn_spans = [
+            input.extra_fields.get("assistant_turn_spans", []) for input in inputs
+        ]
+        if any("assistant_turn_spans" in input.extra_fields for input in inputs):
+            batch["turn_ids"] = materialize_turn_ids(assistant_turn_spans, response_mask)
 
         scores = [input.reward_score for input in inputs]
         # W5 conditional PRM: support dict reward_score from interaction

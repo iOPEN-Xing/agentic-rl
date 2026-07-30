@@ -84,13 +84,19 @@ def need_reward_model(
 
 def need_critic(config: DictConfig) -> bool:
     """Given a config, do we need critic."""
+    if (
+        config.algorithm.adv_estimator == AdvantageEstimator.TURN_GAE
+        and config.critic.enable is False
+    ):
+        raise ValueError("turn_gae requires a learned critic and cannot be used with critic.enable=False")
     if config.critic.enable is not None:
         return bool(config.critic.enable)
-    elif config.algorithm.adv_estimator == AdvantageEstimator.GAE:
+    elif config.algorithm.adv_estimator in (AdvantageEstimator.GAE, AdvantageEstimator.TURN_GAE):
         return True
     else:
         warnings.warn(
-            "Disabled critic as algorithm.adv_estimator != gae. If it is not intended, please set critic.enable=True",
+            "Disabled critic because the advantage estimator does not require one. "
+            "If this is not intended, set critic.enable=True.",
             stacklevel=2,
         )
         return False

@@ -358,6 +358,12 @@ def _score_turn_actions(action_history: list[dict], start_index: int) -> float:
 
 def _compute_progress_potential(state: dict) -> float:
     """Bounded, task-agnostic progress potential derived from verifiable events."""
+    # Episodic potential shaping requires a fixed terminal potential. Do not
+    # encode the terminal outcome in Phi; the outcome already belongs to the
+    # environment reward.
+    if state.get("done", False):
+        return 0.0
+
     history = state.get("action_history", [])
     unique_reads = {
         action.get("tool") for action in history
@@ -376,7 +382,6 @@ def _compute_progress_potential(state: dict) -> float:
         0.30 * min(len(unique_reads) / 4.0, 1.0)
         + 0.30 * min(successful_writes / 2.0, 1.0)
         + 0.20 * min(chained_actions / 2.0, 1.0)
-        + 0.20 * float(state.get("total_reward", 0.0) >= 1.0)
     )
     return max(0.0, min(1.0, potential))
 
@@ -503,10 +508,14 @@ class TauBenchInteraction(BaseInteraction):
             task_split=self.task_split,
             task_index=task_id_int,
         )
-        # τ-bench 的 reset 在 get_env 里已经调过一次,但显式再 reset 一遍稳妥
-        env.reset(task_index=task_id_int)
+        # τ-bench reset 返回的 observation 是首条用户任务，必须进入 policy 的 s_1。
+        reset_response = env.reset(task_index=task_id_int)
+        initial_observation = str(getattr(reset_response, "observation", "") or "")
+        if not initial_observation:
+            raise RuntimeError(f"τ-bench reset returned an empty initial observation for task {task_id_int}")
 
         state = make_initial_state(task_id_int)
+        state["initial_observation"] = initial_observation
 
         # 关键: 绑定到当前 asyncio task 的 context
         # 同一个 coroutine 后续的 Tool.execute 会读到这里 set 的 env
@@ -521,6 +530,14 @@ class TauBenchInteraction(BaseInteraction):
             f"env_id={id(env)}"
         )
         return instance_id
+
+    async def get_initial_observation(self, instance_id: str, **kwargs) -> str:
+        entry = self._instance_dict.get(instance_id)
+        if entry is None:
+            raise RuntimeError(
+                f"TauBenchInteraction has no initialized state for instance_id={instance_id}"
+            )
+        return str(entry["state"]["initial_observation"])
 
     async def generate_response(
         self,
@@ -635,6 +652,10 @@ class TauBenchInteraction(BaseInteraction):
         state["num_user_turns"] += 1
 
         total_turns = state["num_user_turns"] + state["num_tool_calls"]
+        episode_done = is_done or total_turns >= self.max_turns
+        if episode_done:
+            state["done"] = True
+
         turn_reward = 0.0
         turn_metadata: dict[str, Any] = {}
         if self.turn_reward_enabled:
@@ -646,8 +667,7 @@ class TauBenchInteraction(BaseInteraction):
             )
 
         # 终止条件: env 说 done / 超 max_turns
-        if is_done or total_turns >= self.max_turns:
-            state["done"] = True
+        if episode_done:
             final_score = self._compute_reward(state)
             return (
                 True,

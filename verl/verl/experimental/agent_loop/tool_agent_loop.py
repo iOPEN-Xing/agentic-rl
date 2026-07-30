@@ -22,6 +22,7 @@ from uuid import uuid4
 
 from verl.experimental.agent_loop.agent_loop import AgentLoopBase, AgentLoopOutput, register
 from verl.experimental.agent_loop.tool_parser import FunctionCall, ToolParser
+from verl.experimental.agent_loop.turn_ppo_utils import append_assistant_turn, clip_assistant_turn_spans
 from verl.experimental.agent_loop.utils import add_generation_prompt_for_gpt_oss, format_gpt_oss_tool_response_manually
 from verl.interactions.base import BaseInteraction
 
@@ -74,6 +75,7 @@ class AgentData:
         self.turn_scores: list[float] = []
         self.turn_reward_spans: list[dict[str, float | int]] = []
         self.pending_turn_start: int = 0
+        self.assistant_turn_spans: list[tuple[int, int]] = []
         self.tool_rewards: list[float] = []
         self.reasoning_tokens_per_turn: list[int] = []
         self.total_tool_calls: int = 0
@@ -146,6 +148,12 @@ class ToolAgentLoop(AgentLoopBase):
                 )
             interaction = self.interaction_map[interaction_name]
             await interaction.start_interaction(request_id, **interaction_kwargs)
+            initial_observation = await interaction.get_initial_observation(
+                request_id,
+                **interaction_kwargs,
+            )
+            if initial_observation:
+                messages.append({"role": "user", "content": initial_observation})
         # Create AgentData instance to encapsulate all state
         agent_data = AgentData(
             messages=messages,
@@ -188,8 +196,17 @@ class ToolAgentLoop(AgentLoopBase):
                     reward_score = raw_score
             except Exception as e:
                 logger.warning(f"Error calculating final score for request {agent_data.request_id}: {e}")
+            finally:
+                try:
+                    await agent_data.interaction.finalize_interaction(agent_data.request_id)
+                except Exception as e:
+                    logger.warning(f"Error finalizing interaction {agent_data.request_id}: {e}")
 
         # Finalize output
+        assistant_turn_spans = clip_assistant_turn_spans(
+            agent_data.assistant_turn_spans,
+            self.response_length,
+        )
         response_ids = agent_data.prompt_ids[-len(agent_data.response_mask) :]
         prompt_ids = agent_data.prompt_ids[: len(agent_data.prompt_ids) - len(agent_data.response_mask)]
         multi_modal_data = {"image": agent_data.image_data} if agent_data.image_data is not None else {}
@@ -209,6 +226,7 @@ class ToolAgentLoop(AgentLoopBase):
         output.extra_fields.update({
             "turn_scores": agent_data.turn_scores,
             "turn_reward_spans": agent_data.turn_reward_spans,
+            "assistant_turn_spans": assistant_turn_spans,
             "tool_rewards": agent_data.tool_rewards,
             "reasoning_tokens_per_turn": agent_data.reasoning_tokens_per_turn,
             "total_tool_calls": agent_data.total_tool_calls,
@@ -260,10 +278,17 @@ class ToolAgentLoop(AgentLoopBase):
                 image_data=agent_data.image_data,
             )
 
+        turn_start = len(agent_data.response_mask)
         agent_data.assistant_turns += 1
         agent_data.response_ids = output.token_ids
         agent_data.prompt_ids += agent_data.response_ids
         agent_data.response_mask += [1] * len(agent_data.response_ids)
+        if agent_data.response_ids:
+            append_assistant_turn(
+                agent_data.assistant_turn_spans,
+                turn_start,
+                len(agent_data.response_mask),
+            )
         if output.log_probs:
             agent_data.response_logprobs += output.log_probs
 
@@ -316,7 +341,9 @@ class ToolAgentLoop(AgentLoopBase):
         # Process tool responses and update multi_modal_data
         # Removed: agent_data.new_images_this_turn = []
         agent_data.total_tool_calls += len(agent_data.tool_calls)
-        for tool_response, tool_reward, _ in responses:
+        environment_done = False
+        for tool_response, tool_reward, tool_metadata in responses:
+            environment_done = environment_done or bool(tool_metadata.get("done", False))
             if tool_response.text and tool_response.text.startswith("Error:"):
                 agent_data.total_errors += 1
             # Create message from tool response
@@ -419,6 +446,8 @@ class ToolAgentLoop(AgentLoopBase):
         if agent_data.response_logprobs:
             agent_data.response_logprobs += [0.0] * len(response_ids)
         agent_data.user_turns += 1
+        if environment_done:
+            return AgentState.TERMINATED
         return AgentState.GENERATING
 
     async def _handle_interacting_state(self, agent_data: AgentData) -> AgentState:
