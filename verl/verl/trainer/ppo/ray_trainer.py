@@ -186,6 +186,8 @@ def compute_advantage(
     num_repeat: int = 1,
     norm_adv_by_std_in_grpo: bool = True,
     config: Optional[AlgoConfig] = None,
+    global_step: int = 0,
+    total_steps: Optional[int] = None,
 ) -> DataProto:
     """Compute advantage estimates for policy optimization.
 
@@ -201,6 +203,8 @@ def compute_advantage(
         norm_adv_by_std_in_grpo (bool, optional): Whether to normalize advantages by standard deviation in
             GRPO. Defaults to True.
         config (dict, optional): Configuration dictionary for algorithm settings. Defaults to None.
+        global_step (int, optional): Current optimizer step for scheduled estimators.
+        total_steps (int, optional): Total optimizer steps for scheduled estimators.
 
     Returns:
         DataProto: The updated data with computed advantages and returns.
@@ -251,6 +255,23 @@ def compute_advantage(
             adv_kwargs["index"] = data.non_tensor_batch["uid"]
         if "reward_baselines" in data.batch:  # optional
             adv_kwargs["reward_baselines"] = data.batch["reward_baselines"]
+
+        if adv_estimator == "grpo_hybrid":
+            required_fields = ("assistant_turn_spans", "assistant_turn_rewards")
+            missing_fields = [key for key in required_fields if key not in data.non_tensor_batch]
+            if missing_fields:
+                raise ValueError(
+                    "grpo_hybrid requires rollout turn events in non_tensor_batch; "
+                    f"missing {missing_fields}"
+                )
+            adv_kwargs.update(
+                {
+                    "assistant_turn_spans": data.non_tensor_batch["assistant_turn_spans"],
+                    "assistant_turn_rewards": data.non_tensor_batch["assistant_turn_rewards"],
+                    "global_step": global_step,
+                    "total_steps": total_steps,
+                }
+            )
 
         # calculate advantage estimator
         advantages, returns = adv_estimator_fn(**adv_kwargs)
@@ -1265,6 +1286,8 @@ class RayPPOTrainer:
                             num_repeat=self.config.actor_rollout_ref.rollout.n,
                             norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo,
                             config=self.config.algorithm,
+                            global_step=self.global_steps,
+                            total_steps=self.total_training_steps,
                         )
 
                     # update critic

@@ -31,6 +31,7 @@ from omegaconf import DictConfig
 
 import verl.utils.torch_functional as verl_F
 from verl.trainer.config import AlgoConfig
+from verl.trainer.ppo.hybrid_advantage import compute_grpo_hybrid_advantage
 from verl.utils import as_torch_index, group_mean_std
 from verl.utils.import_utils import deprecated
 from verl.workers.config import ActorConfig
@@ -327,6 +328,9 @@ def compute_grpo_outcome_advantage(
         scores = scores.unsqueeze(-1) * response_mask
 
     return scores, scores
+
+
+register_adv_est("grpo_hybrid")(compute_grpo_hybrid_advantage)
 
 
 # W4 Exp 2: Turn-discounted GRPO advantage

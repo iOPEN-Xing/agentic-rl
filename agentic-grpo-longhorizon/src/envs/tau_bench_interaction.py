@@ -392,7 +392,7 @@ class TauBenchInteraction(BaseInteraction):
             (should_terminate, user_response_content, reward, metadata)
             - should_terminate: True 则本 trajectory 结束
             - user_response_content: 返回给模型的 user reply(空串 = terminate 时不需要)
-            - reward: 本 turn 的 reward(终止时是 final outcome reward,否则 0)
+            - reward: incremental environment reward for this user event
             - metadata: 诊断用(num_turns, contaminated, error 等)
         """
         entry = self._instance_dict.get(instance_id)
@@ -500,8 +500,9 @@ class TauBenchInteraction(BaseInteraction):
             return (
                 True,
                 "",
-                final_score,
+                inc_reward,
                 {
+                    "session_score": final_score,
                     "total_reward": state["total_reward"],
                     "num_turns": total_turns,
                     "num_tool_calls": state["num_tool_calls"],
@@ -518,7 +519,7 @@ class TauBenchInteraction(BaseInteraction):
         return (
             False,
             user_reply,
-            0.0,
+            inc_reward,
             {
                 "turn": total_turns,
                 "num_tool_calls": state["num_tool_calls"],
