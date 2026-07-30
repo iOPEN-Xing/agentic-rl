@@ -292,6 +292,134 @@ def _compute_prm_lite_reward(state: dict) -> float:
     return outcome + 0.3 * process_score
 
 
+def compute_potential_shaping(
+    previous_potential: float,
+    current_potential: float,
+    gamma: float = 0.99,
+) -> float:
+    """Policy-invariant potential shaping: F(s, s') = gamma * Phi(s') - Phi(s)."""
+    if not 0.0 <= gamma <= 1.0:
+        raise ValueError(f"gamma must be in [0, 1], got {gamma}")
+    return gamma * float(current_potential) - float(previous_potential)
+
+
+def _uses_extracted_entity(action_history: list[dict], action_index: int) -> bool:
+    params = action_history[action_index].get("parameters", {})
+    if not params:
+        return False
+    seen_entities: set[str] = set()
+    for previous in action_history[:action_index]:
+        for values in previous.get("extracted_entities", {}).values():
+            seen_entities.update(str(value) for value in values)
+    return any(isinstance(value, str) and value in seen_entities for value in params.values())
+
+
+def _score_turn_actions(action_history: list[dict], start_index: int) -> float:
+    """Score only actions first observed in the current user turn, on a bounded scale."""
+    if start_index >= len(action_history):
+        return 0.0
+
+    scores: list[float] = []
+    for action_index in range(start_index, len(action_history)):
+        action = action_history[action_index]
+        tool = action.get("tool", "")
+        if tool in _THINK_TOOLS:
+            continue
+
+        params = action.get("parameters", {})
+        is_error = bool(action.get("is_error", False))
+        score = -0.35 if is_error else 0.20
+
+        if _has_placeholder(params):
+            score -= 0.20
+        if _is_redundant(action_history[:action_index], tool, params):
+            score -= 0.20
+        if _uses_extracted_entity(action_history, action_index):
+            score += 0.25
+        if tool in _READ_TOOLS:
+            previous_reads = {
+                item.get("tool") for item in action_history[:action_index]
+                if item.get("tool") in _READ_TOOLS
+            }
+            if tool not in previous_reads:
+                score += 0.10
+        if tool in _WRITE_TOOLS and not is_error:
+            score += 0.15
+        if tool in _ESCALATION_TOOLS:
+            attempted_read = any(
+                item.get("tool") in _READ_TOOLS for item in action_history[:action_index]
+            )
+            score -= 0.20 if attempted_read else 0.40
+
+        scores.append(max(-1.0, min(1.0, score)))
+
+    return sum(scores) / len(scores) if scores else 0.0
+
+
+def _compute_progress_potential(state: dict) -> float:
+    """Bounded, task-agnostic progress potential derived from verifiable events."""
+    history = state.get("action_history", [])
+    unique_reads = {
+        action.get("tool") for action in history
+        if action.get("tool") in _READ_TOOLS and not action.get("is_error", False)
+    }
+    successful_writes = sum(
+        1 for action in history
+        if action.get("tool") in _WRITE_TOOLS and not action.get("is_error", False)
+    )
+    chained_actions = sum(
+        1 for index in range(len(history))
+        if _uses_extracted_entity(history, index)
+    )
+
+    potential = (
+        0.30 * min(len(unique_reads) / 4.0, 1.0)
+        + 0.30 * min(successful_writes / 2.0, 1.0)
+        + 0.20 * min(chained_actions / 2.0, 1.0)
+        + 0.20 * float(state.get("total_reward", 0.0) >= 1.0)
+    )
+    return max(0.0, min(1.0, potential))
+
+
+def _compute_turn_reward(
+    state: dict,
+    *,
+    gamma: float = 0.99,
+    process_weight: float = 0.6,
+    shaping_weight: float = 0.4,
+) -> tuple[float, dict[str, float | int]]:
+    """Compute one incremental reward without recounting actions from earlier turns."""
+    if process_weight < 0.0 or shaping_weight < 0.0:
+        raise ValueError("turn reward weights must be non-negative")
+    weight_sum = process_weight + shaping_weight
+    if weight_sum <= 0.0:
+        raise ValueError("at least one turn reward weight must be positive")
+
+    history = state.get("action_history", [])
+    cursor = int(state.get("turn_reward_action_cursor", 0))
+    cursor = max(0, min(cursor, len(history)))
+    process_score = _score_turn_actions(history, cursor)
+
+    previous_potential = float(state.get("turn_reward_prev_potential", 0.0))
+    current_potential = _compute_progress_potential(state)
+    shaping = compute_potential_shaping(previous_potential, current_potential, gamma)
+
+    reward = (process_weight * process_score + shaping_weight * shaping) / weight_sum
+    reward = max(-1.0, min(1.0, float(reward)))
+
+    state["turn_reward_action_cursor"] = len(history)
+    state["turn_reward_prev_potential"] = current_potential
+    state.setdefault("turn_rewards", []).append(reward)
+    return reward, {
+        "turn_reward": reward,
+        "turn_process_score": process_score,
+        "turn_shaping": shaping,
+        "turn_potential": current_potential,
+        "turn_new_actions": len(history) - cursor,
+    }
+
+
+
 _REWARD_FUNCTIONS = {
     "binary": _compute_binary_reward,
     "partial_credit": _compute_partial_credit_reward,
@@ -325,6 +453,21 @@ class TauBenchInteraction(BaseInteraction):
             )
         self._compute_reward = _REWARD_FUNCTIONS[self.reward_mode]
         logger.info(f"[TauBenchInteraction] reward_mode={self.reward_mode}")
+        self.turn_reward_enabled = bool(config.get("turn_reward_enabled", False))
+        self.turn_reward_gamma = float(config.get("turn_reward_gamma", 0.99))
+        self.turn_reward_process_weight = float(config.get("turn_reward_process_weight", 0.6))
+        self.turn_reward_shaping_weight = float(config.get("turn_reward_shaping_weight", 0.4))
+        if not 0.0 <= self.turn_reward_gamma <= 1.0:
+            raise ValueError("turn_reward_gamma must be in [0, 1]")
+        if self.turn_reward_process_weight < 0.0 or self.turn_reward_shaping_weight < 0.0:
+            raise ValueError("turn reward weights must be non-negative")
+        if self.turn_reward_process_weight + self.turn_reward_shaping_weight <= 0.0:
+            raise ValueError("at least one turn reward weight must be positive")
+        logger.info(
+            "[TauBenchInteraction] turn_reward_enabled=%s gamma=%.3f",
+            self.turn_reward_enabled,
+            self.turn_reward_gamma,
+        )
 
         self._instance_dict: dict[str, dict] = {}
 
@@ -492,6 +635,15 @@ class TauBenchInteraction(BaseInteraction):
         state["num_user_turns"] += 1
 
         total_turns = state["num_user_turns"] + state["num_tool_calls"]
+        turn_reward = 0.0
+        turn_metadata: dict[str, Any] = {}
+        if self.turn_reward_enabled:
+            turn_reward, turn_metadata = _compute_turn_reward(
+                state,
+                gamma=self.turn_reward_gamma,
+                process_weight=self.turn_reward_process_weight,
+                shaping_weight=self.turn_reward_shaping_weight,
+            )
 
         # 终止条件: env 说 done / 超 max_turns
         if is_done or total_turns >= self.max_turns:
@@ -500,9 +652,10 @@ class TauBenchInteraction(BaseInteraction):
             return (
                 True,
                 "",
-                final_score,
+                turn_reward if self.turn_reward_enabled else final_score,
                 {
                     "total_reward": state["total_reward"],
+                    "final_score": final_score,
                     "num_turns": total_turns,
                     "num_tool_calls": state["num_tool_calls"],
                     "num_user_turns": state["num_user_turns"],
@@ -510,6 +663,7 @@ class TauBenchInteraction(BaseInteraction):
                     "reason": "done" if is_done else "max_turns",
                     "reward_mode": self.reward_mode,
                     "transferred_to_human": state.get("transferred_to_human", False),
+                    **turn_metadata,
                 },
             )
 
@@ -518,11 +672,12 @@ class TauBenchInteraction(BaseInteraction):
         return (
             False,
             user_reply,
-            0.0,
+            turn_reward,
             {
                 "turn": total_turns,
                 "num_tool_calls": state["num_tool_calls"],
                 "task_id": state["task_id"],
+                **turn_metadata,
             },
         )
 

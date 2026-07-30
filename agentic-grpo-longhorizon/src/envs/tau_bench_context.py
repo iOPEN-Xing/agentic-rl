@@ -45,4 +45,7 @@ def make_initial_state(task_id: int) -> dict:
         # W4 ablation fields
         "action_history": [],
         "transferred_to_human": False,
+        "turn_reward_action_cursor": 0,
+        "turn_reward_prev_potential": 0.0,
+        "turn_rewards": [],
     }

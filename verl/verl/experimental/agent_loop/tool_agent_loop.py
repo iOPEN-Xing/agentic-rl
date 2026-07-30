@@ -72,6 +72,8 @@ class AgentData:
         self.response_mask: list[int] = []
         self.response_logprobs: list[float] = []
         self.turn_scores: list[float] = []
+        self.turn_reward_spans: list[dict[str, float | int]] = []
+        self.pending_turn_start: int = 0
         self.tool_rewards: list[float] = []
         self.reasoning_tokens_per_turn: list[int] = []
         self.total_tool_calls: int = 0
@@ -206,6 +208,7 @@ class ToolAgentLoop(AgentLoopBase):
         )
         output.extra_fields.update({
             "turn_scores": agent_data.turn_scores,
+            "turn_reward_spans": agent_data.turn_reward_spans,
             "tool_rewards": agent_data.tool_rewards,
             "reasoning_tokens_per_turn": agent_data.reasoning_tokens_per_turn,
             "total_tool_calls": agent_data.total_tool_calls,
@@ -433,8 +436,16 @@ class ToolAgentLoop(AgentLoopBase):
         add_messages: list[dict[str, Any]] = [{"role": "user", "content": interaction_responses}]
         agent_data.messages.extend(add_messages)
 
+        turn_end = len(agent_data.response_mask)
         if reward is not None:
-            agent_data.turn_scores.append(reward)
+            scalar_reward = float(reward)
+            agent_data.turn_scores.append(scalar_reward)
+            if turn_end > agent_data.pending_turn_start:
+                agent_data.turn_reward_spans.append({
+                    "start": agent_data.pending_turn_start,
+                    "end": turn_end,
+                    "reward": scalar_reward,
+                })
 
         # Update prompt with user responses (similar to _handle_processing_tools_state)
         if self.processor is not None:
@@ -462,6 +473,7 @@ class ToolAgentLoop(AgentLoopBase):
         if agent_data.response_logprobs:
             agent_data.response_logprobs += [0.0] * len(response_ids)
 
+        agent_data.pending_turn_start = len(agent_data.response_mask)
         # double check prompt
         # Check termination condition
         if should_terminate_sequence:
