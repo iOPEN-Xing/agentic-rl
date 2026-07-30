@@ -159,6 +159,36 @@ def apply_kl_penalty(data: DataProto, kl_ctrl: core_algos.AdaptiveKLController, 
 
     return data, metrics
 
+def combine_judge_turn_rewards(
+    session_scores: torch.Tensor,
+    turn_scores: torch.Tensor,
+    turn_event_mask: torch.Tensor,
+    config: Optional[AlgoConfig] = None,
+) -> tuple[torch.Tensor, dict[str, float]]:
+    """Add a bounded mean turn signal while preserving environment-outcome dominance."""
+    if session_scores.shape != turn_scores.shape or turn_scores.shape != turn_event_mask.shape:
+        raise ValueError("session, turn score, and event mask tensors must have identical shapes")
+
+    turn_config = config.get("judge_turn_reward", {}) if config is not None else {}
+    if not bool(turn_config.get("enabled", False)):
+        return session_scores, {}
+
+    turn_weight = float(turn_config.get("turn_weight", 0.1))
+    if not 0.0 <= turn_weight <= 0.1:
+        raise ValueError("judge turn_weight must be in [0, 0.1] to preserve outcome dominance")
+
+    event_mask = turn_event_mask.to(dtype=turn_scores.dtype)
+    event_counts = event_mask.sum(dim=-1, keepdim=True).clamp_min(1.0)
+    normalized_turn_scores = turn_scores * event_mask / event_counts
+    turn_contribution = turn_weight * normalized_turn_scores
+    combined = session_scores + turn_contribution
+    metrics = {
+        "reward/judge_turn_events_per_trajectory": float(event_mask.sum(dim=-1).mean().item()),
+        "reward/judge_turn_contribution_mean": float(turn_contribution.sum(dim=-1).mean().item()),
+    }
+    return combined, metrics
+
+
 
 def compute_response_mask(data: DataProto):
     """Compute the attention mask for the response part of the sequence.
@@ -1223,7 +1253,16 @@ class RayPPOTrainer:
                         reward_extra_infos_dict: dict[str, list]
                         if self.config.reward_model.launch_reward_fn_async:
                             reward_tensor, reward_extra_infos_dict = ray.get(future_reward)
-                        batch.batch["token_level_scores"] = reward_tensor
+                        token_level_scores = reward_tensor
+                        if "turn_level_rewards" in batch.batch and "turn_level_reward_mask" in batch.batch:
+                            token_level_scores, judge_turn_metrics = combine_judge_turn_rewards(
+                                reward_tensor,
+                                batch.batch["turn_level_rewards"],
+                                batch.batch["turn_level_reward_mask"],
+                                self.config.algorithm,
+                            )
+                            metrics.update(judge_turn_metrics)
+                        batch.batch["token_level_scores"] = token_level_scores
 
                         if reward_extra_infos_dict:
                             batch.non_tensor_batch.update({k: np.array(v) for k, v in reward_extra_infos_dict.items()})
