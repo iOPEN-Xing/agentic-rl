@@ -160,6 +160,43 @@ def apply_kl_penalty(data: DataProto, kl_ctrl: core_algos.AdaptiveKLController, 
     return data, metrics
 
 
+def combine_outcome_and_turn_rewards(
+    outcome_scores: torch.Tensor,
+    turn_scores: torch.Tensor,
+    turn_event_mask: torch.Tensor,
+    config: Optional[AlgoConfig] = None,
+) -> tuple[torch.Tensor, dict[str, float]]:
+    """Blend per-turn events with the terminal score without rewarding long trajectories."""
+    if outcome_scores.shape != turn_scores.shape or turn_scores.shape != turn_event_mask.shape:
+        raise ValueError(
+            "outcome, turn score, and event mask tensors must have identical shapes"
+        )
+
+    turn_config = config.get("turn_level_reward", {}) if config is not None else {}
+    if not bool(turn_config.get("enabled", False)):
+        return outcome_scores, {}
+
+    outcome_weight = float(turn_config.get("outcome_weight", 1.0))
+    turn_weight = float(turn_config.get("turn_weight", 0.3))
+    if outcome_weight < 0.0 or turn_weight < 0.0:
+        raise ValueError("turn-level reward fusion weights must be non-negative")
+
+    event_mask = turn_event_mask.to(dtype=turn_scores.dtype)
+    masked_turn_scores = turn_scores * event_mask
+    event_counts = event_mask.sum(dim=-1, keepdim=True).clamp_min(1.0)
+    if bool(turn_config.get("normalize_by_count", True)):
+        masked_turn_scores = masked_turn_scores / event_counts
+
+    turn_contribution = turn_weight * masked_turn_scores
+    combined = outcome_weight * outcome_scores + turn_contribution
+    metrics = {
+        "reward/turn_events_per_trajectory": float(event_mask.sum(dim=-1).mean().item()),
+        "reward/turn_contribution_mean": float(turn_contribution.sum(dim=-1).mean().item()),
+    }
+    return combined, metrics
+
+
+
 def compute_response_mask(data: DataProto):
     """Compute the attention mask for the response part of the sequence.
 
@@ -226,6 +263,23 @@ def compute_advantage(
                 config.pf_ppo.get("reweight_method"),
                 config.pf_ppo.get("weight_pow"),
             )
+    elif adv_estimator == AdvantageEstimator.TURN_GAE:
+        required_keys = {"token_level_rewards", "values", "response_mask", "turn_ids"}
+        missing_keys = sorted(required_keys - set(data.batch.keys()))
+        if missing_keys:
+            raise ValueError(f"turn_gae requires batch keys: {missing_keys}")
+
+        advantages, returns, turn_value_mask = core_algos.compute_turn_gae_advantage_return(
+            token_level_rewards=data.batch["token_level_rewards"],
+            values=data.batch["values"],
+            response_mask=data.batch["response_mask"],
+            turn_ids=data.batch["turn_ids"],
+            gamma=gamma,
+            lam=lam,
+        )
+        data.batch["advantages"] = advantages
+        data.batch["returns"] = returns
+        data.batch["turn_value_mask"] = turn_value_mask
     elif adv_estimator == AdvantageEstimator.GRPO:
         # Initialize the mask for GRPO calculation
         grpo_calculation_mask = data.batch["response_mask"]
@@ -1223,7 +1277,16 @@ class RayPPOTrainer:
                         reward_extra_infos_dict: dict[str, list]
                         if self.config.reward_model.launch_reward_fn_async:
                             reward_tensor, reward_extra_infos_dict = ray.get(future_reward)
-                        batch.batch["token_level_scores"] = reward_tensor
+                        token_level_scores = reward_tensor
+                        if "turn_level_rewards" in batch.batch and "turn_level_reward_mask" in batch.batch:
+                            token_level_scores, turn_reward_metrics = combine_outcome_and_turn_rewards(
+                                reward_tensor,
+                                batch.batch["turn_level_rewards"],
+                                batch.batch["turn_level_reward_mask"],
+                                self.config.algorithm,
+                            )
+                            metrics.update(turn_reward_metrics)
+                        batch.batch["token_level_scores"] = token_level_scores
 
                         if reward_extra_infos_dict:
                             batch.non_tensor_batch.update({k: np.array(v) for k, v in reward_extra_infos_dict.items()})

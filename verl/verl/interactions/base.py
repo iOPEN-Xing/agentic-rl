@@ -36,6 +36,16 @@ class BaseInteraction:
         else:
             return instance_id
 
+    async def get_initial_observation(self, instance_id: str, **kwargs) -> Optional[str]:
+        """Return an environment's initial observation, if it has one.
+
+        Interactive environments such as τ-bench expose the first user query
+        from ``reset``. Agent loops call this hook after ``start_interaction`` so
+        the first policy action is conditioned on the actual task. Interactions
+        whose initial prompt is already in the dataset keep the default ``None``.
+        """
+        return None
+
     async def generate_response(
         self, instance_id: str, messages: list[dict[str, Any]], **kwargs
     ) -> tuple[bool, str, float, dict[str, Any]]:  # More clear response generation method
@@ -63,7 +73,9 @@ class BaseInteraction:
         score = 0.0
         return score
 
-    async def finalize_interaction(self) -> None:  # More clear interaction end and resource release method
+    async def finalize_interaction(
+        self, instance_id: Optional[str] = None, **kwargs
+    ) -> None:  # More clear interaction end and resource release method
         """
         Finalizes the interaction session and releases any associated state or resources.
         Simulates: release state

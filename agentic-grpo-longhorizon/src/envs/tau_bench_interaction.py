@@ -34,6 +34,35 @@ def record_assistant_content(content: str) -> None:
     TauBenchTool.execute 读取此值存入 action_history，用于 cheap reasoning 检测。"""
     CURRENT_ASSISTANT_CONTENT.set(content)
 
+
+def record_policy_error_action(
+    tool_name: str,
+    parameters: dict[str, Any],
+    error_type: str,
+    *,
+    raw_arguments: str = "",
+) -> bool:
+    """Record a model-attributable invalid tool attempt for process scoring."""
+    state = CURRENT_TAU_STATE.get()
+    if state is None:
+        return False
+
+    state["num_tool_calls"] += 1
+    state["action_history"].append({
+        "tool": tool_name,
+        "parameters": parameters,
+        "param_str": _param_str(parameters),
+        "inc_reward": 0.0,
+        "done": False,
+        "is_error": True,
+        "error_type": error_type,
+        "raw_arguments": str(raw_arguments)[:1000],
+        "extracted_entities": {},
+        "content": CURRENT_ASSISTANT_CONTENT.get() or "",
+    })
+    return True
+
+
 logger = logging.getLogger(__name__)
 
 
@@ -70,6 +99,10 @@ _WRITE_TOOLS = frozenset({
 })
 _ESCALATION_TOOLS = frozenset({"transfer_to_human_agents"})
 _THINK_TOOLS = frozenset({"think", "implicit_think"})
+
+# The outer PRM-Lite formula multiplies process score by 0.3, so one isolated
+# invalid action changes the total reward by at most -0.03 before other rules.
+_PRM_LITE_ACTION_ERROR_PENALTY = -0.10
 
 # Schema-based parameter validation patterns (from tau_bench_airline_tools.yaml)
 _PARAM_PATTERNS = {
@@ -175,6 +208,11 @@ def _compute_reasoning_quality_score(action_history: list[dict]) -> float:
         score = 0.0
 
         # --- Core Penalties ---
+
+        # P0: Penalize the invalid action itself. Previously is_error only
+        # affected the following action, leaving terminal errors unpenalized.
+        if action.get("is_error", False):
+            score += _PRM_LITE_ACTION_ERROR_PENALTY
 
         # P1: Placeholder penalty (schema-based)
         if tool not in _THINK_TOOLS and _has_placeholder(params):
@@ -292,6 +330,139 @@ def _compute_prm_lite_reward(state: dict) -> float:
     return outcome + 0.3 * process_score
 
 
+def compute_potential_shaping(
+    previous_potential: float,
+    current_potential: float,
+    gamma: float = 0.99,
+) -> float:
+    """Policy-invariant potential shaping: F(s, s') = gamma * Phi(s') - Phi(s)."""
+    if not 0.0 <= gamma <= 1.0:
+        raise ValueError(f"gamma must be in [0, 1], got {gamma}")
+    return gamma * float(current_potential) - float(previous_potential)
+
+
+def _uses_extracted_entity(action_history: list[dict], action_index: int) -> bool:
+    params = action_history[action_index].get("parameters", {})
+    if not params:
+        return False
+    seen_entities: set[str] = set()
+    for previous in action_history[:action_index]:
+        for values in previous.get("extracted_entities", {}).values():
+            seen_entities.update(str(value) for value in values)
+    return any(isinstance(value, str) and value in seen_entities for value in params.values())
+
+
+def _score_turn_actions(action_history: list[dict], start_index: int) -> float:
+    """Score only actions first observed in the current user turn, on a bounded scale."""
+    if start_index >= len(action_history):
+        return 0.0
+
+    scores: list[float] = []
+    for action_index in range(start_index, len(action_history)):
+        action = action_history[action_index]
+        tool = action.get("tool", "")
+        if tool in _THINK_TOOLS:
+            continue
+
+        params = action.get("parameters", {})
+        is_error = bool(action.get("is_error", False))
+        score = -0.35 if is_error else 0.20
+
+        if _has_placeholder(params):
+            score -= 0.20
+        if _is_redundant(action_history[:action_index], tool, params):
+            score -= 0.20
+        if _uses_extracted_entity(action_history, action_index):
+            score += 0.25
+        if tool in _READ_TOOLS:
+            previous_reads = {
+                item.get("tool") for item in action_history[:action_index]
+                if item.get("tool") in _READ_TOOLS
+            }
+            if tool not in previous_reads:
+                score += 0.10
+        if tool in _WRITE_TOOLS and not is_error:
+            score += 0.15
+        if tool in _ESCALATION_TOOLS:
+            attempted_read = any(
+                item.get("tool") in _READ_TOOLS for item in action_history[:action_index]
+            )
+            score -= 0.20 if attempted_read else 0.40
+
+        scores.append(max(-1.0, min(1.0, score)))
+
+    return sum(scores) / len(scores) if scores else 0.0
+
+
+def _compute_progress_potential(state: dict) -> float:
+    """Bounded, task-agnostic progress potential derived from verifiable events."""
+    # Episodic potential shaping requires a fixed terminal potential. Do not
+    # encode the terminal outcome in Phi; the outcome already belongs to the
+    # environment reward.
+    if state.get("done", False):
+        return 0.0
+
+    history = state.get("action_history", [])
+    unique_reads = {
+        action.get("tool") for action in history
+        if action.get("tool") in _READ_TOOLS and not action.get("is_error", False)
+    }
+    successful_writes = sum(
+        1 for action in history
+        if action.get("tool") in _WRITE_TOOLS and not action.get("is_error", False)
+    )
+    chained_actions = sum(
+        1 for index in range(len(history))
+        if _uses_extracted_entity(history, index)
+    )
+
+    potential = (
+        0.30 * min(len(unique_reads) / 4.0, 1.0)
+        + 0.30 * min(successful_writes / 2.0, 1.0)
+        + 0.20 * min(chained_actions / 2.0, 1.0)
+    )
+    return max(0.0, min(1.0, potential))
+
+
+def _compute_turn_reward(
+    state: dict,
+    *,
+    gamma: float = 0.99,
+    process_weight: float = 0.6,
+    shaping_weight: float = 0.4,
+) -> tuple[float, dict[str, float | int]]:
+    """Compute one incremental reward without recounting actions from earlier turns."""
+    if process_weight < 0.0 or shaping_weight < 0.0:
+        raise ValueError("turn reward weights must be non-negative")
+    weight_sum = process_weight + shaping_weight
+    if weight_sum <= 0.0:
+        raise ValueError("at least one turn reward weight must be positive")
+
+    history = state.get("action_history", [])
+    cursor = int(state.get("turn_reward_action_cursor", 0))
+    cursor = max(0, min(cursor, len(history)))
+    process_score = _score_turn_actions(history, cursor)
+
+    previous_potential = float(state.get("turn_reward_prev_potential", 0.0))
+    current_potential = _compute_progress_potential(state)
+    shaping = compute_potential_shaping(previous_potential, current_potential, gamma)
+
+    reward = (process_weight * process_score + shaping_weight * shaping) / weight_sum
+    reward = max(-1.0, min(1.0, float(reward)))
+
+    state["turn_reward_action_cursor"] = len(history)
+    state["turn_reward_prev_potential"] = current_potential
+    state.setdefault("turn_rewards", []).append(reward)
+    return reward, {
+        "turn_reward": reward,
+        "turn_process_score": process_score,
+        "turn_shaping": shaping,
+        "turn_potential": current_potential,
+        "turn_new_actions": len(history) - cursor,
+    }
+
+
+
 _REWARD_FUNCTIONS = {
     "binary": _compute_binary_reward,
     "partial_credit": _compute_partial_credit_reward,
@@ -325,6 +496,21 @@ class TauBenchInteraction(BaseInteraction):
             )
         self._compute_reward = _REWARD_FUNCTIONS[self.reward_mode]
         logger.info(f"[TauBenchInteraction] reward_mode={self.reward_mode}")
+        self.turn_reward_enabled = bool(config.get("turn_reward_enabled", False))
+        self.turn_reward_gamma = float(config.get("turn_reward_gamma", 0.99))
+        self.turn_reward_process_weight = float(config.get("turn_reward_process_weight", 0.6))
+        self.turn_reward_shaping_weight = float(config.get("turn_reward_shaping_weight", 0.4))
+        if not 0.0 <= self.turn_reward_gamma <= 1.0:
+            raise ValueError("turn_reward_gamma must be in [0, 1]")
+        if self.turn_reward_process_weight < 0.0 or self.turn_reward_shaping_weight < 0.0:
+            raise ValueError("turn reward weights must be non-negative")
+        if self.turn_reward_process_weight + self.turn_reward_shaping_weight <= 0.0:
+            raise ValueError("at least one turn reward weight must be positive")
+        logger.info(
+            "[TauBenchInteraction] turn_reward_enabled=%s gamma=%.3f",
+            self.turn_reward_enabled,
+            self.turn_reward_gamma,
+        )
 
         self._instance_dict: dict[str, dict] = {}
 
@@ -360,15 +546,20 @@ class TauBenchInteraction(BaseInteraction):
             task_split=self.task_split,
             task_index=task_id_int,
         )
-        # τ-bench 的 reset 在 get_env 里已经调过一次,但显式再 reset 一遍稳妥
-        env.reset(task_index=task_id_int)
+        # τ-bench reset 返回的 observation 是首条用户任务，必须进入 policy 的 s_1。
+        reset_response = env.reset(task_index=task_id_int)
+        initial_observation = str(getattr(reset_response, "observation", "") or "")
+        if not initial_observation:
+            raise RuntimeError(f"τ-bench reset returned an empty initial observation for task {task_id_int}")
 
         state = make_initial_state(task_id_int)
+        state["initial_observation"] = initial_observation
 
         # 关键: 绑定到当前 asyncio task 的 context
         # 同一个 coroutine 后续的 Tool.execute 会读到这里 set 的 env
         CURRENT_TAU_ENV.set(env)
         CURRENT_TAU_STATE.set(state)
+        CURRENT_ASSISTANT_CONTENT.set(None)
 
         # 备份引用: finalize 时清理用,以及 generate_response 里 defensive re-set
         self._instance_dict[instance_id] = {"env": env, "state": state}
@@ -378,6 +569,14 @@ class TauBenchInteraction(BaseInteraction):
             f"env_id={id(env)}"
         )
         return instance_id
+
+    async def get_initial_observation(self, instance_id: str, **kwargs) -> str:
+        entry = self._instance_dict.get(instance_id)
+        if entry is None:
+            raise RuntimeError(
+                f"TauBenchInteraction has no initialized state for instance_id={instance_id}"
+            )
+        return str(entry["state"]["initial_observation"])
 
     async def generate_response(
         self,
@@ -483,6 +682,7 @@ class TauBenchInteraction(BaseInteraction):
                     "error": "respond_exception",
                     "reason": f"{type(e).__name__}: {e}",
                     "task_id": state["task_id"],
+                    "valid_for_training": False,
                 },
             )
 
@@ -492,17 +692,30 @@ class TauBenchInteraction(BaseInteraction):
         state["num_user_turns"] += 1
 
         total_turns = state["num_user_turns"] + state["num_tool_calls"]
+        episode_done = is_done or total_turns >= self.max_turns
+        if episode_done:
+            state["done"] = True
+
+        turn_reward = 0.0
+        turn_metadata: dict[str, Any] = {}
+        if self.turn_reward_enabled:
+            turn_reward, turn_metadata = _compute_turn_reward(
+                state,
+                gamma=self.turn_reward_gamma,
+                process_weight=self.turn_reward_process_weight,
+                shaping_weight=self.turn_reward_shaping_weight,
+            )
 
         # 终止条件: env 说 done / 超 max_turns
-        if is_done or total_turns >= self.max_turns:
-            state["done"] = True
+        if episode_done:
             final_score = self._compute_reward(state)
             return (
                 True,
                 "",
-                final_score,
+                turn_reward if self.turn_reward_enabled else final_score,
                 {
                     "total_reward": state["total_reward"],
+                    "final_score": final_score,
                     "num_turns": total_turns,
                     "num_tool_calls": state["num_tool_calls"],
                     "num_user_turns": state["num_user_turns"],
@@ -510,6 +723,7 @@ class TauBenchInteraction(BaseInteraction):
                     "reason": "done" if is_done else "max_turns",
                     "reward_mode": self.reward_mode,
                     "transferred_to_human": state.get("transferred_to_human", False),
+                    **turn_metadata,
                 },
             )
 
@@ -518,11 +732,12 @@ class TauBenchInteraction(BaseInteraction):
         return (
             False,
             user_reply,
-            0.0,
+            turn_reward,
             {
                 "turn": total_turns,
                 "num_tool_calls": state["num_tool_calls"],
                 "task_id": state["task_id"],
+                **turn_metadata,
             },
         )
 
@@ -534,7 +749,9 @@ class TauBenchInteraction(BaseInteraction):
         """
         entry = self._instance_dict.get(instance_id)
         if entry is None:
-            return {"score": 0.0, "outcome_score": 0.0, "process_score": 0.0}
+            raise RuntimeError(
+                f"TauBenchInteraction has no initialized state for instance_id={instance_id}"
+            )
         state = entry["state"]
         outcome = 1.0 if state["total_reward"] >= 1.0 else 0.0
         process = _compute_reasoning_quality_score(state.get("action_history", []))
@@ -547,6 +764,10 @@ class TauBenchInteraction(BaseInteraction):
         return {"score": score, "outcome_score": outcome, "process_score": process}
 
     async def finalize_interaction(self, instance_id: str, **kwargs) -> None:
-        """Trajectory 结束时清理 _instance_dict 避免内存泄漏"""
-        self._instance_dict.pop(instance_id, None)
-        # contextvar 随 asyncio task 死亡自动释放,不需要显式 reset
+        """Release trajectory state and clear task-local references eagerly."""
+        entry = self._instance_dict.pop(instance_id, None)
+        if entry is None or CURRENT_TAU_ENV.get() is entry.get("env"):
+            CURRENT_TAU_ENV.set(None)
+        if entry is None or CURRENT_TAU_STATE.get() is entry.get("state"):
+            CURRENT_TAU_STATE.set(None)
+        CURRENT_ASSISTANT_CONTENT.set(None)

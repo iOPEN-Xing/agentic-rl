@@ -2,7 +2,7 @@
 
 > **基于 4×RTX 5090 + 2×RTX 4090 的 agentic RL 训练方案**
 >
-> 文档版本：v1.1 | 日期：2026-07-30
+> 文档版本：v1.2 | 日期：2026-07-30
 
 ---
 
@@ -12,6 +12,7 @@
 |------|------|----------|
 | v1.0 | 2026-07-30 | 初始版本 |
 | v1.1 | 2026-07-30 | 修正 RTX 5090 规格数据；修正 72B 模型显存需求；添加穿刺分析章节；添加验证脚本 |
+| v1.2 | 2026-07-30 | 方案一由启发式 Turn-Level Reward 修正为严格 Turn-PPO；关闭主基线 shaping |
 
 ---
 
@@ -234,10 +235,10 @@ sequenceDiagram
 ```mermaid
 mindmap
     root((Agentic-GRPO<br/>创新方案))
-        Turn-Level<br/>Reward Signal
-            Per-Turn Reward
-            每个 user turn 后计算
-            Potential-Based Shaping
+        Turn-PPO
+            Turn-MDP
+            Learned Critic + Turn GAE
+            Response-Level Ratio and Clipping
         User Simulator<br/>as Judge
             Turn-level LLM Judge
             Verifiable Rewards
@@ -252,128 +253,75 @@ mindmap
             Mixed Precision
 ```
 
-### 3.2 方案 1: Turn-Level Reward Signal
+### 3.2 方案 1: Turn-PPO
 
 #### 3.2.1 问题定义
 
-当前系统只在 session 结束时计算 reward，导致：
+原方案把 Turn-PPO 误解成“每轮构造启发式 reward，再继续使用 trajectory
+GRPO”。这只能增加中间监督，不能得到 Turn-PPO 的核心性质：
 
-```python
-# 当前实现 (tau_bench_interaction.py:496-499)
-if is_done or total_turns >= self.max_turns:
-    final_score = self._compute_reward(state)  # 只有终止时算 reward
+- GRPO 仍把整条轨迹的同一个 advantage 广播到所有 turn；
+- PPO ratio 和 clipping 仍在 token 或整条 trajectory 的错误粒度上；
+- 人工 process reward 容易引入 reward hacking，且 terminal outcome 进入
+  potential 时不再满足 episodic policy-invariance 的安全条件；
+- 当前 parquet 只有 system prompt，若丢弃 τ-bench `reset()` observation，
+  第一个 policy action 看不到真实用户任务。
+
+因此，方案一的主基线不再使用启发式 dense reward，而使用 learned critic
+对原生 τ-bench terminal outcome 做 turn-level credit assignment。
+
+#### 3.2.2 Turn-MDP 定义
+
+每次完整 assistant generation 是一个 action：
+
+```text
+s_t = 完整历史 + 当前 user/tool observation
+a_t = 本轮 assistant 生成的全部 token
+r_t = 0 (t < T), τ-bench terminal score (t = T)
 ```
 
-#### 3.2.2 改进方案
+τ-bench reset observation 必须进入 `s_1`。工具或用户回复产生下一个状态；
+若工具调用已经终止环境，调用该工具的 assistant response 就是最后一个
+turn，不能从 terminal environment 再生成一轮。
 
-```mermaid
-flowchart LR
-    subgraph Before["当前: Session-End Reward"]
-        A1[User Turn 1] --> A2[Tool Call 1]
-        A2 --> A3[User Turn 2] --> A4[Tool Call 2]
-        A4 --> A5[User Turn 3] --> A6[...N]
-        A6 --> A7[Done] --> A8[Reward = 1.0]
-        
-        style A8 fill:#ff6b6b
-    end
-    
-    subgraph After["改进: Turn-Level Reward"]
-        B1[User Turn 1] --> B2[Reward₁ = ?]
-        B2 --> B3[Tool Call 1] --> B4[Reward₂ = ?]
-        B4 --> B5[User Turn 2] --> B6[Reward₃ = ?]
-        B6 --> B7[...N] --> B8[Done]
-        B8 --> B9[Reward_final]
-        
-        style B2 fill:#4ecdc4
-        style B4 fill:#4ecdc4
-        style B6 fill:#4ecdc4
-        style B9 fill:#95e1d3
-    end
+#### 3.2.3 Turn GAE 与 critic
+
+critic 在每个 assistant turn 第一个 token 对应的位置读取状态价值。veRL
+的 value 输出左移一位，因此该位置实际条件化于 action 前最后一个
+user/tool token：
+
+```text
+δ_t = r_t + γ V(s_{t+1}) - V(s_t)
+A_t = δ_t + γ λ A_{t+1}
 ```
 
-#### 3.2.3 关键代码改动
+同一个 `A_t` 广播到该 turn 的所有 assistant token；critic loss 只在 turn
+起点计算，并按每条 trajectory 的 turn 数归一，避免长轨迹支配 value
+训练。主配置采用报告中较稳定的 `γ=0.99, λ=0.9`。
 
-```python
-# tau_bench_interaction.py - 新增 turn-level reward 计算
+#### 3.2.4 Turn-PPO actor objective
 
-class TauBenchInteraction:
-    async def generate_response(self, ...):
-        # ... 现有逻辑 ...
-        
-        # [改进] 每 turn 后返回 turn-level reward
-        if not is_done:
-            turn_reward = self._compute_turn_reward(state)
-            return (
-                False,  # 不终止
-                user_reply,
-                turn_reward,  # 立即返回 reward
-                {
-                    "turn_reward": turn_reward,
-                    "turn_idx": total_turns,
-                    ...
-                }
-            )
+每个 turn 的 importance ratio 是 token ratio 的乘积，clip 只做一次：
+
+```text
+ρ_t = ∏_k exp(log π_new(a_tk|·) - log π_old(a_tk|·))
+L_t = min(ρ_t A_t, clip(ρ_t, 1-ε, 1+ε) A_t)
 ```
 
-#### 3.2.4 Turn-Level Reward 计算
+各 turn objective 求和后除以 trajectory 的 assistant token 总数，再对
+trajectory 求均值；不能误写成 turn mean，否则完整 response 的乘积
+ratio 已含 token 梯度求和，长回复会被额外放大。
 
-```python
-def _compute_turn_reward(state: dict, turn_idx: int) -> float:
-    """
-    Turn-level reward: 每个 user turn 后立即计算
-    基于 PRM-Lite 规则 + 潜在函数 shaping
-    """
-    history = state.get("action_history", [])
-    last_action = history[-1] if history else None
-    
-    reward = 0.0
-    
-    # 1. 基于前一个 tool call 的质量
-    if last_action:
-        # 成功执行 +0.1
-        if not last_action.get("is_error", False):
-            reward += 0.1
-        # 使用了数据链 +0.05
-        if last_action.get("extracted_entities"):
-            reward += 0.05
-        # 避免了冗余调用 +0.03
-        if not _is_redundant(history[:-1], last_action["tool"], last_action["parameters"]):
-            reward += 0.03
-    
-    # 2. Potential-based shaping
-    # φ(s) = progress_to_goal(s)
-    potential = _compute_potential(state, turn_idx)
-    if turn_idx > 0:
-        prev_potential = state.get("prev_potential", 0)
-        shaping = 0.1 * (potential - prev_potential)  # γ=0.1
-        reward += shaping
-    
-    state["prev_potential"] = potential
-    
-    return reward
+在相同的每步 32 条 trajectory 预算下，GRPO 使用 `4 tasks × 8
+rollouts`，Turn-PPO 使用 `32 tasks × 1 rollout`，提高 critic 看到的任务
+多样性。actor/critic 学习率采用技术报告的 `1e-6/1e-5`。PRM、judge 和
+potential shaping 只作为独立 ablation，不进入方案一主基线。
 
-def _compute_potential(state: dict, turn_idx: int) -> float:
-    """
-    势函数: 估计当前状态距离目标的接近程度
-    范围: [0, 1], 1 表示完成目标
-    """
-    total_reward = state.get("total_reward", 0)
-    max_expected_reward = 1.0
-    
-    # 基础势: 基于已有的 reward 积累
-    base_potential = min(total_reward / max_expected_reward, 1.0)
-    
-    # 探索势: 基于信息收集程度
-    read_tools_used = len(set(
-        a["tool"] for a in state.get("action_history", [])
-        if a["tool"] in _READ_TOOLS
-    ))
-    exploration_potential = min(read_tools_used / 4.0, 0.2)  # 最多 0.2
-    
-    return base_potential + exploration_potential
-```
-
-> **技术依据**: [Turn-PPO: Turn-Level Advantage Estimation](https://arxiv.org/html/2512.17008v2), [Best Practices for Multi-Turn RL](https://fireworks.ai/blog/best-practices-for-multi-turn-RL)
+> **实现契约**:
+> [agentic-grpo-longhorizon/docs/optimization/turn_ppo_adaptation.md](../agentic-grpo-longhorizon/docs/optimization/turn_ppo_adaptation.md)
+>
+> **技术依据**:
+> [Turn-PPO: Turn-Level Advantage Estimation](https://arxiv.org/html/2512.17008v2)
 
 ---
 
@@ -923,28 +871,33 @@ CUDA_VISIBLE_DEVICES=0,1 python -m vllm.entrypoints.openai.api_server \
     --port 8000
 ```
 
-### 5.2 Phase 1: Turn-Level Reward (Week 2-3)
+### 5.2 Phase 1: Turn-PPO (Week 2-3)
 
 ```mermaid
 gantt
-    title Turn-Level Reward 实现
+    title Turn-PPO 实现
     dateFormat  YYYY-MM-DD
     section 核心开发
-    修改 Interaction      :2026-08-05, 2d
-    实现 per-turn reward  :2026-08-07, 3d
-    潜在函数 shaping     :2026-08-10, 2d
+    接入 turn boundary     :2026-08-05, 2d
+    实现 critic 和 Turn GAE :2026-08-07, 3d
+    实现 turn ratio 与 clipping :2026-08-10, 2d
     section 验证
-    单元测试             :2026-08-12, 1d
-    消融实验对比         :2026-08-13, 2d
+    静态与单元测试        :2026-08-12, 1d
+    等 rollout 预算对比   :2026-08-13, 2d
 ```
 
 **验证指标**：
 
 | 指标 | 基线 | 目标 | 测量方法 |
 |------|------|------|----------|
-| 训练稳定性 | 错误率 0.20 | < 0.15 | 5次训练曲线方差 |
-| Reward 稀疏度 | 1 reward/traj | 3-5 reward/traj | 日志统计 |
+| 训练稳定性 | 错误率 0.20 | < 0.15 | 5 次训练曲线方差 |
+| Credit 粒度 | trajectory | assistant turn | 检查 `turn_ids` 与 advantage |
 | 收敛速度 | 250 steps | < 200 steps | 达到 0.2 pass^1 所需步数 |
+| 采样公平性 | 32 trajectories/step | 32 trajectories/step | 对比 rollout 日志 |
+
+方案一保持 τ-bench 的稀疏 terminal reward；“更密的学习信号”来自 critic 和
+Turn GAE 生成的 turn advantage，不应以每条 trajectory 的非零 reward 数量
+作为成功指标。
 
 ### 5.3 Phase 2: User Simulator as Judge (Week 4-5)
 
@@ -1011,9 +964,9 @@ gantt
 | 风险 | 可能性 | 影响 | 缓解策略 |
 |------|--------|------|----------|
 | **RTX 5090 + 4090 混部兼容问题** | 中 | 高 | Phase 0 重点验证 NCCL 通信 |
-| **Turn-level reward 引入噪声** | 中 | 中 | 从小权重开始，逐步增加 |
+| **Turn critic/GAE 估计不稳定** | 中 | 高 | 独立 critic、turn-start value mask、监控 explained variance |
 | **User judge 与 env reward 冲突** | 中 | 高 | 实施分层验证，确保 outcome 主导 |
-| **长轨迹训练不稳定** | 高 | 高 | 保持 LATA 的 √L 归一化 |
+| **Turn ratio 随回复长度数值漂移** | 高 | 高 | 对 log-ratio 求和、单次 clip，并记录 ratio/clip fraction |
 | **计算资源不足** | 低 | 高 | 从小模型 (14B) 开始，验证后扩展 |
 
 ### 6.2 验证框架
@@ -1030,47 +983,33 @@ class ExperimentValidator:
         self.experiment_name = experiment_name
         self.results = {}
     
-    def validate_reward_signal(self, reward_data: dict) -> bool:
-        """验证 reward signal 的合理性"""
+    def validate_turn_ppo_batch(self, batch: dict) -> bool:
+        """验证严格 Turn-PPO 的边界、advantage 和采样预算。"""
         checks = {
-            "sparsity": self._check_reward_sparsity(reward_data),
-            "distribution": self._check_reward_distribution(reward_data),
-            "correlation": self._check_session_turn_correlation(reward_data),
+            "turn_coverage": self._check_turn_coverage(batch),
+            "constant_advantage": self._check_constant_advantage(batch),
+            "terminal_reward": self._check_terminal_reward(batch),
+            "rollout_budget": len(batch["trajectory_ids"]) == 32,
         }
-        
-        # 所有检查必须通过
         return all(checks.values())
-    
-    def _check_reward_sparsity(self, reward_data: dict) -> bool:
-        """Reward 应该更密集，但不是所有 turn 都有正 reward"""
-        rewards_per_traj = reward_data["rewards_per_trajectory"]
-        avg_rewards = np.mean([len(r) for r in rewards_per_traj])
-        
-        # 期望: 每个 trajectory 有 3-10 个非零 reward
-        return 3 <= avg_rewards <= 10
-    
-    def _check_reward_distribution(self, reward_data: dict) -> bool:
-        """Reward 分布应该合理（不是全正或全负）"""
-        all_rewards = [r for rs in reward_data["rewards_per_trajectory"] for r in rs]
-        
-        # 期望: 正负 reward 都有
-        has_positive = any(r > 0 for r in all_rewards)
-        has_negative = any(r < 0 for r in all_rewards)
-        
-        return has_positive and has_negative
-    
-    def _check_session_turn_correlation(self, reward_data: dict) -> bool:
-        """Session-level 和 turn-level reward 应该有正相关"""
-        session_rewards = reward_data["session_rewards"]
-        avg_turn_rewards = [
-            np.mean(turns) if turns else 0 
-            for turns in reward_data["turn_rewards"]
-        ]
-        
-        correlation = np.corrcoef(session_rewards, avg_turn_rewards)[0, 1]
-        
-        # 期望: 正相关 (correlation > 0.3)
-        return correlation > 0.3
+
+    def _check_turn_coverage(self, batch: dict) -> bool:
+        """所有有效 assistant token 必须且只能属于一个正整数 turn。"""
+        mask = batch["response_mask"].bool()
+        turn_ids = batch["turn_ids"]
+        return bool((turn_ids[mask] > 0).all() and (turn_ids[~mask] == 0).all())
+
+    def _check_constant_advantage(self, batch: dict) -> bool:
+        """同一 trajectory 的同一 turn 内 advantage 必须保持常数。"""
+        for turn_ids, advantages in zip(batch["turn_ids"], batch["advantages"]):
+            for turn_id in turn_ids.unique():
+                if turn_id > 0 and advantages[turn_ids == turn_id].unique().numel() != 1:
+                    return False
+        return True
+
+    def _check_terminal_reward(self, batch: dict) -> bool:
+        """主基线只允许原生 terminal score，不混入启发式 shaping。"""
+        return batch["reward_source"] == "tau_bench_terminal"
     
     def run_ablation(self, baseline: dict, variants: dict) -> dict:
         """
@@ -1098,8 +1037,8 @@ graph LR
         M1["pass@k (k=1,4,8)"]
         M2["错误率"]
         M3["平均轨迹长度"]
-        M4["Reward 稀疏度"]
-        M5["Group advantage 方差"]
+        M4["Critic explained variance"]
+        M5["Turn ratio / clip fraction"]
         M6["KL 散度"]
     end
     
@@ -1107,8 +1046,8 @@ graph LR
         A1["pass@k 下降 > 10%"]
         A2["错误率 > 0.5"]
         A3["长度 < 50 或 > 500"]
-        A4["稀疏度 < 2 或 > 20"]
-        A5["方差 = 0 (饱和)"]
+        A4["Explained variance 持续为负"]
+        A5["Clip fraction 持续接近 1"]
         A6["KL > 2.0"]
     end
     
@@ -1287,9 +1226,13 @@ nvidia-smi topo -m
 
 **结论**：2×4090 组成 TP=2 可以运行 72B 模型。
 
-### B.2 Reward 设计穿刺
+### B.2 Legacy Reward Shaping 穿刺（不属于方案一主基线）
 
 #### 问题 3：Potential-Based Shaping 的理论基础
+
+以下分析只约束后续 shaping ablation。严格 Turn-PPO 主基线已关闭
+`turn_reward`、PRM 和 potential shaping，因此不能把修正此公式当作方案一
+成立的前提，也不能把 shaping 结果作为 Turn-PPO 的实验结果。
 
 **潜在问题**：
 Potential-based reward shaping 需要满足以下条件才能保证最优策略不变：
@@ -1298,30 +1241,27 @@ $$r'(s, a, s') = r(s, a, s') + \gamma \phi(s') - \phi(s)$$
 
 其中 $\phi$ 是势函数。
 
-**当前实现的问题**：
+**原分支的关键问题**：
 ```python
-# 当前代码
-shaping = 0.1 * (potential - prev_potential)  # γ=0.1
+# 原实现把 terminal outcome 放进 Phi(s)
+potential += 0.20 * float(state["total_reward"] >= 1.0)
 ```
 
-**问题**：
-1. 这个 shaping 的 discount factor 是 0.1，不是标准的 γ=0.99
-2. Potential 范围是 [0, 1]，但 shaping reward 可能太小
-3. 可能导致策略学习不够稳定
+这会让 terminal potential 随成功/失败而变化；即使差分形式写成
+`γΦ(s')-Φ(s)`，有限 episode 的 terminal boundary 仍不满足固定势函数条件，
+不能据此声称 policy invariance。
 
-**修正建议**：
+**当前隔离与修正**：
 ```python
-def compute_potential_shaping(
-    current_potential: float,
-    prev_potential: float,
-    gamma: float = 0.99,
-) -> float:
-    """
-    修正后的 potential-based shaping
-    使用标准 discount factor
-    """
-    return gamma * current_potential - prev_potential
+if state["done"]:
+    return 0.0
+
+# Phi 只使用非 outcome 的可验证进展特征
+shaping = gamma * current_potential - previous_potential
 ```
+
+主 Turn-PPO 配置仍完全关闭此路径；上述修正只防止 legacy ablation 继续
+泄露 terminal outcome。
 
 #### 问题 4：Turn-Level Reward 的尺度问题
 
@@ -1336,7 +1276,8 @@ def compute_potential_shaping(
 | B | [-0.5, +0.5] | [0, 1] | 可能有冲突 |
 | C | [0, 0.2] | [0, 1] + turn_sum | 尺度一致 |
 
-**推荐**：将 turn reward 归一化到与 session reward 相同的尺度。
+**推荐**：只在独立 ablation 中研究尺度，并与 strict Turn-PPO 主基线完全
+分开命名和记录；方案一主基线不融合这类 turn reward。
 
 ### B.3 Hybrid Advantage 穿刺
 
@@ -1441,8 +1382,8 @@ def validate_reward_consistency():
 | 问题 | 严重程度 | 修复优先级 | 修复方案 |
 |------|----------|-----------|----------|
 | 72B 无法单卡运行 | 🔴 高 | P0 | 使用 TP=2 |
-| GAE 实现有误 | 🟡 中 | P1 | 参考 TRACE 论文 |
-| Potential shaping discount | 🟡 中 | P1 | 改为 γ=0.99 |
+| Hybrid 分支缺少 TRACE/GAE 主路径 | 🟡 中 | P1 | 在方案三独立补齐 |
+| Legacy potential 泄露 terminal outcome | 🔴 高 | P0 | 已移除 outcome，terminal Φ 固定为 0 |
 | Adaptive alpha 无学习 | 🟢 低 | P2 | 改用 schedule |
 | Reward 尺度不一致 | 🟡 中 | P1 | 归一化后融合 |
 | Judge 与 env 冲突 | 🟡 中 | P1 | 监控相关性 |

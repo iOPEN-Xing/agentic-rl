@@ -8,6 +8,7 @@ v4-optimal changes from v4-fix (tuned via offline grid search):
 - no_reasoning_penalty: -0.03 -> -0.05
 - diversity_bonus: 0.03 -> 0.01
 - NEW: length_penalty (ntools > 8, -0.01 per extra step)
+- NEW: direct action-error penalty (-0.10 before the 0.3 process weight)
 """
 import sys
 from pathlib import Path
@@ -68,27 +69,33 @@ def test_redundancy_same_tool_params():
 
 
 def test_error_repetition():
-    # step0: placeholder read(-0.03) + first-read(+0.01) = -0.02 (error)
+    # step0: error(-0.10) + placeholder read(-0.03) + first-read(+0.01) = -0.12
     # step1: placeholder read(-0.03) + error-repetition(-0.04) = -0.07
-    # mean = -0.045
+    # mean = -0.095
     history = [
         _make_action("get_reservation_details", params={"reservation_id": "BAD"}, is_error=True),
         _make_action("get_reservation_details", params={"reservation_id": "BAD"}),
     ]
     score = _compute_reasoning_quality_score(history)
-    assert abs(score - (-0.045)) < 1e-6
+    assert abs(score - (-0.095)) < 1e-6
 
 
 def test_recovery_different_tool():
-    # step0: placeholder read(-0.03) + first-read(+0.01) = -0.02 (error)
+    # step0: error(-0.10) + placeholder read(-0.03) + first-read(+0.01) = -0.12
     # step1: recovery(+0.05) + first-read(+0.01) = +0.06
-    # mean = 0.02
+    # mean = -0.03
     history = [
         _make_action("get_reservation_details", params={"reservation_id": "BAD"}, is_error=True),
         _make_action("get_user_details", params={"user_id": "john_doe_123"}),
     ]
     score = _compute_reasoning_quality_score(history)
-    assert abs(score - 0.02) < 1e-6
+    assert abs(score - (-0.03)) < 1e-6
+
+
+def test_unknown_tool_error_is_penalized_directly():
+    history = [_make_action("update_reservation_payment", is_error=True)]
+    score = _compute_reasoning_quality_score(history)
+    assert abs(score - (-0.10)) < 1e-6
 
 
 def test_escalation_premature_no_read():
@@ -272,6 +279,17 @@ def test_prm_lite_reward_v4_formula():
     assert reward > 1.0 and reward < 1.1
 
 
+def test_action_error_penalty_keeps_terminal_outcome_term_unchanged():
+    state = {
+        "total_reward": 1.0,
+        "action_history": [
+            _make_action("update_reservation_payment", is_error=True),
+        ],
+    }
+    reward = _compute_prm_lite_reward(state)
+    assert abs(reward - 0.97) < 1e-6
+
+
 def test_task49_like_trajectory():
     history = [
         _make_action("get_reservation_details", params={"reservation_id": "MDCLVA"},
@@ -296,6 +314,7 @@ if __name__ == "__main__":
         test_redundancy_same_tool_params,
         test_error_repetition,
         test_recovery_different_tool,
+        test_unknown_tool_error_is_penalized_directly,
         test_escalation_premature_no_read,
         test_escalation_late_with_read,
         test_data_chain_write,
@@ -312,6 +331,7 @@ if __name__ == "__main__":
         test_clamp_bounds,
         test_length_penalty,
         test_prm_lite_reward_v4_formula,
+        test_action_error_penalty_keeps_terminal_outcome_term_unchanged,
         test_task49_like_trajectory,
     ]
     passed = failed = 0

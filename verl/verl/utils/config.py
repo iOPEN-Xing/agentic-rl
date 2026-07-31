@@ -151,6 +151,31 @@ def validate_config(
     actor_config = omega_conf_to_dataclass(config.actor_rollout_ref.actor)
     actor_config.validate(n_gpus, config.data.train_batch_size, config.actor_rollout_ref.model)
 
+    adv_estimator = config.algorithm.adv_estimator
+    policy_loss_mode = config.actor_rollout_ref.actor.policy_loss.loss_mode
+    uses_turn_gae = adv_estimator == "turn_gae"
+    uses_turn_policy_loss = policy_loss_mode == "turn_ppo"
+    if uses_turn_gae != uses_turn_policy_loss:
+        raise ValueError(
+            "Turn-PPO must pair algorithm.adv_estimator=turn_gae with "
+            "actor_rollout_ref.actor.policy_loss.loss_mode=turn_ppo"
+        )
+    if uses_turn_gae and config.algorithm.use_kl_in_reward:
+        raise ValueError(
+            "turn_gae expects a terminal task reward; use actor KL loss instead of token-level in-reward KL"
+        )
+    if uses_turn_gae:
+        rollout_correction = config.algorithm.get("rollout_correction", None)
+        if rollout_correction is not None and (
+            rollout_correction.get("rollout_is", None) is not None
+            or rollout_correction.get("rollout_rs", None) is not None
+            or rollout_correction.get("use_policy_gradient", False)
+        ):
+            raise ValueError(
+                "strict Turn-PPO does not support rollout IS/RS or the rollout-correction "
+                "policy-gradient loss; use its response-level PPO ratio directly"
+            )
+
     if not config.actor_rollout_ref.actor.use_dynamic_bsz:
         if use_reference_policy:
             # reference: log_prob_micro_batch_size vs. log_prob_micro_batch_size_per_gpu

@@ -30,6 +30,8 @@ from tensordict import TensorDict
 from transformers import AutoProcessor, AutoTokenizer
 
 from verl.experimental.agent_loop.prometheus_utils import update_prometheus_config
+from verl.experimental.agent_loop.reward_utils import materialize_turn_rewards
+from verl.experimental.agent_loop.turn_ppo_utils import materialize_turn_ids
 from verl.experimental.agent_loop.utils import resolve_config_path
 from verl.experimental.reward import RewardManagerWorker
 from verl.protocol import DataProto
@@ -549,6 +551,14 @@ class AgentLoopWorkerBase:
         attention_mask = torch.cat([input.attention_mask for input in inputs], dim=0)
         input_ids = torch.cat([input.input_ids for input in inputs], dim=0)
         position_ids = torch.cat([input.position_ids for input in inputs], dim=0)
+        valid_for_training = torch.tensor(
+            [bool(input.extra_fields.get("valid_for_training", True)) for input in inputs],
+            dtype=torch.bool,
+            device=response_mask.device,
+        )
+        # Infrastructure failures remain observable, but contribute no reward,
+        # advantage, actor gradient, critic target, or training statistics.
+        response_mask = response_mask * valid_for_training.unsqueeze(-1).to(response_mask.dtype)
         optional_outputs = {}
         if inputs[0].response_logprobs is not None:
             optional_outputs["rollout_log_probs"] = torch.cat([input.response_logprobs for input in inputs], dim=0)
@@ -562,10 +572,27 @@ class AgentLoopWorkerBase:
                 "attention_mask": attention_mask,  # [bsz, prompt_length + response_length]
                 # position_ids: [bsz, 3, prompt_length + response_length] or [bsz, prompt_length + response_length]
                 "position_ids": position_ids,
+                "valid_for_training": valid_for_training,
                 **optional_outputs,
             },
             batch_size=len(inputs),
         )
+        turn_reward_spans = [
+            input.extra_fields.get("turn_reward_spans", []) for input in inputs
+        ]
+        if any(turn_reward_spans):
+            turn_level_rewards, turn_level_reward_mask = materialize_turn_rewards(
+                turn_reward_spans,
+                response_mask,
+            )
+            batch["turn_level_rewards"] = turn_level_rewards
+            batch["turn_level_reward_mask"] = turn_level_reward_mask
+
+        assistant_turn_spans = [
+            input.extra_fields.get("assistant_turn_spans", []) for input in inputs
+        ]
+        if any("assistant_turn_spans" in input.extra_fields for input in inputs):
+            batch["turn_ids"] = materialize_turn_ids(assistant_turn_spans, response_mask)
 
         scores = [input.reward_score for input in inputs]
         # W5 conditional PRM: support dict reward_score from interaction
