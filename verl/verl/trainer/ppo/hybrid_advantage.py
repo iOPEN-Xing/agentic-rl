@@ -96,6 +96,10 @@ def compute_turn_level_mc_advantage(
     grouped_turns: dict[tuple[Any, int], list[tuple[int, int, int, float]]] = defaultdict(list)
     with torch.no_grad():
         for batch_index in range(batch_size):
+            # Infrastructure-failed trajectories have a zero response mask and
+            # must not affect either returns-to-go or comparison statistics.
+            if not response_mask[batch_index].bool().any():
+                continue
             sample_spans = assistant_turn_spans[batch_index]
             sample_rewards = assistant_turn_rewards[batch_index]
             sample_spans = [] if sample_spans is None else list(sample_spans)
@@ -135,7 +139,8 @@ def compute_turn_level_mc_advantage(
 
             uid = index[batch_index]
             for turn_index, ((start, end), turn_return) in enumerate(zip(parsed_spans, reward_to_go, strict=True)):
-                grouped_turns[(uid, turn_index)].append((batch_index, start, end, turn_return))
+                if response_mask[batch_index, start:end].bool().any():
+                    grouped_turns[(uid, turn_index)].append((batch_index, start, end, turn_return))
 
         turn_advantages = torch.zeros_like(response_mask, dtype=torch.float32)
         turn_mask = torch.zeros_like(response_mask, dtype=torch.float32)
@@ -173,6 +178,73 @@ def _hybrid_config_value(config: Optional[AlgoConfig], key: str, default: Any) -
     return getattr(hybrid_config, key, default)
 
 
+def _hybrid_config_has_value(config: Optional[AlgoConfig], key: str) -> bool:
+    if config is None:
+        return False
+    hybrid_config = getattr(config, "hybrid_advantage", None)
+    if hybrid_config is None:
+        return False
+    if hasattr(hybrid_config, "get"):
+        return key in hybrid_config and hybrid_config.get(key) is not None
+    return getattr(hybrid_config, key, None) is not None
+
+
+def _normalize_session_component_by_group(
+    advantages: torch.Tensor,
+    response_mask: torch.Tensor,
+    index: np.ndarray,
+    epsilon: float,
+) -> torch.Tensor:
+    """Normalize one scalar per rollout, without weighting longer responses more."""
+    normalized = torch.zeros_like(advantages, dtype=torch.float32)
+    grouped: dict[Any, list[tuple[int, torch.Tensor]]] = defaultdict(list)
+    with torch.no_grad():
+        for batch_index in range(response_mask.shape[0]):
+            active = response_mask[batch_index].bool()
+            if active.any():
+                scalar = advantages[batch_index][active][0].to(torch.float32)
+                grouped[index[batch_index]].append((batch_index, scalar))
+
+        for records in grouped.values():
+            values = torch.stack([value for _, value in records])
+            centered = values - values.mean()
+            std = centered.square().mean().sqrt()
+            normalized_values = values if not torch.isfinite(std) or std <= epsilon else centered / (std + epsilon)
+            for normalized_value, (batch_index, _) in zip(normalized_values, records, strict=True):
+                normalized[batch_index] = normalized_value * response_mask[batch_index].to(torch.float32)
+    return normalized
+
+
+def resolve_hybrid_session_weight(
+    config: Optional[AlgoConfig],
+    global_step: int,
+    total_steps: Optional[int],
+) -> float:
+    """Resolve fixed turn residual or scheduled session weight, never both."""
+    if _hybrid_config_has_value(config, "turn_weight"):
+        schedule_keys = ("session_weight_start", "session_weight_end", "schedule")
+        conflicts = [key for key in schedule_keys if _hybrid_config_has_value(config, key)]
+        if conflicts:
+            raise ValueError(
+                "hybrid_advantage.turn_weight is mutually exclusive with scheduled fields: "
+                f"{conflicts}"
+            )
+        turn_weight = float(_hybrid_config_value(config, "turn_weight", 0.1))
+        if not 0.0 <= turn_weight <= 1.0:
+            raise ValueError(f"turn_weight must be in [0, 1], got {turn_weight}")
+        return 1.0 - turn_weight
+
+    configured_total_steps = int(_hybrid_config_value(config, "total_steps", 1))
+    effective_total_steps = configured_total_steps if total_steps is None else int(total_steps)
+    return compute_hybrid_alpha(
+        global_step=global_step,
+        total_steps=effective_total_steps,
+        session_weight_start=float(_hybrid_config_value(config, "session_weight_start", 0.8)),
+        session_weight_end=float(_hybrid_config_value(config, "session_weight_end", 0.2)),
+        schedule=str(_hybrid_config_value(config, "schedule", "linear")),
+    )
+
+
 def compute_grpo_hybrid_advantage(
     token_level_rewards: torch.Tensor,
     response_mask: torch.Tensor,
@@ -193,6 +265,10 @@ def compute_grpo_hybrid_advantage(
             norm_session_by_std = bool(config.get("norm_adv_by_std_in_grpo", True))
         else:
             norm_session_by_std = bool(getattr(config, "norm_adv_by_std_in_grpo", True))
+    if not norm_session_by_std:
+        raise ValueError(
+            "grpo_hybrid requires norm_adv_by_std_in_grpo=true so session and turn components use comparable scales"
+        )
 
     session_advantages, _ = compute_grpo_outcome_advantage(
         token_level_rewards=token_level_rewards,
@@ -213,27 +289,19 @@ def compute_grpo_hybrid_advantage(
         epsilon=epsilon,
     )
 
-    session_advantages = normalize_advantage_component(session_advantages, response_mask, epsilon)
-    turn_advantages = normalize_advantage_component(turn_advantages, turn_mask, epsilon)
-    session_has_signal = bool(torch.any(session_advantages.abs() > epsilon).item())
-    turn_has_signal = bool(torch.any(turn_advantages.abs() > epsilon).item())
+    # Both components are normalized over rollout comparison units, never over
+    # repeated token values. Turn MC already normalizes each (uid, turn) group.
+    session_advantages = _normalize_session_component_by_group(
+        session_advantages, response_mask, index, epsilon
+    )
 
-    if not turn_has_signal:
-        final_advantages = session_advantages
-    elif not session_has_signal:
-        final_advantages = turn_advantages
-    else:
-        configured_total_steps = int(_hybrid_config_value(config, "total_steps", 1))
-        effective_total_steps = configured_total_steps if total_steps is None else int(total_steps)
-        alpha = compute_hybrid_alpha(
-            global_step=global_step,
-            total_steps=effective_total_steps,
-            session_weight_start=float(_hybrid_config_value(config, "session_weight_start", 0.8)),
-            session_weight_end=float(_hybrid_config_value(config, "session_weight_end", 0.2)),
-            schedule=str(_hybrid_config_value(config, "schedule", "linear")),
-        )
+    if torch.any(turn_mask.bool()):
+        alpha = resolve_hybrid_session_weight(config, global_step, total_steps)
         fused_turn_tokens = alpha * session_advantages + (1.0 - alpha) * turn_advantages
         final_advantages = torch.where(turn_mask.bool(), fused_turn_tokens, session_advantages)
+    else:
+        # Missing or non-comparable turns fall back exactly to session GRPO.
+        final_advantages = session_advantages
 
     final_advantages = final_advantages * response_mask
     return final_advantages, final_advantages.clone()

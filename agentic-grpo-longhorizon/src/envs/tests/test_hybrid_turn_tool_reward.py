@@ -4,7 +4,7 @@ from types import SimpleNamespace
 import pytest
 
 from src.envs.tau_bench_context import CURRENT_TAU_ENV, CURRENT_TAU_STATE, make_initial_state
-from src.envs.tau_bench_interaction import TauBenchInteraction
+from src.envs.tau_bench_interaction import TauBenchInteraction, _compute_reasoning_quality_score
 from src.envs.tau_bench_tools import TauBench_think_Tool
 from verl.tools.schemas import OpenAIFunctionToolSchema
 
@@ -99,3 +99,45 @@ def test_user_interaction_keeps_session_score_separate_at_termination():
     assert response == ""
     assert turn_reward == pytest.approx(0.5)
     assert metadata["session_score"] == pytest.approx(1.0)
+
+
+def test_prm_lite_penalizes_the_invalid_action_itself():
+    action = {
+        "tool": "unknown_tool",
+        "parameters": {},
+        "param_str": "{}",
+        "inc_reward": 0.0,
+        "done": False,
+        "is_error": True,
+        "extracted_entities": {},
+        "content": "reasoned invalid call with sufficient context",
+    }
+    assert _compute_reasoning_quality_score([action]) == pytest.approx(-0.10)
+
+
+class _FailingEnv:
+    def step(self, _action):
+        raise RuntimeError("backend unavailable")
+
+
+def test_tau_bench_tool_marks_runtime_failure_as_untrainable():
+    schema = OpenAIFunctionToolSchema(
+        type="function",
+        function={
+            "name": "think",
+            "description": "test",
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        },
+    )
+    tool = TauBench_think_Tool(config={}, tool_schema=schema)
+    env_token = CURRENT_TAU_ENV.set(_FailingEnv())
+    state_token = CURRENT_TAU_STATE.set(make_initial_state(task_id=3))
+    try:
+        _response, reward, metadata = asyncio.run(tool.execute("instance", {}))
+    finally:
+        CURRENT_TAU_STATE.reset(state_token)
+        CURRENT_TAU_ENV.reset(env_token)
+
+    assert reward == 0.0
+    assert metadata["valid_for_training"] is False
+    assert metadata["error"] == "env_step_exception"

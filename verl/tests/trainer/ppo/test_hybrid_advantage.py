@@ -10,6 +10,7 @@ from verl.trainer.ppo.hybrid_advantage import (
     compute_hybrid_alpha,
     compute_turn_level_mc_advantage,
     normalize_advantage_component,
+    resolve_hybrid_session_weight,
 )
 from verl.trainer.ppo.ray_trainer import compute_advantage
 
@@ -39,6 +40,18 @@ def _hybrid_config(schedule="linear"):
     )
 
 
+def _fixed_hybrid_config(turn_weight=0.1):
+    return OmegaConf.create(
+        {
+            "norm_adv_by_std_in_grpo": True,
+            "hybrid_advantage": {
+                "turn_gamma": 0.5,
+                "turn_weight": turn_weight,
+            },
+        }
+    )
+
+
 @pytest.mark.parametrize("schedule", ["linear", "cosine"])
 def test_alpha_schedule_has_exact_endpoints_and_midpoint(schedule):
     assert compute_hybrid_alpha(0, 100, schedule=schedule) == pytest.approx(0.8)
@@ -52,6 +65,39 @@ def test_alpha_schedule_rejects_invalid_configuration():
         compute_hybrid_alpha(0, 0)
     with pytest.raises(ValueError, match="Unsupported"):
         compute_hybrid_alpha(0, 10, schedule="learned")
+
+
+def test_fixed_turn_weight_has_exact_coefficient_and_rejects_ambiguous_config():
+    assert resolve_hybrid_session_weight(_fixed_hybrid_config(0.1), 50, None) == pytest.approx(0.9)
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        resolve_hybrid_session_weight(
+            OmegaConf.create(
+                {
+                    "hybrid_advantage": {
+                        "turn_weight": 0.1,
+                        "session_weight_start": 0.8,
+                    }
+                }
+            ),
+            0,
+            100,
+        )
+    with pytest.raises(ValueError, match="turn_weight"):
+        resolve_hybrid_session_weight(_fixed_hybrid_config(1.1), 0, None)
+
+
+def test_hybrid_rejects_disabling_required_component_normalization():
+    config = _fixed_hybrid_config()
+    config.norm_adv_by_std_in_grpo = False
+    with pytest.raises(ValueError, match="requires norm_adv_by_std_in_grpo=true"):
+        compute_grpo_hybrid_advantage(
+            token_level_rewards=torch.zeros(2, 2),
+            response_mask=torch.ones(2, 2),
+            index=np.array(["task", "task"], dtype=object),
+            assistant_turn_spans=_object_array([[(0, 2)], [(0, 2)]]),
+            assistant_turn_rewards=_object_array([[0.0], [1.0]]),
+            config=config,
+        )
 
 
 def test_turn_mc_uses_discounted_future_events_and_maps_only_assistant_spans():
@@ -101,6 +147,19 @@ def test_turn_mc_rejects_misaligned_events():
             assistant_turn_spans=_object_array([[(0, 2)]]),
             assistant_turn_rewards=_object_array([[]]),
         )
+
+
+def test_turn_mc_missing_later_turn_falls_back_instead_of_cross_length_comparison():
+    advantages, turn_mask = compute_turn_level_mc_advantage(
+        response_mask=torch.tensor([[1, 1, 1, 1], [1, 1, 0, 0]], dtype=torch.float32),
+        index=np.array(["task", "task"], dtype=object),
+        assistant_turn_spans=_object_array([[(0, 2), (2, 4)], [(0, 2)]]),
+        assistant_turn_rewards=_object_array([[0.0, 1.0], [0.0]]),
+        gamma=0.5,
+    )
+    assert torch.equal(turn_mask[:, :2], torch.tensor([[1.0, 1.0], [1.0, 1.0]]))
+    assert torch.equal(turn_mask[:, 2:], torch.zeros(2, 2))
+    assert torch.equal(advantages[:, 2:], torch.zeros(2, 2))
 
 
 def test_component_normalization_equalizes_scale_on_its_mask():
@@ -167,6 +226,54 @@ def test_hybrid_is_invariant_to_turn_reward_scale():
         assistant_turn_rewards=_object_array([[-100.0], [100.0]]),
     )
     assert torch.allclose(base, scaled, atol=1e-5)
+
+
+def test_fixed_turn_residual_uses_exact_normalized_coefficients():
+    advantages, _ = compute_grpo_hybrid_advantage(
+        token_level_rewards=torch.tensor([[0.0, 1.0], [0.0, 0.0]]),
+        response_mask=torch.ones(2, 2),
+        index=np.array(["task", "task"], dtype=object),
+        assistant_turn_spans=_object_array([[(0, 2)], [(0, 2)]]),
+        assistant_turn_rewards=_object_array([[-1.0], [1.0]]),
+        config=_fixed_hybrid_config(0.1),
+    )
+    assert torch.allclose(advantages[0], torch.full((2,), 0.8), atol=1e-5)
+    assert torch.allclose(advantages[1], torch.full((2,), -0.8), atol=1e-5)
+
+
+def test_invalid_trajectory_is_excluded_from_session_and_turn_statistics():
+    common = {
+        "token_level_rewards": torch.tensor([[0.0, 1.0], [0.0, 0.0]]),
+        "response_mask": torch.ones(2, 2),
+        "index": np.array(["task", "task"], dtype=object),
+        "assistant_turn_spans": _object_array([[(0, 2)], [(0, 2)]]),
+        "assistant_turn_rewards": _object_array([[-1.0], [1.0]]),
+        "config": _fixed_hybrid_config(0.1),
+    }
+    expected, _ = compute_grpo_hybrid_advantage(**common)
+    actual, _ = compute_grpo_hybrid_advantage(
+        token_level_rewards=torch.tensor([[0.0, 1.0], [0.0, 0.0], [100.0, 100.0]]),
+        response_mask=torch.tensor([[1.0, 1.0], [1.0, 1.0], [0.0, 0.0]]),
+        index=np.array(["task", "task", "task"], dtype=object),
+        assistant_turn_spans=_object_array([[(0, 2)], [(0, 2)], [(0, 2)]]),
+        assistant_turn_rewards=_object_array([[-1.0], [1.0], [1000.0]]),
+        config=_fixed_hybrid_config(0.1),
+    )
+    assert torch.allclose(actual[:2], expected, atol=1e-6)
+    assert torch.equal(actual[2], torch.zeros(2))
+
+
+def test_all_invalid_group_returns_zero_without_consuming_bad_turn_metadata():
+    advantages, returns = compute_grpo_hybrid_advantage(
+        token_level_rewards=torch.full((2, 2), 100.0),
+        response_mask=torch.zeros(2, 2),
+        index=np.array(["task", "task"], dtype=object),
+        assistant_turn_spans=_object_array([[(9, 1)], None]),
+        assistant_turn_rewards=_object_array([[], None]),
+        config=_fixed_hybrid_config(0.1),
+    )
+    assert torch.equal(advantages, torch.zeros(2, 2))
+    assert torch.equal(returns, advantages)
 
 
 def test_trainer_wires_turn_events_and_global_step_to_hybrid_estimator():

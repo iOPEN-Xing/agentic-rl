@@ -89,9 +89,7 @@ algorithm:
     bypass_mode: true
   hybrid_advantage:
     turn_gamma: 0.9
-    session_weight_start: 0.8
-    session_weight_end: 0.2
-    schedule: cosine
+    turn_weight: 0.1
 
 trainer:
   total_epochs: 50

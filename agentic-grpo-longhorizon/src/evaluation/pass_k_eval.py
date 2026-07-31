@@ -1,20 +1,44 @@
-"""
-pass^k 评测
-对每个 task 独立采样 k 次,计算 pass^k (至少一次成功的比例)
-同时统计 turn efficiency 和 tool call accuracy
-"""
+"""Repeated-sampling evaluation with mathematically distinct pass@k/pass^k."""
 from __future__ import annotations
 
 import os
 os.environ.setdefault("HF_HUB_OFFLINE", "1")
 os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
 import json
+import math
 from pathlib import Path
 from dataclasses import dataclass, asdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import TYPE_CHECKING, Optional
 from tqdm import tqdm
 
-from src.envs.tau_bench_wrapper import TauBenchWrapper, TrajectoryResult
+if TYPE_CHECKING:
+    from src.envs.tau_bench_wrapper import TauBenchWrapper, TrajectoryResult
+
+
+def _validate_pass_inputs(n: int, c: int, k: int) -> None:
+    if n <= 0:
+        raise ValueError(f"n must be positive, got {n}")
+    if not 0 <= c <= n:
+        raise ValueError(f"c must be in [0, n], got c={c}, n={n}")
+    if not 1 <= k <= n:
+        raise ValueError(f"k must be in [1, n], got k={k}, n={n}")
+
+
+def estimate_pass_at_k(n: int, c: int, k: int) -> float:
+    """Probability that at least one of k samples succeeds, without replacement."""
+    _validate_pass_inputs(n, c, k)
+    if n - c < k:
+        return 1.0
+    return 1.0 - math.comb(n - c, k) / math.comb(n, k)
+
+
+def estimate_pass_power_k(n: int, c: int, k: int) -> float:
+    """Probability that all k samples succeed, without replacement."""
+    _validate_pass_inputs(n, c, k)
+    if c < k:
+        return 0.0
+    return math.comb(c, k) / math.comb(n, k)
 
 
 def _get_tokenizer(policy_factory):
@@ -49,10 +73,20 @@ class EvalReport:
     env_name: str
     num_tasks: int
     num_samples_per_task: int
-    pass_at_1: float           # 任意一次成功
-    pass_hat_1: float          # pass^1: 平均成功率
-    pass_hat_4: float          # pass^4: 连续 4 次都成功的比例(稳定性)
-    pass_hat_8: float
+    any_success_rate: float
+    pass_at_1: float
+    pass_at_4: Optional[float]
+    pass_at_8: Optional[float]
+    pass_power_1: float
+    pass_power_4: Optional[float]
+    pass_power_8: Optional[float]
+    # Backward-compatible aliases. pass_hat_* now consistently means pass^k.
+    pass_hat_1: float
+    pass_hat_4: Optional[float]
+    pass_hat_8: Optional[float]
+    legacy_pass_at_1_any_success: float
+    legacy_pass_hat_4_as_pass_at_4: Optional[float]
+    legacy_pass_hat_8_as_pass_at_8: Optional[float]
     avg_turns: float
     avg_tool_calls: float
     error_rate: float          # trajectory 异常中止的比例
@@ -94,24 +128,16 @@ def run_eval(
             task_idx, traj = fut.result()
             results[task_idx].append(traj)
     
-    # 计算 pass^k
-    # pass^k 定义: 对同一个 task 采样 n 次,估计"连续 k 次都成功"的概率
-    # 用 unbiased estimator (HumanEval 里的 pass@k 公式)
     import numpy as np
-    
-    def pass_at_k(n: int, c: int, k: int) -> float:
-        """n: 总采样数, c: 成功数, k: pass^k 的 k"""
-        if n - c < k:
-            return 1.0
-        return 1.0 - np.prod(1.0 - k / np.arange(n - c + 1, n + 1))
     
     # 尝试加载 tokenizer（用于精确统计 assistant content tokens）
     tokenizer = _get_tokenizer(policy_factory)
     count_tokens = _make_token_counter(tokenizer)
 
     per_task = []
-    pass_1_list, pass_4_list, pass_8_list = [], [], []
-    pass_at_1_list = []  # 任意一次成功
+    pass_at_1_list, pass_at_4_list, pass_at_8_list = [], [], []
+    pass_power_1_list, pass_power_4_list, pass_power_8_list = [], [], []
+    any_success_list = []
     all_turns, all_tool_calls, all_errors = [], [], []
 
     for t in range(num_tasks):
@@ -119,14 +145,22 @@ def run_eval(
         n = len(trajs)
         c = sum(1 for tr in trajs if tr.success)
 
-        p1 = pass_at_k(n, c, 1)
-        p4 = pass_at_k(n, c, 4) if n >= 4 else None
-        p8 = pass_at_k(n, c, 8) if n >= 8 else None
+        pass_at_1 = estimate_pass_at_k(n, c, 1)
+        pass_power_1 = estimate_pass_power_k(n, c, 1)
+        pass_at_4 = estimate_pass_at_k(n, c, 4) if n >= 4 else None
+        pass_power_4 = estimate_pass_power_k(n, c, 4) if n >= 4 else None
+        pass_at_8 = estimate_pass_at_k(n, c, 8) if n >= 8 else None
+        pass_power_8 = estimate_pass_power_k(n, c, 8) if n >= 8 else None
 
-        pass_1_list.append(p1)
-        pass_at_1_list.append(1.0 if c > 0 else 0.0)
-        if p4 is not None: pass_4_list.append(p4)
-        if p8 is not None: pass_8_list.append(p8)
+        pass_at_1_list.append(pass_at_1)
+        pass_power_1_list.append(pass_power_1)
+        any_success_list.append(1.0 if c > 0 else 0.0)
+        if pass_at_4 is not None:
+            pass_at_4_list.append(pass_at_4)
+            pass_power_4_list.append(pass_power_4)
+        if pass_at_8 is not None:
+            pass_at_8_list.append(pass_at_8)
+            pass_power_8_list.append(pass_power_8)
 
         traj_dicts = []
         for tr in trajs:
@@ -149,19 +183,38 @@ def run_eval(
             "task_id": t,
             "success_count": c,
             "total_samples": n,
-            "pass^1": p1,
+            "any_success": bool(c > 0),
+            "pass@1": pass_at_1,
+            "pass@4": pass_at_4,
+            "pass@8": pass_at_8,
+            "pass^1": pass_power_1,
+            "pass^4": pass_power_4,
+            "pass^8": pass_power_8,
             "avg_turns": np.mean([tr.num_turns for tr in trajs]),
             "trajectories": traj_dicts,
         })
-    
+
+    mean_pass_at_4 = float(np.mean(pass_at_4_list)) if pass_at_4_list else None
+    mean_pass_at_8 = float(np.mean(pass_at_8_list)) if pass_at_8_list else None
+    mean_pass_power_4 = float(np.mean(pass_power_4_list)) if pass_power_4_list else None
+    mean_pass_power_8 = float(np.mean(pass_power_8_list)) if pass_power_8_list else None
     report = EvalReport(
         env_name=wrapper.env_name,
         num_tasks=num_tasks,
         num_samples_per_task=num_samples_per_task,
+        any_success_rate=float(np.mean(any_success_list)),
         pass_at_1=float(np.mean(pass_at_1_list)),
-        pass_hat_1=float(np.mean(pass_1_list)),
-        pass_hat_4=float(np.mean(pass_4_list)) if pass_4_list else 0.0,
-        pass_hat_8=float(np.mean(pass_8_list)) if pass_8_list else 0.0,
+        pass_at_4=mean_pass_at_4,
+        pass_at_8=mean_pass_at_8,
+        pass_power_1=float(np.mean(pass_power_1_list)),
+        pass_power_4=mean_pass_power_4,
+        pass_power_8=mean_pass_power_8,
+        pass_hat_1=float(np.mean(pass_power_1_list)),
+        pass_hat_4=mean_pass_power_4,
+        pass_hat_8=mean_pass_power_8,
+        legacy_pass_at_1_any_success=float(np.mean(any_success_list)),
+        legacy_pass_hat_4_as_pass_at_4=mean_pass_at_4,
+        legacy_pass_hat_8_as_pass_at_8=mean_pass_at_8,
         avg_turns=float(np.mean(all_turns)),
         avg_tool_calls=float(np.mean(all_tool_calls)),
         error_rate=float(np.mean(all_errors)),
@@ -176,10 +229,13 @@ def run_eval(
     # 打印摘要
     print(f"\n=== Eval Report: {wrapper.env_name} ===")
     print(f"Tasks: {num_tasks} × Samples: {num_samples_per_task}")
-    print(f"pass@1 (any success): {report.pass_at_1:.3f}")
-    print(f"pass^1 (avg success): {report.pass_hat_1:.3f}")
-    print(f"pass^4 (stability):   {report.pass_hat_4:.3f}")
-    print(f"pass^8 (stability):   {report.pass_hat_8:.3f}")
+    print(f"Any-success rate: {report.any_success_rate:.3f}")
+    print(f"pass@1:          {report.pass_at_1:.3f}")
+    print(f"pass@4:          {report.pass_at_4 if report.pass_at_4 is not None else 'n/a'}")
+    print(f"pass@8:          {report.pass_at_8 if report.pass_at_8 is not None else 'n/a'}")
+    print(f"pass^1:          {report.pass_power_1:.3f}")
+    print(f"pass^4:          {report.pass_power_4 if report.pass_power_4 is not None else 'n/a'}")
+    print(f"pass^8:          {report.pass_power_8 if report.pass_power_8 is not None else 'n/a'}")
     print(f"Avg turns:       {report.avg_turns:.2f}")
     print(f"Avg tool calls:  {report.avg_tool_calls:.2f}")
     print(f"Error rate:      {report.error_rate:.3f}")

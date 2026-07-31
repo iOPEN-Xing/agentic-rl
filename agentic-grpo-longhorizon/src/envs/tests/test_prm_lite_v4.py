@@ -68,27 +68,27 @@ def test_redundancy_same_tool_params():
 
 
 def test_error_repetition():
-    # step0: placeholder read(-0.03) + first-read(+0.01) = -0.02 (error)
+    # step0: direct error(-0.10) + placeholder read(-0.03) + first-read(+0.01) = -0.12
     # step1: placeholder read(-0.03) + error-repetition(-0.04) = -0.07
-    # mean = -0.045
+    # mean = -0.095
     history = [
         _make_action("get_reservation_details", params={"reservation_id": "BAD"}, is_error=True),
         _make_action("get_reservation_details", params={"reservation_id": "BAD"}),
     ]
     score = _compute_reasoning_quality_score(history)
-    assert abs(score - (-0.045)) < 1e-6
+    assert abs(score - (-0.095)) < 1e-6
 
 
 def test_recovery_different_tool():
-    # step0: placeholder read(-0.03) + first-read(+0.01) = -0.02 (error)
+    # step0: direct error(-0.10) + placeholder read(-0.03) + first-read(+0.01) = -0.12
     # step1: recovery(+0.05) + first-read(+0.01) = +0.06
-    # mean = 0.02
+    # mean = -0.03
     history = [
         _make_action("get_reservation_details", params={"reservation_id": "BAD"}, is_error=True),
         _make_action("get_user_details", params={"user_id": "john_doe_123"}),
     ]
     score = _compute_reasoning_quality_score(history)
-    assert abs(score - 0.02) < 1e-6
+    assert abs(score - (-0.03)) < 1e-6
 
 
 def test_escalation_premature_no_read():

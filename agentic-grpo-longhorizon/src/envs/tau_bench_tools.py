@@ -116,7 +116,12 @@ class TauBenchToolBase(BaseTool):
             return (
                 ToolResponse(text=err_msg),
                 0.0,
-                {"error": "env_step_exception", "tool": self.name, "detail": str(e)},
+                {
+                    "error": "env_step_exception",
+                    "tool": self.name,
+                    "detail": f"{type(e).__name__}: {e}",
+                    "valid_for_training": False,
+                },
             )
 
         obs = str(getattr(step_res, "observation", ""))
