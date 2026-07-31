@@ -551,6 +551,14 @@ class AgentLoopWorkerBase:
         attention_mask = torch.cat([input.attention_mask for input in inputs], dim=0)
         input_ids = torch.cat([input.input_ids for input in inputs], dim=0)
         position_ids = torch.cat([input.position_ids for input in inputs], dim=0)
+        valid_for_training = torch.tensor(
+            [bool(input.extra_fields.get("valid_for_training", True)) for input in inputs],
+            dtype=torch.bool,
+            device=response_mask.device,
+        )
+        # Infrastructure failures remain observable, but contribute no reward,
+        # advantage, actor gradient, critic target, or training statistics.
+        response_mask = response_mask * valid_for_training.unsqueeze(-1).to(response_mask.dtype)
         optional_outputs = {}
         if inputs[0].response_logprobs is not None:
             optional_outputs["rollout_log_probs"] = torch.cat([input.response_logprobs for input in inputs], dim=0)
@@ -564,6 +572,7 @@ class AgentLoopWorkerBase:
                 "attention_mask": attention_mask,  # [bsz, prompt_length + response_length]
                 # position_ids: [bsz, 3, prompt_length + response_length] or [bsz, prompt_length + response_length]
                 "position_ids": position_ids,
+                "valid_for_training": valid_for_training,
                 **optional_outputs,
             },
             batch_size=len(inputs),

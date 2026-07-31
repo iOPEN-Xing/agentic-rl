@@ -426,6 +426,7 @@ def compute_grpo_outcome_advantage(
             shape is (bs, response_length)
     """
     scores = token_level_rewards.sum(dim=-1)
+    valid_trajectories = response_mask.bool().any(dim=-1)
 
     id2score = defaultdict(list)
     id2mean = {}
@@ -434,7 +435,8 @@ def compute_grpo_outcome_advantage(
     with torch.no_grad():
         bsz = scores.shape[0]
         for i in range(bsz):
-            id2score[index[i]].append(scores[i])
+            if valid_trajectories[i]:
+                id2score[index[i]].append(scores[i])
         for idx in id2score:
             if len(id2score[idx]) == 1:
                 id2mean[idx] = torch.tensor(0.0)
@@ -446,6 +448,9 @@ def compute_grpo_outcome_advantage(
             else:
                 raise ValueError(f"no score in prompt index: {idx}")
         for i in range(bsz):
+            if not valid_trajectories[i]:
+                scores[i] = 0.0
+                continue
             if norm_adv_by_std_in_grpo:
                 scores[i] = (scores[i] - id2mean[index[i]]) / (id2std[index[i]] + epsilon)
             else:
@@ -1311,7 +1316,7 @@ def compute_policy_loss_turn_ppo(
 
     for batch_index, ids in enumerate(batch_turn_ids):
         if not ids:
-            raise ValueError(f"Turn-PPO received a trajectory without assistant turns at batch {batch_index}")
+            continue
 
         turn_losses: list[torch.Tensor] = []
         turn_was_clipped: list[torch.Tensor] = []
@@ -1338,6 +1343,16 @@ def compute_policy_loss_turn_ppo(
         trajectory_kls.append(torch.stack(turn_kls).mean())
         turns_per_trajectory.append(len(ids))
 
+    if not trajectory_losses:
+        zero_loss = log_prob.sum() * 0.0
+        return zero_loss, {
+            "actor/pg_clipfrac": 0.0,
+            "actor/ppo_kl": 0.0,
+            "actor/pg_clipfrac_lower": 0.0,
+            "actor/turn_ppo_turns_per_sequence": 0.0,
+            "actor/turn_ppo_valid_sequences": 0.0,
+        }
+
     pg_loss = torch.stack(trajectory_losses).mean()
     pg_clipfrac = torch.stack(trajectory_clip_fractions).mean()
     ppo_kl = torch.stack(trajectory_kls).mean()
@@ -1346,6 +1361,7 @@ def compute_policy_loss_turn_ppo(
         "actor/ppo_kl": ppo_kl.detach().item(),
         "actor/pg_clipfrac_lower": 0.0,
         "actor/turn_ppo_turns_per_sequence": sum(turns_per_trajectory) / len(turns_per_trajectory),
+        "actor/turn_ppo_valid_sequences": float(len(trajectory_losses)),
     }
     return pg_loss, pg_metrics
 

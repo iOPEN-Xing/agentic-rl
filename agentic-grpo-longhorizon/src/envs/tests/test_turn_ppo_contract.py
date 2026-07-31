@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import sys
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
@@ -8,6 +9,11 @@ import pytest
 import yaml
 
 from src.envs.tau_bench_interaction import TauBenchInteraction
+from src.envs.tau_bench_context import (
+    CURRENT_ASSISTANT_CONTENT,
+    CURRENT_TAU_ENV,
+    CURRENT_TAU_STATE,
+)
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
@@ -34,6 +40,9 @@ def test_turn_ppo_config_selects_strict_turn_objective_at_equal_rollout_budget()
     assert group_size == 1
     assert config["actor_rollout_ref"]["actor"]["optim"]["lr"] == pytest.approx(1.0e-6)
     assert config["critic"]["optim"]["lr"] == pytest.approx(1.0e-5)
+    assert config["data"]["train_files"].startswith("${oc.env:AGENTIC_RL_VANILLA_DATA_ROOT,")
+    assert config["data"]["train_files"].endswith("/train.parquet")
+    assert config["data"]["val_files"].endswith("/val.parquet")
 
     # Hardware/model topology stays on the existing project contract.
     assert config["actor_rollout_ref"]["model"]["path"] == "/data/xjz/model/qwen3-8b"
@@ -43,8 +52,7 @@ def test_turn_ppo_config_selects_strict_turn_objective_at_equal_rollout_budget()
     assert config["trainer"]["n_gpus_per_node"] == 4
 
 
-@pytest.mark.asyncio
-async def test_tau_bench_reset_observation_is_exposed_as_the_initial_user_query(monkeypatch):
+def test_tau_bench_reset_observation_is_exposed_as_the_initial_user_query(monkeypatch):
     class FakeEnvironment:
         def reset(self, task_index):
             assert task_index == 7
@@ -61,13 +69,29 @@ async def test_tau_bench_reset_observation_is_exposed_as_the_initial_user_query(
     monkeypatch.setitem(sys.modules, "tau_bench", fake_tau_bench_module)
     monkeypatch.setitem(sys.modules, "tau_bench.envs", fake_envs_module)
 
+    async def exercise_contract():
+        interaction = TauBenchInteraction({"env_name": "airline"})
+        instance_id = await interaction.start_interaction("trajectory-7", task_id=7)
+
+        assert instance_id == "trajectory-7"
+        assert (
+            await interaction.get_initial_observation(instance_id)
+            == "Please change my reservation."
+        )
+        assert CURRENT_TAU_ENV.get() is not None
+        assert CURRENT_TAU_STATE.get() is not None
+
+        CURRENT_ASSISTANT_CONTENT.set("temporary assistant content")
+        await interaction.finalize_interaction(instance_id)
+        assert CURRENT_TAU_ENV.get() is None
+        assert CURRENT_TAU_STATE.get() is None
+        assert CURRENT_ASSISTANT_CONTENT.get() is None
+
+    asyncio.run(exercise_contract())
+
+
+def test_calculate_score_requires_a_live_interaction_instance():
     interaction = TauBenchInteraction({"env_name": "airline"})
-    instance_id = await interaction.start_interaction("trajectory-7", task_id=7)
 
-    assert instance_id == "trajectory-7"
-    assert (
-        await interaction.get_initial_observation(instance_id)
-        == "Please change my reservation."
-    )
-
-    await interaction.finalize_interaction(instance_id)
+    with pytest.raises(RuntimeError, match="no initialized state"):
+        asyncio.run(interaction.calculate_score("missing"))

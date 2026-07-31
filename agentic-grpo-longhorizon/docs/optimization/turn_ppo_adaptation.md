@@ -167,6 +167,76 @@ PYTHONPATH=agentic-grpo-longhorizon:verl pytest -q \
   verl/tests/trainer/config/test_algo_config_on_cpu.py
 ```
 
+## PRM-Lite Tool-Call Correctness Audit
+
+This audit is a future-run correction in `codex/turn-level-reward`. It does not
+modify or restart the active `prm_lite_lata` process in the main worktree, and
+it does not change the strict Turn-PPO configuration's binary terminal reward.
+
+### Observed failure
+
+The active run's `experiments/prm_lite_lata/training.log` was inspected through
+step 199. It contained 69 unknown-tool attempts and 14 Hermes decode failures:
+
+| Approximate rollout step | Unknown tool | Malformed call |
+| --- | ---: | ---: |
+| 1-100 | 24 | 5 |
+| 101-199 | 45 | 9 |
+
+The most frequent unknown names were `update_reservation_payment` (24),
+`create_user` (18), `update_reservation_payment_methods` (10), and
+`search_multistop_flight` (6). None is present in the authoritative 14-tool
+airline YAML or `AIRLINE_TOOL_NAMES`, so this is policy hallucination rather
+than a missing schema registration.
+
+Two observability gaps prevented the intended PRM behavior:
+
+1. Hermes logged and discarded calls that remained malformed after repair.
+2. Unknown calls returned a tool error but were not added to the tau-bench
+   `action_history`. The scorer therefore could not penalize the action itself.
+
+### Correction and reward contract
+
+- Hermes emits a diagnostic `FunctionCall` for an unrecoverable malformed
+  block, allowing the normal tool-response path to return a recoverable error.
+- Malformed arguments and unknown names are recorded as `is_error=True`
+  actions with their model-generated name, parsed parameters where available,
+  bounded raw diagnostics, and assistant content.
+- These cases remain `valid_for_training=True`: they are attributable policy
+  errors. Tool runtime, environment, release, interaction, and score failures
+  remain infrastructure failures and are excluded with a zero response mask.
+- Invalid attempts count toward the trajectory's tool-attempt budget but never
+  call `env.step`, never add environment reward, and never alter terminal
+  outcome computation.
+- PRM-Lite applies a direct `-0.10` per-action process penalty. Under the
+  existing `outcome + 0.3 * process` formula, an isolated invalid action
+  changes total reward by `-0.03`; the outcome term remains unchanged.
+
+The `-0.10` magnitude is a conservative engineering default aligned with the
+existing premature-escalation penalty, not a claimed optimum. A later controlled
+ablation should compare error rate, task success, process-score variance, and KL
+before changing it. The action-recording and policy/infrastructure distinction
+are correctness requirements independent of that tuning choice.
+
+### CPU validation
+
+No CUDA context, model weights, vLLM server, or training process was started.
+The parser, policy-error, PRM-Lite, trajectory-validity, Turn-PPO math, and
+metric suites passed 84 tests; the algorithm/config suite passed 9 tests, for
+93 CPU tests in total. The Hydra config test must be run from the vendored
+`verl` directory because it resolves `verl/trainer/config` relative to the
+process working directory.
+
+Additional checks passed:
+
+- `py_compile` for every changed Python module and test.
+- `bash -n` for the training and evaluation launchers.
+- `git diff --check`.
+- Hydra resolution of `turn_ppo/turn_gae`, both vanilla parquet paths, and
+  the unchanged model/LoRA/TP/GPU/learning-rate invariants.
+- Exact `env`, `policy`, and `eval` section equality between all four
+  Turn-PPO checkpoint configs and their vanilla-main counterparts.
+
 ## Non-goals
 
 - Running training, loading model weights, or allocating GPUs.

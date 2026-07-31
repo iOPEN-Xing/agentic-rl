@@ -34,6 +34,35 @@ def record_assistant_content(content: str) -> None:
     TauBenchTool.execute 读取此值存入 action_history，用于 cheap reasoning 检测。"""
     CURRENT_ASSISTANT_CONTENT.set(content)
 
+
+def record_policy_error_action(
+    tool_name: str,
+    parameters: dict[str, Any],
+    error_type: str,
+    *,
+    raw_arguments: str = "",
+) -> bool:
+    """Record a model-attributable invalid tool attempt for process scoring."""
+    state = CURRENT_TAU_STATE.get()
+    if state is None:
+        return False
+
+    state["num_tool_calls"] += 1
+    state["action_history"].append({
+        "tool": tool_name,
+        "parameters": parameters,
+        "param_str": _param_str(parameters),
+        "inc_reward": 0.0,
+        "done": False,
+        "is_error": True,
+        "error_type": error_type,
+        "raw_arguments": str(raw_arguments)[:1000],
+        "extracted_entities": {},
+        "content": CURRENT_ASSISTANT_CONTENT.get() or "",
+    })
+    return True
+
+
 logger = logging.getLogger(__name__)
 
 
@@ -70,6 +99,10 @@ _WRITE_TOOLS = frozenset({
 })
 _ESCALATION_TOOLS = frozenset({"transfer_to_human_agents"})
 _THINK_TOOLS = frozenset({"think", "implicit_think"})
+
+# The outer PRM-Lite formula multiplies process score by 0.3, so one isolated
+# invalid action changes the total reward by at most -0.03 before other rules.
+_PRM_LITE_ACTION_ERROR_PENALTY = -0.10
 
 # Schema-based parameter validation patterns (from tau_bench_airline_tools.yaml)
 _PARAM_PATTERNS = {
@@ -175,6 +208,11 @@ def _compute_reasoning_quality_score(action_history: list[dict]) -> float:
         score = 0.0
 
         # --- Core Penalties ---
+
+        # P0: Penalize the invalid action itself. Previously is_error only
+        # affected the following action, leaving terminal errors unpenalized.
+        if action.get("is_error", False):
+            score += _PRM_LITE_ACTION_ERROR_PENALTY
 
         # P1: Placeholder penalty (schema-based)
         if tool not in _THINK_TOOLS and _has_placeholder(params):
@@ -521,6 +559,7 @@ class TauBenchInteraction(BaseInteraction):
         # 同一个 coroutine 后续的 Tool.execute 会读到这里 set 的 env
         CURRENT_TAU_ENV.set(env)
         CURRENT_TAU_STATE.set(state)
+        CURRENT_ASSISTANT_CONTENT.set(None)
 
         # 备份引用: finalize 时清理用,以及 generate_response 里 defensive re-set
         self._instance_dict[instance_id] = {"env": env, "state": state}
@@ -643,6 +682,7 @@ class TauBenchInteraction(BaseInteraction):
                     "error": "respond_exception",
                     "reason": f"{type(e).__name__}: {e}",
                     "task_id": state["task_id"],
+                    "valid_for_training": False,
                 },
             )
 
@@ -709,7 +749,9 @@ class TauBenchInteraction(BaseInteraction):
         """
         entry = self._instance_dict.get(instance_id)
         if entry is None:
-            return {"score": 0.0, "outcome_score": 0.0, "process_score": 0.0}
+            raise RuntimeError(
+                f"TauBenchInteraction has no initialized state for instance_id={instance_id}"
+            )
         state = entry["state"]
         outcome = 1.0 if state["total_reward"] >= 1.0 else 0.0
         process = _compute_reasoning_quality_score(state.get("action_history", []))
@@ -722,6 +764,10 @@ class TauBenchInteraction(BaseInteraction):
         return {"score": score, "outcome_score": outcome, "process_score": process}
 
     async def finalize_interaction(self, instance_id: str, **kwargs) -> None:
-        """Trajectory 结束时清理 _instance_dict 避免内存泄漏"""
-        self._instance_dict.pop(instance_id, None)
-        # contextvar 随 asyncio task 死亡自动释放,不需要显式 reset
+        """Release trajectory state and clear task-local references eagerly."""
+        entry = self._instance_dict.pop(instance_id, None)
+        if entry is None or CURRENT_TAU_ENV.get() is entry.get("env"):
+            CURRENT_TAU_ENV.set(None)
+        if entry is None or CURRENT_TAU_STATE.get() is entry.get("state"):
+            CURRENT_TAU_STATE.set(None)
+        CURRENT_ASSISTANT_CONTENT.set(None)
