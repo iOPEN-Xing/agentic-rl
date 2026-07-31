@@ -22,11 +22,16 @@ from uuid import uuid4
 
 from verl.experimental.agent_loop.agent_loop import AgentLoopBase, AgentLoopOutput, register
 from verl.experimental.agent_loop.tool_parser import FunctionCall, ToolParser
+from verl.experimental.agent_loop.turn_reward_utils import (
+    accumulate_latest_turn_reward,
+    append_assistant_turn,
+    clip_turn_reward_events,
+)
 from verl.experimental.agent_loop.utils import add_generation_prompt_for_gpt_oss, format_gpt_oss_tool_response_manually
 from verl.interactions.base import BaseInteraction
 
 # [W5 PRM-Lite] 导入 assistant content 记录函数
-from src.envs.tau_bench_interaction import record_assistant_content
+from src.envs.tau_bench_interaction import record_assistant_content, record_policy_error_action
 from verl.interactions.utils.interaction_registry import initialize_interactions_from_config
 from verl.tools.schemas import ToolResponse
 from verl.tools.utils.tool_registry import initialize_tools_from_config
@@ -43,6 +48,19 @@ class AgentState(Enum):
     PROCESSING_TOOLS = "processing_tools"
     TERMINATED = "terminated"
     INTERACTING = "interacting"
+
+
+def merge_initial_user_message(messages: list[dict[str, Any]], initial_observation: str) -> bool:
+    """Append the reset observation, or verify the dataset already contains it."""
+    user_messages = [message for message in messages if message.get("role") == "user"]
+    if not user_messages:
+        messages.append({"role": "user", "content": initial_observation})
+        return True
+    if user_messages[0].get("content") != initial_observation:
+        raise ValueError(
+            "The dataset's initial user message does not match the interaction reset observation"
+        )
+    return False
 
 
 class AgentData:
@@ -73,14 +91,26 @@ class AgentData:
         self.response_logprobs: list[float] = []
         self.turn_scores: list[float] = []
         self.tool_rewards: list[float] = []
+        self.assistant_turn_spans: list[tuple[int, int]] = []
+        self.assistant_turn_rewards: list[float] = []
         self.reasoning_tokens_per_turn: list[int] = []
         self.total_tool_calls: int = 0
         self.total_errors: int = 0
         self.user_turns = 0
         self.assistant_turns = 0
+        self.valid_for_training = True
+        self.failure_stage: Optional[str] = None
+        self.failure_reason: Optional[str] = None
 
         # Temporary state for tool calls
         self.tool_calls: list[FunctionCall] = []
+
+    def invalidate(self, stage: str, reason: str) -> None:
+        """Exclude an infrastructure-failed trajectory from all objectives."""
+        if self.valid_for_training:
+            self.failure_stage = stage
+            self.failure_reason = reason
+        self.valid_for_training = False
 
 
 @register("tool_agent")
@@ -129,7 +159,7 @@ class ToolAgentLoop(AgentLoopBase):
         request_id = uuid4().hex
         tools_kwargs = kwargs.get("tools_kwargs", {})
 
-        # Initialize interaction if needed
+        # Resolve interaction configuration before allocating trajectory state.
         interaction = None
         interaction_kwargs = {}
         if self.interaction_config_file:
@@ -143,8 +173,7 @@ class ToolAgentLoop(AgentLoopBase):
                     f"{list(self.interaction_map.keys())}"
                 )
             interaction = self.interaction_map[interaction_name]
-            await interaction.start_interaction(request_id, **interaction_kwargs)
-        # Create AgentData instance to encapsulate all state
+
         agent_data = AgentData(
             messages=messages,
             image_data=image_data,
@@ -155,26 +184,37 @@ class ToolAgentLoop(AgentLoopBase):
             interaction_kwargs=interaction_kwargs,
         )
 
-        # State machine loop
-        state = AgentState.PENDING
-        while state != AgentState.TERMINATED:
-            if state == AgentState.PENDING:
-                state = await self._handle_pending_state(agent_data, sampling_params)
-            elif state == AgentState.GENERATING:
-                state = await self._handle_generating_state(agent_data, sampling_params)
-            elif state == AgentState.PROCESSING_TOOLS:
-                state = await self._handle_processing_tools_state(agent_data)
-            elif state == AgentState.INTERACTING:
-                state = await self._handle_interacting_state(agent_data)
-            else:
-                logger.error(f"Invalid state: {state}")
-                state = AgentState.TERMINATED
-
-        # Calculate final reward from interaction if available
         reward_score = None
         conditional_prm_info = {}
-        if agent_data.interaction is not None:
-            try:
+        interaction_started = False
+        try:
+            if agent_data.interaction is not None:
+                # Finalization is idempotent and also runs when reset fails.
+                interaction_started = True
+                await agent_data.interaction.start_interaction(request_id, **interaction_kwargs)
+                initial_observation = await agent_data.interaction.get_initial_observation(
+                    request_id, **interaction_kwargs
+                )
+                if initial_observation is not None:
+                    initial_observation = str(initial_observation)
+                    if not initial_observation:
+                        raise RuntimeError("Interaction returned an empty initial observation")
+                    merge_initial_user_message(messages, initial_observation)
+
+            state = AgentState.PENDING
+            while state != AgentState.TERMINATED:
+                if state == AgentState.PENDING:
+                    state = await self._handle_pending_state(agent_data, sampling_params)
+                elif state == AgentState.GENERATING:
+                    state = await self._handle_generating_state(agent_data, sampling_params)
+                elif state == AgentState.PROCESSING_TOOLS:
+                    state = await self._handle_processing_tools_state(agent_data)
+                elif state == AgentState.INTERACTING:
+                    state = await self._handle_interacting_state(agent_data)
+                else:
+                    raise RuntimeError(f"Invalid agent state: {state}")
+
+            if agent_data.interaction is not None and agent_data.valid_for_training:
                 raw_score = await agent_data.interaction.calculate_score(agent_data.request_id)
                 if isinstance(raw_score, dict):
                     reward_score = raw_score.get("score", 0.0)
@@ -184,12 +224,39 @@ class ToolAgentLoop(AgentLoopBase):
                     }
                 else:
                     reward_score = raw_score
-            except Exception as e:
-                logger.warning(f"Error calculating final score for request {agent_data.request_id}: {e}")
+            elif agent_data.interaction is not None:
+                reward_score = 0.0
+        except Exception as exc:
+            agent_data.invalidate("agent_loop", f"{type(exc).__name__}: {exc}")
+            reward_score = 0.0
+            conditional_prm_info = {}
+            logger.exception("Infrastructure failure in agent loop for request %s", request_id)
+        finally:
+            if interaction_started and agent_data.interaction is not None:
+                try:
+                    await agent_data.interaction.finalize_interaction(agent_data.request_id)
+                except Exception as exc:
+                    agent_data.invalidate("finalize_interaction", f"{type(exc).__name__}: {exc}")
+                    reward_score = 0.0
+                    conditional_prm_info = {}
+                    logger.exception("Error finalizing interaction %s", agent_data.request_id)
+
+        if not agent_data.valid_for_training:
+            reward_score = 0.0
 
         # Finalize output
-        response_ids = agent_data.prompt_ids[-len(agent_data.response_mask) :]
-        prompt_ids = agent_data.prompt_ids[: len(agent_data.prompt_ids) - len(agent_data.response_mask)]
+        assistant_turn_spans, assistant_turn_rewards = clip_turn_reward_events(
+            agent_data.assistant_turn_spans,
+            agent_data.assistant_turn_rewards,
+            self.response_length,
+        )
+        response_token_count = len(agent_data.response_mask)
+        if response_token_count:
+            response_ids = agent_data.prompt_ids[-response_token_count:]
+            prompt_ids = agent_data.prompt_ids[:-response_token_count]
+        else:
+            response_ids = []
+            prompt_ids = agent_data.prompt_ids
         multi_modal_data = {"image": agent_data.image_data} if agent_data.image_data is not None else {}
         output = AgentLoopOutput(
             prompt_ids=prompt_ids,
@@ -207,9 +274,14 @@ class ToolAgentLoop(AgentLoopBase):
         output.extra_fields.update({
             "turn_scores": agent_data.turn_scores,
             "tool_rewards": agent_data.tool_rewards,
+            "assistant_turn_spans": assistant_turn_spans,
+            "assistant_turn_rewards": assistant_turn_rewards,
             "reasoning_tokens_per_turn": agent_data.reasoning_tokens_per_turn,
             "total_tool_calls": agent_data.total_tool_calls,
             "total_errors": agent_data.total_errors,
+            "valid_for_training": agent_data.valid_for_training,
+            "failure_stage": agent_data.failure_stage,
+            "failure_reason": agent_data.failure_reason,
         })
         if conditional_prm_info:
             output.extra_fields.update(conditional_prm_info)
@@ -257,10 +329,18 @@ class ToolAgentLoop(AgentLoopBase):
                 image_data=agent_data.image_data,
             )
 
+        turn_start = len(agent_data.response_mask)
         agent_data.assistant_turns += 1
         agent_data.response_ids = output.token_ids
         agent_data.prompt_ids += agent_data.response_ids
         agent_data.response_mask += [1] * len(agent_data.response_ids)
+        if agent_data.response_ids:
+            append_assistant_turn(
+                agent_data.assistant_turn_spans,
+                agent_data.assistant_turn_rewards,
+                turn_start,
+                len(agent_data.response_mask),
+            )
         if output.log_probs:
             agent_data.response_logprobs += output.log_probs
 
@@ -312,8 +392,16 @@ class ToolAgentLoop(AgentLoopBase):
 
         # Process tool responses and update multi_modal_data
         # Removed: agent_data.new_images_this_turn = []
-        agent_data.total_tool_calls += len(agent_data.tool_calls)
-        for tool_response, tool_reward, _ in responses:
+        agent_data.total_tool_calls += len(responses)
+        environment_done = False
+        for tool_response, tool_reward, tool_metadata in responses:
+            tool_metadata = tool_metadata or {}
+            if tool_metadata.get("valid_for_training") is False:
+                agent_data.invalidate(
+                    "tool_execution",
+                    str(tool_metadata.get("detail") or tool_metadata.get("error") or "tool infrastructure failure"),
+                )
+            environment_done = environment_done or bool(tool_metadata.get("done", False))
             if tool_response.text and tool_response.text.startswith("Error:"):
                 agent_data.total_errors += 1
             # Create message from tool response
@@ -362,6 +450,7 @@ class ToolAgentLoop(AgentLoopBase):
 
             if tool_reward is not None:
                 agent_data.tool_rewards.append(tool_reward)
+                accumulate_latest_turn_reward(agent_data.assistant_turn_rewards, tool_reward)
 
         agent_data.messages.extend(add_messages)
         # Update prompt with tool responses
@@ -416,6 +505,8 @@ class ToolAgentLoop(AgentLoopBase):
         if agent_data.response_logprobs:
             agent_data.response_logprobs += [0.0] * len(response_ids)
         agent_data.user_turns += 1
+        if environment_done or not agent_data.valid_for_training:
+            return AgentState.TERMINATED
         return AgentState.GENERATING
 
     async def _handle_interacting_state(self, agent_data: AgentData) -> AgentState:
@@ -428,6 +519,12 @@ class ToolAgentLoop(AgentLoopBase):
         ) = await agent_data.interaction.generate_response(
             agent_data.request_id, agent_data.messages, **agent_data.interaction_kwargs
         )
+        metrics = metrics or {}
+        if metrics.get("valid_for_training") is False:
+            agent_data.invalidate(
+                "interaction",
+                str(metrics.get("reason") or metrics.get("error") or "interaction infrastructure failure"),
+            )
         agent_data.user_turns += 1
 
         add_messages: list[dict[str, Any]] = [{"role": "user", "content": interaction_responses}]
@@ -435,6 +532,7 @@ class ToolAgentLoop(AgentLoopBase):
 
         if reward is not None:
             agent_data.turn_scores.append(reward)
+            accumulate_latest_turn_reward(agent_data.assistant_turn_rewards, reward)
 
         # Update prompt with user responses (similar to _handle_processing_tools_state)
         if self.processor is not None:
@@ -475,26 +573,69 @@ class ToolAgentLoop(AgentLoopBase):
         """Call tool and return tool response."""
         tool, instance_id = None, None
         try:
-            # TODO: append malformed tool_call to the prompt: invalid function name or arguments
             tool_name = tool_call.name
-            tool_args = json.loads(tool_call.arguments)
+            parse_error = getattr(tool_call, "parse_error", None)
+            raw_arguments = getattr(tool_call, "raw_call", None) or tool_call.arguments
+            if parse_error:
+                record_policy_error_action(
+                    tool_name, {}, "invalid_tool_arguments", raw_arguments=raw_arguments
+                )
+                return (
+                    ToolResponse(text=f"Error: invalid tool call: {parse_error}"),
+                    0.0,
+                    {"error": "invalid_tool_arguments", "policy_error": True, "valid_for_training": True},
+                )
+            try:
+                tool_args = json.loads(tool_call.arguments)
+            except (json.JSONDecodeError, TypeError) as exc:
+                record_policy_error_action(
+                    tool_name, {}, "invalid_tool_arguments", raw_arguments=raw_arguments
+                )
+                return (
+                    ToolResponse(text=f"Error: invalid JSON tool arguments: {exc}"),
+                    0.0,
+                    {"error": "invalid_tool_arguments", "policy_error": True, "valid_for_training": True},
+                )
+            if not isinstance(tool_args, dict):
+                record_policy_error_action(
+                    tool_name, {}, "invalid_tool_arguments", raw_arguments=raw_arguments
+                )
+                return (
+                    ToolResponse(text="Error: tool arguments must be a JSON object"),
+                    0.0,
+                    {"error": "invalid_tool_arguments", "policy_error": True, "valid_for_training": True},
+                )
+            if tool_name not in self.tools:
+                record_policy_error_action(
+                    tool_name, tool_args, "unknown_tool", raw_arguments=raw_arguments
+                )
+                return (
+                    ToolResponse(text=f"Error: unknown tool '{tool_name}'"),
+                    0.0,
+                    {"error": "unknown_tool", "policy_error": True, "valid_for_training": True},
+                )
             tool = self.tools[tool_name]
             kwargs = tools_kwargs.get(tool_name, {})
             instance_id, _ = await tool.create(create_kwargs=kwargs.get("create_kwargs", {}))
             tool_execution_response, tool_reward, res = await tool.execute(instance_id, tool_args)
-        except Exception as e:
-            import traceback
-            logger.warning(f"Error when executing tool: {e}\n{traceback.format_exc()}")
+        except Exception as exc:
+            logger.exception("Infrastructure error when executing tool %s", tool_call.name)
             return (
-                ToolResponse(
-                    text=f"Error when executing tool: {e}",
-                ),
+                ToolResponse(text=f"Error: {type(exc).__name__}: {exc}"),
                 0.0,
-                {},
+                {
+                    "error": "tool_runtime_exception",
+                    "detail": f"{type(exc).__name__}: {exc}",
+                    "valid_for_training": False,
+                },
             )
         finally:
             if tool and instance_id:
-                await tool.release(instance_id)
+                try:
+                    await tool.release(instance_id)
+                except Exception:
+                    logger.exception("Infrastructure error releasing tool %s", tool_call.name)
+                    raise
 
         tool_response_text = tool_execution_response.text
         if tool_response_text and len(tool_response_text) > self.max_tool_response_length:

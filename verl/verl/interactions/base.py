@@ -53,7 +53,13 @@ class BaseInteraction:
         additional_data: dict[str, Any] = {}
         return should_terminate_sequence, response_content, current_turn_score, additional_data
 
-    async def calculate_score(self) -> float:  # More clear score calculation method
+    async def get_initial_observation(self, instance_id: str, **kwargs) -> Optional[str]:
+        """Return an environment reset observation when the interaction owns it."""
+        return None
+
+    async def calculate_score(
+        self, instance_id: Optional[str] = None, **kwargs
+    ) -> float:  # More clear score calculation method
         """
         Calculates a score for the interaction,
         potentially considering aspects like partial exposure & in-context task switching.
@@ -63,7 +69,9 @@ class BaseInteraction:
         score = 0.0
         return score
 
-    async def finalize_interaction(self) -> None:  # More clear interaction end and resource release method
+    async def finalize_interaction(
+        self, instance_id: Optional[str] = None, **kwargs
+    ) -> None:  # More clear interaction end and resource release method
         """
         Finalizes the interaction session and releases any associated state or resources.
         Simulates: release state

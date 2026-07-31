@@ -38,6 +38,12 @@ class FunctionCall(BaseModel):
     name: str
     """The name of the function to call."""
 
+    parse_error: str | None = None
+    """Parser failure retained as a policy action instead of being silently dropped."""
+
+    raw_call: str | None = None
+    """Original serialized call, used only for diagnostics when parsing fails."""
+
 
 class ToolParser(ABC):
     _registry: dict[str, type["ToolParser"]] = {}
@@ -131,6 +137,14 @@ class HermesToolParser(ToolParser):
                     function_calls.append(FunctionCall(name=name, arguments=json.dumps(arguments, ensure_ascii=False)))
                 except Exception as e:
                     logger.error(f"Failed to decode tool call: {e}")
+                    function_calls.append(
+                        FunctionCall(
+                            name="<malformed_tool_call>",
+                            arguments="{}",
+                            parse_error=f"{type(e).__name__}: {e}",
+                            raw_call=match,
+                        )
+                    )
 
         # remaing text exclude tool call tokens
         content = self.tool_call_regex.sub("", text)

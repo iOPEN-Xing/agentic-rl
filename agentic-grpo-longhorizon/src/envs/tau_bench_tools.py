@@ -86,8 +86,8 @@ class TauBenchToolBase(BaseTool):
         2. 调 env.step(Action(tool_name, parameters))
         3. observation 回传给模型,inc_reward 累计到 state
 
-        step-level reward 永远返回 0.0: 锁定 reward 走 Interaction 的 outcome
-        (改进方案若引入 step reward,改这里)
+        Returns the environment incremental reward for turn-level credit assignment.
+        Session scoring remains owned by Interaction.calculate_score.
         """
         env = CURRENT_TAU_ENV.get()
         state = CURRENT_TAU_STATE.get()
@@ -116,7 +116,12 @@ class TauBenchToolBase(BaseTool):
             return (
                 ToolResponse(text=err_msg),
                 0.0,
-                {"error": "env_step_exception", "tool": self.name, "detail": str(e)},
+                {
+                    "error": "env_step_exception",
+                    "tool": self.name,
+                    "detail": f"{type(e).__name__}: {e}",
+                    "valid_for_training": False,
+                },
             )
 
         obs = str(getattr(step_res, "observation", ""))
@@ -147,7 +152,7 @@ class TauBenchToolBase(BaseTool):
 
         return (
             ToolResponse(text=obs),
-            0.0,  # step reward = 0 (baseline)
+            inc_reward,  # consumed only by the hybrid turn-advantage path
             {"inc_reward": inc_reward, "done": is_done, "tool": self.name},
         )
 

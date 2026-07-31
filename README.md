@@ -221,6 +221,7 @@ bash eval_exp4_prm_lite_lata.sh
 |----------|---------|
 | [`docs/ablation/ablation_diagnosis_report.md`](docs/ablation/ablation_diagnosis_report.md) | **Main report**: training curves, eval data, mechanism analysis, hypothesis validation |
 | [`docs/ablation/ablation_plan.md`](docs/ablation/ablation_plan.md) | Experiment design manual: code implementation, PRM-Lite rule set, hacking risk analysis |
+| [`agentic-grpo-longhorizon/docs/optimization/hybrid_advantage.md`](agentic-grpo-longhorizon/docs/optimization/hybrid_advantage.md) | Hybrid Advantage equations, rollout contract, tool-error policy, configuration, and CPU validation |
 | [`docs/vanilla_grpo/vanilla_grpo_diagnosis.md`](docs/vanilla_grpo/vanilla_grpo_diagnosis.md) | Vanilla GRPO collapse diagnosis: three root causes, five checkpoints analysis |
 | [`../agentic-grpo-longhorizon-blog.md`](../agentic-grpo-longhorizon-blog.md) | 🆕 Technical blog: from training collapse to stable convergence (PRM-Lite + LATA) |
 
