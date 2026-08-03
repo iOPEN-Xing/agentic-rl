@@ -5,11 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from src.envs.reward_fusion import (
-    HybridRewardCalculator,
-    RewardFusionWeights,
-    reward_consistency,
-)
+from src.envs.reward_fusion import JudgeSignalPolicy, reward_consistency
 from src.envs.user_simulator_judge import JudgeFeedback, UserSimulatorTurnJudge
 
 
@@ -54,7 +50,11 @@ def test_judge_uses_structured_prompt_and_returns_feedback():
         agent_message="I updated the booking.",
         task_goal="Change the return flight.",
         conversation_history=[{"role": "user", "content": "Please change it."}],
-        action_history=[{"tool": "update_reservation_flights", "is_error": False}],
+        action_history=[{
+            "tool": "update_reservation_flights",
+            "is_error": True,
+            "observation": "Error: cabin cannot be changed.",
+        }],
     ))
 
     assert feedback.valid
@@ -62,6 +62,7 @@ def test_judge_uses_structured_prompt_and_returns_feedback():
     request = client.chat.completions.kwargs
     assert request["temperature"] == 0.0
     assert "task_goal" in request["messages"][1]["content"]
+    assert "Error: cabin cannot be changed." in request["messages"][1]["content"]
 
 
 def test_judge_failure_is_explicitly_unavailable():
@@ -81,40 +82,25 @@ def test_judge_failure_is_explicitly_unavailable():
     assert "ValueError" in feedback.error
 
 
-def test_environment_reward_remains_dominant():
-    calculator = HybridRewardCalculator(RewardFusionWeights(0.6, 0.3, 0.1))
-    perfect_judge = JudgeFeedback(
-        task_progress=1.0,
-        tool_correctness=1.0,
-        communication=1.0,
+def test_judge_signal_is_centered_and_bounded():
+    policy = JudgeSignalPolicy(neutral_score=0.5)
+    positive = JudgeFeedback(
+        task_progress=0.8,
+        tool_correctness=0.9,
+        communication=0.7,
         valid=True,
     )
-    poor_judge = JudgeFeedback(valid=True)
+    negative = JudgeFeedback(valid=True)
 
-    failed_score, _ = calculator.compute_session_reward(
-        outcome=0.0,
-        judge_feedback=[perfect_judge],
-        prm_score=0.5,
-    )
-    successful_score, _ = calculator.compute_session_reward(
-        outcome=1.0,
-        judge_feedback=[poor_judge],
-        prm_score=-0.5,
-    )
-    assert failed_score == pytest.approx(0.4)
-    assert successful_score == pytest.approx(0.6)
-    assert successful_score > failed_score
+    assert policy.compute(positive) == pytest.approx(0.65)
+    assert policy.compute(negative) == pytest.approx(-1.0)
 
 
-def test_unavailable_judge_is_removed_from_denominator():
-    calculator = HybridRewardCalculator()
-    score, details = calculator.compute_turn_reward(
-        environment_reward=1.0,
-        judge_feedback=JudgeFeedback.unavailable("timeout"),
-        prm_score=-0.5,
-    )
-    assert score == pytest.approx(0.6 / 0.7)
-    assert not details["judge_available"]
+def test_unavailable_judge_has_no_trainable_signal():
+    policy = JudgeSignalPolicy()
+    assert policy.compute(JudgeFeedback.unavailable("timeout")) is None
+    with pytest.raises(ValueError):
+        policy.compute(JudgeFeedback(task_progress=float("nan"), valid=True))
 
 
 class _FixedJudge:
@@ -135,20 +121,25 @@ class _FakeEnv:
         return SimpleNamespace(observation="What date works?", reward=0.0, done=False)
 
 
-def test_tau_bench_interaction_emits_judge_turn_reward():
+def test_tau_bench_interaction_keeps_outcome_pure_and_emits_auxiliary_signal():
     from src.envs.tau_bench_context import make_initial_state
     from src.envs.tau_bench_interaction import TauBenchInteraction
 
     interaction = TauBenchInteraction({
         "judge_enabled": True,
-        "judge_env_weight": 0.6,
-        "judge_weight": 0.3,
-        "judge_prm_weight": 0.1,
+        "judge_neutral_score": 0.5,
     })
     interaction._turn_judge = _FixedJudge()
+    state = make_initial_state(0)
+    state["action_history"].append({
+        "tool": "update_reservation_flights",
+        "parameters": {"reservation_id": "ABC123"},
+        "is_error": False,
+        "observation": "Reservation updated.",
+    })
     interaction._instance_dict["request"] = {
         "env": _FakeEnv(),
-        "state": make_initial_state(0),
+        "state": state,
     }
 
     terminated, response, reward, metadata = asyncio.run(interaction.generate_response(
@@ -158,14 +149,44 @@ def test_tau_bench_interaction_emits_judge_turn_reward():
 
     assert not terminated
     assert response == "What date works?"
-    assert reward > 0.0
+    assert reward == pytest.approx(0.65)
     assert metadata["judge_valid"]
     assert metadata["judge_score"] == pytest.approx(0.825)
+    assert metadata["judge_training_signal"] == pytest.approx(0.65)
     assert metadata["judge_improvement_hint"] == "verify the date"
     session_score = asyncio.run(interaction.calculate_score("request"))
-    assert session_score["score"] == pytest.approx(0.2975)
-    assert session_score["judge_score"] == pytest.approx(0.825)
+    assert session_score["score"] == 0.0
+    assert session_score["outcome_score"] == 0.0
+    assert session_score["judge_mean_score"] == pytest.approx(0.825)
     assert session_score["judge_valid_turns"] == 1
+    assert session_score["judge_valid_rate"] == 1.0
+    assert state["last_judged_action_index"] == 1
+
+
+class _UnavailableJudge:
+    async def evaluate(self, **kwargs):
+        return JudgeFeedback.unavailable("timeout")
+
+
+def test_tau_bench_interaction_does_not_materialize_failed_judge_call():
+    from src.envs.tau_bench_context import make_initial_state
+    from src.envs.tau_bench_interaction import TauBenchInteraction
+
+    interaction = TauBenchInteraction({"judge_enabled": True})
+    interaction._turn_judge = _UnavailableJudge()
+    interaction._instance_dict["request"] = {
+        "env": _FakeEnv(),
+        "state": make_initial_state(0),
+    }
+
+    _, _, reward, metadata = asyncio.run(interaction.generate_response(
+        "request",
+        [{"role": "assistant", "content": "I can help."}],
+    ))
+
+    assert reward is None
+    assert not metadata["judge_valid"]
+    assert metadata["judge_training_signal"] is None
 
 
 

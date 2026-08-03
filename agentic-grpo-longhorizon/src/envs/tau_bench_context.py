@@ -46,6 +46,8 @@ def make_initial_state(task_id: int) -> dict:
         "action_history": [],
         "transferred_to_human": False,
         "judge_feedback": [],
-        "judge_turn_rewards": [],
-        "reward_source_history": [],
+        "judge_turn_signals": [],
+        # Index into action_history. One judge event covers one user-to-user
+        # interaction cycle, not each individual tool call.
+        "last_judged_action_index": 0,
     }

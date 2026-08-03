@@ -1,5 +1,5 @@
 # Exp 2: LATA GRPO hf_step_250 评测配置
-# policy = hf_step_250, user sim = 72B-AWQ
+# policy = hf_step_250, user sim = fixed Qwen3-14B
 
 env:
   name: airline
@@ -10,7 +10,7 @@ env:
   task_split: test
 
 policy:
-  model_name: "Qwen/Qwen2.5-7B-Instruct"
+  model_name: "agentic-rl-policy"
   base_url: "http://localhost:8000/v1"
   temperature: 0.7
   top_p: 0.9

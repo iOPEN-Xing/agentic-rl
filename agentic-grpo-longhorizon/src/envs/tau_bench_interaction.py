@@ -27,11 +27,7 @@ from src.envs.tau_bench_context import (
     CURRENT_ASSISTANT_CONTENT,
     make_initial_state,
 )
-from src.envs.reward_fusion import (
-    HybridRewardCalculator,
-    RewardFusionWeights,
-    reward_consistency,
-)
+from src.envs.reward_fusion import JudgeSignalPolicy
 from src.envs.user_simulator_judge import JudgeFeedback, UserSimulatorTurnJudge
 
 
@@ -333,7 +329,9 @@ class TauBenchInteraction(BaseInteraction):
         logger.info(f"[TauBenchInteraction] reward_mode={self.reward_mode}")
         self.judge_enabled = bool(config.get("judge_enabled", False))
         self._turn_judge: Optional[UserSimulatorTurnJudge] = None
-        self._reward_fusion: Optional[HybridRewardCalculator] = None
+        self._judge_signal_policy = JudgeSignalPolicy(
+            neutral_score=float(config.get("judge_neutral_score", 0.5))
+        )
         if self.judge_enabled:
             self._turn_judge = UserSimulatorTurnJudge(
                 model=str(config.get("judge_model", self.user_model)),
@@ -342,14 +340,11 @@ class TauBenchInteraction(BaseInteraction):
                 timeout=float(config.get("judge_timeout", 30.0)),
                 max_tokens=int(config.get("judge_max_tokens", 256)),
             )
-            self._reward_fusion = HybridRewardCalculator(
-                RewardFusionWeights(
-                    environment=float(config.get("judge_env_weight", 0.6)),
-                    judge=float(config.get("judge_weight", 0.3)),
-                    prm=float(config.get("judge_prm_weight", 0.1)),
-                )
-            )
-        logger.info("[TauBenchInteraction] judge_enabled=%s", self.judge_enabled)
+        logger.info(
+            "[TauBenchInteraction] judge_enabled=%s judge_neutral_score=%.3f",
+            self.judge_enabled,
+            self._judge_signal_policy.neutral_score,
+        )
 
         self._instance_dict: dict[str, dict] = {}
 
@@ -409,7 +404,7 @@ class TauBenchInteraction(BaseInteraction):
         instance_id: str,
         messages: list[dict[str, Any]],
         **kwargs,
-    ) -> tuple[bool, str, float, dict[str, Any]]:
+    ) -> tuple[bool, str, Optional[float], dict[str, Any]]:
         """
         被 ToolAgentLoop 在 AgentState.INTERACTING 触发(assistant 输出了不带 tool_calls 的 message)。
 
@@ -417,7 +412,8 @@ class TauBenchInteraction(BaseInteraction):
             (should_terminate, user_response_content, reward, metadata)
             - should_terminate: True 则本 trajectory 结束
             - user_response_content: 返回给模型的 user reply(空串 = terminate 时不需要)
-            - reward: 本 turn 的 reward(终止时是 final outcome reward,否则 0)
+            - reward: Judge 开启时是当前交互段的有界辅助信号；Judge
+              不可用时为 None。终局 task outcome 始终由 calculate_score 返回。
             - metadata: 诊断用(num_turns, contaminated, error 等)
         """
         entry = self._instance_dict.get(instance_id)
@@ -474,7 +470,7 @@ class TauBenchInteraction(BaseInteraction):
             return (
                 True,
                 "",
-                0.0,
+                None if self.judge_enabled else 0.0,
                 {
                     "contaminated": True,
                     "reason": "forbidden_template_token",
@@ -503,7 +499,7 @@ class TauBenchInteraction(BaseInteraction):
             return (
                 True,
                 "",
-                0.0,
+                None if self.judge_enabled else 0.0,
                 {
                     "error": "respond_exception",
                     "reason": f"{type(e).__name__}: {e}",
@@ -517,26 +513,24 @@ class TauBenchInteraction(BaseInteraction):
         state["num_user_turns"] += 1
 
         total_turns = state["num_user_turns"] + state["num_tool_calls"]
-        turn_reward = 0.0
+        turn_signal: Optional[float] = None
         judge_metadata: dict[str, Any] = {}
         if self.judge_enabled:
             assert self._turn_judge is not None
-            assert self._reward_fusion is not None
+            action_history = state.get("action_history", [])
+            cycle_start = int(state.get("last_judged_action_index", 0))
+            cycle_actions = action_history[cycle_start:]
             feedback = await self._turn_judge.evaluate(
                 agent_message=assistant_content,
                 task_goal=getattr(getattr(env, "task", None), "instruction", ""),
                 conversation_history=messages,
-                action_history=state.get("action_history", []),
+                action_history=cycle_actions,
             )
-            process_score = _compute_reasoning_quality_score(state.get("action_history", []))
-            turn_reward, source_info = self._reward_fusion.compute_turn_reward(
-                environment_reward=inc_reward,
-                judge_feedback=feedback,
-                prm_score=process_score,
-            )
+            state["last_judged_action_index"] = len(action_history)
+            turn_signal = self._judge_signal_policy.compute(feedback)
             state["judge_feedback"].append(feedback)
-            state["judge_turn_rewards"].append(turn_reward)
-            state["reward_source_history"].append(source_info)
+            if turn_signal is not None:
+                state["judge_turn_signals"].append(turn_signal)
             judge_metadata = {
                 "judge_valid": feedback.valid,
                 "judge_score": feedback.score,
@@ -545,7 +539,8 @@ class TauBenchInteraction(BaseInteraction):
                 "judge_communication": feedback.communication,
                 "judge_improvement_hint": feedback.improvement_hint,
                 "judge_error": feedback.error,
-                "judge_turn_reward": turn_reward,
+                "judge_cycle_tool_calls": len(cycle_actions),
+                "judge_training_signal": turn_signal,
             }
 
         # 终止条件: env 说 done / 超 max_turns
@@ -555,7 +550,7 @@ class TauBenchInteraction(BaseInteraction):
             return (
                 True,
                 "",
-                turn_reward if self.judge_enabled else final_score,
+                turn_signal if self.judge_enabled else final_score,
                 {
                     "total_reward": state["total_reward"],
                     "environment_final_score": final_score,
@@ -575,7 +570,7 @@ class TauBenchInteraction(BaseInteraction):
         return (
             False,
             user_reply,
-            turn_reward,
+            turn_signal if self.judge_enabled else 0.0,
             {
                 "turn": total_turns,
                 "num_tool_calls": state["num_tool_calls"],
@@ -598,29 +593,29 @@ class TauBenchInteraction(BaseInteraction):
         process = _compute_reasoning_quality_score(state.get("action_history", []))
 
         if self.judge_enabled:
-            assert self._reward_fusion is not None
             feedback: list[JudgeFeedback] = state.get("judge_feedback", [])
-            score, source_info = self._reward_fusion.compute_session_reward(
-                outcome=outcome,
-                judge_feedback=feedback,
-                prm_score=process,
-            )
-            valid_sources = [
-                source for source in state.get("reward_source_history", [])
-                if source.get("judge_available", False)
-            ]
-            consistency = reward_consistency(
-                [float(source["environment_score"]) for source in valid_sources],
-                [float(source["judge_score"]) for source in valid_sources],
-            )
+            valid_scores = [item.score for item in feedback if item.valid]
+            total_judged_turns = len(feedback)
             return {
-                "score": score,
+                # The environment verifier is the only source of task success.
+                "score": outcome,
                 "outcome_score": outcome,
                 "process_score": process,
-                "judge_score": source_info["judge_score"],
-                "judge_valid_turns": len(valid_sources),
-                "judge_env_correlation": consistency["correlation"],
-                "judge_env_conflict": consistency["conflict"],
+                "judge_mean_score": (
+                    sum(valid_scores) / len(valid_scores) if valid_scores else None
+                ),
+                "judge_valid_turns": len(valid_scores),
+                "judge_total_turns": total_judged_turns,
+                "judge_valid_rate": (
+                    len(valid_scores) / total_judged_turns
+                    if total_judged_turns > 0
+                    else 0.0
+                ),
+                "judge_signal_mean": (
+                    sum(state["judge_turn_signals"]) / len(state["judge_turn_signals"])
+                    if state.get("judge_turn_signals")
+                    else None
+                ),
             }
 
         if self.reward_mode == "binary":

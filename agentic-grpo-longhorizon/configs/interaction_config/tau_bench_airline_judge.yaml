@@ -16,6 +16,6 @@ interaction:
       judge_base_url: "http://localhost:8001/v1"
       judge_timeout: 30.0
       judge_max_tokens: 256
-      judge_env_weight: 0.6
-      judge_weight: 0.3
-      judge_prm_weight: 0.1
+      # Raw judge score 0.5 is neutral; valid scores are centered to [-1, 1].
+      # Terminal task success remains the rule-based τ-bench outcome.
+      judge_neutral_score: 0.5

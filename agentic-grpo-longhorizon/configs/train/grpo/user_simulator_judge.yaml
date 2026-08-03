@@ -88,8 +88,10 @@ algorithm:
   rollout_correction:
     bypass_mode: true
   judge_turn_reward:
-    enabled: true
-    turn_weight: 0.1
+    # Safe default: collect/calibrate judge diagnostics without changing GRPO.
+    # Enable only after held-out calibration; contribution stays in [-0.05, 0.05].
+    enabled: false
+    turn_weight: 0.05
 
 trainer:
   total_epochs: 50

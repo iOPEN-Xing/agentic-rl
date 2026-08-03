@@ -1,260 +1,313 @@
-# Agentic-GRPO-LongHorizon
+# User-Simulator Judge for τ-bench Airline
 
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
-[![PyTorch 2.7](https://img.shields.io/badge/PyTorch-2.7-red.svg)](https://pytorch.org/)
-[![CUDA 12.6](https://img.shields.io/badge/CUDA-12.6-green.svg)](https://developer.nvidia.com/cuda-downloads)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-> **Solving GRPO Training Collapse in Long-Horizon Multi-Tool Agents**  
-> A systematic ablation study on τ-bench airline (50-task, multi-turn, multi-tool conversational agents), achieving **+37% overall pass^1** over vanilla GRPO via a novel **PRM-Lite + LATA** joint approach.
+This branch adds an LLM judge to every user/agent interaction cycle.  The judge
+observes the task goal, recent dialogue, tool parameters, tool observations and
+tool-error flags, then returns structured progress, tool-correctness and
+communication scores.
 
----
+The safe default is deliberately conservative:
 
-## 🔥 Key Results
+> the judge is collected and logged, but does not change the GRPO reward unless
+> `algorithm.judge_turn_reward.enabled=true` is explicitly set after held-out
+> calibration.
 
-**Best checkpoint (step 250): Joint (PRM-Lite + LATA) achieves 0.240 overall pass^1 — a +37% relative gain over the vanilla GRPO baseline (0.175).**
+The branch is useful as a judge-calibration and reward-shaping experiment.  It
+is **not a complete implementation of UserRL** and should not be described as
+turn-local UserRL credit assignment.
 
-| Metric | Vanilla | Turn-Discount | PRM-Lite | LATA | **Joint** | Δ vs Vanilla |
-|--------|---------|---------------|----------|------|-----------|-------------|
-| **Overall pass^1** | 0.175 | 0.125 | 0.140 | 0.185 | **0.240** | **+37%** |
-| **Generalization** | 0.071 | 0.052 | 0.059 | 0.088 | **0.110** | **+55%** |
-| **Error Rate** | 0.200 | 0.345 | 0.365 | 0.290 | **0.140** | **−30%** |
-| **Reasoning Depth** (p50 tokens) | 72 | 245 | 169 | 183 | **313** | **+334%** |
+## Audit Verdict
 
-> *Generalization pass^1 = (uncovered_seen × 24 + unseen × 10) / 34, the core metric excluding train-set leakage.*
+The current implementation is internally consistent for its declared scope:
 
-### Multi-Dimensional Comparison
+- the terminal score remains the rule-based τ-bench verifier outcome;
+- the judge sees actual tool observations and error status instead of trusting
+  the assistant's textual claim;
+- strict JSON parsing, finite numeric checks and `[0,1]` clipping protect the
+  interface;
+- a raw score of `0.5` maps to zero, so judge availability does not create an
+  automatic positive reward;
+- invalid or unavailable judge output becomes a missing event, not a zero-score
+  penalty;
+- optional shaping is averaged over valid events and bounded to at most `0.1`
+  per trajectory, preserving terminal-outcome dominance;
+- valid rate, judge mean and cross-trajectory judge/outcome correlation are
+  exposed as training diagnostics.
 
-![Ablation Comparison](ablation_comparison.png)
+However, standard GRPO later sums token rewards into one trajectory score and
+broadcasts one group-relative advantage.  Therefore enabling the optional
+judge term still does **not** preserve which assistant turn earned each score.
 
-### Training Progression
+## Signal Path
 
-![Training Progression](ablation_progression.png)
-
-> **Observation**: Turn-Discount plateaus (passive protection); LATA sustains growth via √L normalization; the Joint approach peaks at step 250 (0.240) and gracefully degrades at step 300 (0.225).
-
----
-
-## 🎯 Problem & Motivation
-
-Standard **GRPO (Group Relative Policy Optimization)** suffers from catastrophic **training collapse** when applied to long-horizon, multi-tool conversational agents on τ-bench airline (50 tasks, 40 train / 10 test). We identified **three root causes**:
-
-### 1. Group Reward Saturation (Bidirectional Deadlock)
-Outcome reward is binary (0/1). With `group_size=8`, the group easily reaches all-0 or all-1 states → `advantage variance → 0` → gradient vanishes.
-
-### 2. Training-Set Leakage Bias
-16 of 40 train tasks are *covered_seen* (72B teacher trajectories available). Policy memorizes teacher patterns, inflating covered performance while uncovered/unseen remain near zero.
-
-### 3. Per-Turn Reasoning Degeneration
-Linear length normalization `advantage / L` penalizes long responses. Policy learns to **"trade quantity for quality"** — short reasoning + frequent tool trial-and-error — leading to collapse after step 150.
-
-> **Critical Finding**: Training validation reward is **not** a reliable proxy. Turn-Discount reports val reward 0.80 but true eval is only 0.125 — a **6.4× gap**.
-
----
-
-## 💡 Method
-
-We design and validate **four ablation experiments**, each addressing specific failure modes:
-
-### Exp 1: Turn-Discounted Advantage
-**Idea**: Protect early-turn reasoning by exponentially decaying token weights.  
-**Mechanism**: `weight[t] = α^(L-1-t)` with `α=1.05`, normalized so `mean(weight)=1`. Early tokens receive higher advantage, discouraging late-stage guessing.  
-**Result**: Successfully prevents collapse shape (response length −23% vs vanilla −63%), but eval remains low (0.125) due to lack of quality guidance.
-
-### Exp 2: LATA — Length-Aware Turn-Advantage
-**Idea**: Replace linear `1/L` normalization with `1/√L`, preserving marginal incentives for long reasoning.  
-**Mechanism**: `advantage_token = A / sqrt(L)` instead of `A / L`. When response length grows 4×, per-token gradient only halves (vs. quartering in vanilla).  
-**Result**: Sustained improvement (0.155 → 0.185 → 0.190), error rate drops from 0.345 to 0.290, but ceiling visible without quality signals.
-
-### Exp 3: PRM-Lite — Lightweight Process Reward
-**Idea**: Break group saturation with dense, rule-based process rewards.  
-**Mechanism**: 15 hand-crafted rules (P1–P8 penalties, B1–B7 bonuses) providing continuous `[-0.5, +0.5]` signals. Final reward = `outcome + 0.3 × process_score`.  
-**Result**: Successfully eliminates score/min = 0/1 deadlocks, but signal is diluted by trajectory-level linear normalization — error rate actually worsens to 0.365.
-
-### Exp 4: Joint — PRM-Lite + LATA ⭐
-**Idea**: **PRM-Lite supplies local quality signals; LATA's √L normalization ensures these signals are not drowned by response length.**  
-**Mechanism**: Per-turn process score penalties/bonuses propagate through `A/√L` to individual tokens, enabling the policy to learn *which turn was wrong* rather than just *whether the whole trajectory succeeded*.  
-**Result**: **0.240 overall** — surpassing all single-component baselines. Error rate uniquely decreases (0.170 → 0.140 → 0.120). Unseen task performance turns positive and stabilizes.
-
-> **Core Insight**: The value is not in having process rewards *or* better normalization alone — it is in **signal propagation**. PRM-Lite generates local signals; LATA's √L provides the transmission channel. Neither works well in isolation.
-
----
-
-## 🌟 Technical Highlights
-
-### 1. Signal Transmission Theory (Algorithmic Contribution)
-The ablation report empirically proves a **decomposition principle** for GRPO in long-horizon agents:
-- **Signal Source** (PRM-Lite): 15 hand-crafted rules provide dense per-turn quality signals `[-0.5, +0.5]`.
-- **Signal Pathway** (LATA): `advantage / √L` replaces `advantage / L`, preventing response-length dilution.
-- **Isolation Failure**: PRM-Lite alone (0.140 overall, 0.365 error) — signal drowned. LATA alone (0.185 overall) — no signal source. **Only their combination unlocks 0.240**.
-
-> This decomposition is **model-agnostic** and applicable beyond τ-bench to any long-form RL task.
-
-### 2. PRM-Lite v4-Optimal (Interpretable Process Reward)
-A fully interpretable, zero-trainable-parameter process reward model:
-- **P1–P8 Penalties**: Placeholder (−0.05), Redundancy (−0.03), Error repetition (−0.04), No reasoning (−0.05)
-- **B1–B7 Bonuses**: Recovery (+0.05), Data chain (+0.08), Read diversity (+0.01), Think bonus (conditional)
-- **Anti-Hacking Defenses**: Conditional think scoring, schema-based entity extraction, length penalty for n_tools > 8
-
-### 3. Memory-Efficient Training System (Engineering)
-- **Bypass Mode + Fused Kernels + TP=2** reduces per-step memory peak from **OOM to 73.2 GB**, enabling 7B policy + 72B-AWQ simulator on **2×A800**.
-- **Offline-first**: All scripts inject `HF_HUB_OFFLINE=1` for air-gapped HPC clusters.
-- **Render-Twice-Diff SFT**: A template-agnostic loss-masking method for multi-turn tool-calling that avoids off-by-one token errors.
-
----
-
-## 📊 Detailed Results
-
-### Step-by-Step Eval (N=4 samples/task, max_tokens=4096)
-
-| Experiment | Step | Overall | Gen. pass^1 | Error Rate | per_turn p50 | Notes |
-|-----------|------|---------|-------------|------------|--------------|-------|
-| Vanilla | 200 | 0.175 | 0.071 | 0.200 | 72 | Collapse baseline |
-| Turn-Discount | 250 | 0.125 | 0.052 | 0.345 | 245 | Passive protection |
-| PRM-Lite | 250 | 0.140 | 0.059 | 0.365 | 169 | Signal blocked |
-| LATA | 250 | 0.185 | 0.088 | 0.290 | 183 | √L gains |
-| **Joint** | **250** | **0.240** | **0.110** | **0.140** | **313** | **Best checkpoint** |
-
-### Hypothesis Validation
-
-| Hypothesis | Status | Evidence |
-|-----------|--------|----------|
-| H1: Turn-Discount prevents reasoning collapse | ✅ Verified | Response length −23%, no cliff |
-| H2: Joint breaks group saturation | ✅ Verified | score/min never 0/1 across 300 steps |
-| H3: Joint improves OOD generalization | ✅ Verified | unseen positive (0.15–0.175) |
-| H4: LATA improves over Turn-Discount | ✅ Verified | +0.060 overall, −0.055 error |
-| H5: Joint > max(single component) | ✅ Verified | 0.240 > 0.185 > 0.140 > 0.125 |
-
----
-
-## 🏗️ Project Structure
-
-```
-📦 agentic-grpo-longhorizon/
-├── ⚙️ configs/                 # Hydra YAML configs for all experiments
-│   ├── turn_discount.yaml
-│   ├── prm_lite.yaml
-│   ├── lata.yaml
-│   ├── prm_lite_lata.yaml
-│   └── eval/                   # Per-experiment eval configs
-├── 💻 src/                     # Core source code
-│   ├── 🌍 envs/                # τ-bench wrapper & tool configs
-│   │   ├── 🐍 tau_bench_wrapper.py
-│   │   ├── 🐍 tau_bench_interaction.py   # PRM-Lite rule engine
-│   │   └── 🐍 tau_bench_tools.py
-│   ├── 📊 evaluation/
-│   │   └── 🐍 pass_k_eval.py   # Independent pass@k evaluator
-│   ├── 🧠 models/
-│   │   └── 🐍 vllm_policy.py   # vLLM-based policy wrapper
-│   └── 🎓 training/
-│       └── 🐍 sft_dataset.py   # SFT data collection
-├── 📜 scripts/
-│   ├── 🚀 train/grpo/          # GRPO training launchers
-│   │   ├── 📜 run_exp1_turn_discount.sh
-│   │   ├── 📜 run_exp2_lata.sh
-│   │   ├── 📜 run_exp3_prm_lite.sh
-│   │   ├── 📜 run_exp4_prm_lite_lata.sh
-│   │   └── 📜 run_vanilla.sh
-│   ├── 📈 eval/                # Independent eval launchers
-│   │   ├── 📜 eval_exp1_turn_discount.sh
-│   │   ├── 📜 eval_exp2_lata.sh
-│   │   ├── 📜 eval_exp3_prm_lite.sh
-│   │   └── 📜 eval_exp4_prm_lite_lata.sh
-│   ├── 🔧 train/sft/           # SFT warmup scripts
-│   └── 🖥️ vllm_server/         # vLLM server startup scripts
-├── 📚 docs/
-│   └── 🔬 ablation/
-│       ├── 📝 ablation_diagnosis_report.md   # Full diagnosis (≈800 lines)
-│       ├── 📝 ablation_plan.md               # Experiment design manual
-│       ├── 🖼️ ablation_comparison.png
-│       └── 🖼️ ablation_progression.png
-├── 🧪 experiments/             # Checkpoints, HF exports, eval outputs
-├── 📄 requirements.txt
-└── 🔨 setup.sh                 # One-click environment setup
+```text
+task goal + recent dialogue
+          │
+          ├─ current cycle tool calls
+          ├─ parameters
+          ├─ tool observations
+          └─ is_error
+          │
+          ▼
+Qwen3-14B judge, temperature 0
+          │
+          ▼
+{task_progress, tool_correctness, communication}
+          │
+          ▼
+raw judge score = 0.45 progress + 0.40 correctness + 0.15 communication
+          │
+          ▼
+center around 0.5 → turn event in [-1, 1]
+          │
+          ├─ default: diagnostics only
+          │
+          └─ optional: mean valid events × weight (weight ≤ 0.1)
+                                   │
+τ-bench terminal outcome ──────────┤
+                                   ▼
+                         one trajectory reward
+                                   │
+                                   ▼
+                     standard outcome-only GRPO advantage
 ```
 
----
+With the shipped training config, `interaction.judge_enabled=true`, so judge
+events are produced, while `algorithm.judge_turn_reward.enabled=false`, so the
+actor sees exactly the binary terminal reward.  This separation permits
+calibration on the same rollout distribution before the proxy is allowed into
+the objective.
 
-## 🚀 Quick Start
+## Score Semantics
 
-### 1. Environment Setup
+The judge returns three fields:
+
+| Field | Weight | Evidence it should use |
+|---|---:|---|
+| `task_progress` | 0.45 | whether the cycle moves toward the stated task goal |
+| `tool_correctness` | 0.40 | actual tool parameters, observations and errors |
+| `communication` | 0.15 | grounded, clear and policy-compatible response |
+
+If a cycle contains no tool action, the prompt instructs the judge to set tool
+correctness to `0.5`, avoiding invented tool evidence.  The weighted raw score
+is centered by `JudgeSignalPolicy`:
+
+```text
+signal = (score - 0.5) / 0.5
+```
+
+for the default neutral point, producing `[-1,1]`.  If shaping is enabled and
+there are `m` valid judge events:
+
+```text
+R_shaped = R_terminal + w × (1/m) × Σ signal_t,     0 ≤ w ≤ 0.1
+```
+
+The implementation stores contributions at event positions before GRPO sums
+them.  That provenance is helpful for logging and future algorithms, but the
+current estimator reduces them to the scalar above.
+
+## Concrete Airline Case
+
+Suppose a user asks to change one passenger's outbound flight while preserving
+the return leg.
+
+1. The policy reads the reservation with the correct identifier.  The tool
+   returns valid passenger and flight data.  A calibrated judge should assign
+   high correctness and positive progress.
+2. The policy attempts a write with a placeholder passenger ID.  The tool
+   returns an error.  Because the judge receives `is_error=true` and the actual
+   observation, it should score correctness low even if the assistant says the
+   change succeeded.
+3. The policy recovers by reading availability and issuing the valid update.
+   Progress can rise again.
+4. The τ-bench verifier remains decisive: if the wrong flight was changed, the
+   terminal outcome is zero regardless of a fluent final message.
+
+This example highlights both the value and limitation of an LLM judge.  It can
+distinguish grounded recovery from blind repetition more flexibly than fixed
+PRM-Lite rules, but a single scalar trajectory average cannot tell the actor
+that only step 2 was wrong.
+
+## Relationship to UserRL
+
+[UserRL](https://arxiv.org/abs/2509.19736) jointly improves the user simulator
+and assistant, and its public implementation includes multi-turn credit methods
+such as Equalized, R2G and EM turn-credit variants.  This branch differs:
+
+| Dimension | This branch | Full UserRL-style system |
+|---|---|---|
+| user simulator | frozen external Qwen3-14B service | user policy is also optimized |
+| judge | same external endpoint, separate prompt | reward/evaluation components vary by implementation |
+| terminal task truth | τ-bench rule verifier | environment-dependent |
+| judge event location | recorded | used by multi-turn estimator |
+| advantage | standard scalar GRPO | turn-aware aggregation/credit variants |
+| shipped behavior | diagnostic only | learning signal is active |
+
+Accordingly, the accurate name is **outcome-only GRPO with user-simulator judge
+diagnostics and optional bounded trajectory shaping**.
+
+## User Simulator and Judge Determine the Ceiling
+
+The policy does not learn in isolation.  The user simulator controls ambiguity,
+clarification, corrections, termination and distribution of dialogue states.
+An overly cooperative simulator leaks the desired answer; an inconsistent one
+adds reward noise; a narrow one encourages overfitting to phrasing.
+
+The judge controls the quality of dense feedback.  A useful judge must be:
+
+- grounded in observations, not assistant self-report;
+- calibrated across successful and failed trajectories;
+- sensitive to wrong entities, write arguments and tool errors;
+- stable to harmless paraphrases and message formatting;
+- robust to prompt injection inside task text or tool output;
+- sufficiently independent from the policy and simulator to avoid shared bias.
+
+This branch currently uses the same Qwen3-14B endpoint for user simulation and
+judging.  That is economical but creates correlated errors: the simulator may
+generate a dialogue pattern that the same model family systematically rates
+high.  A serious experiment should compare an independent judge model or a
+rule/verifier ensemble.
+
+## Calibration Before Enabling Shaping
+
+At minimum, build a held-out set of interaction cycles with labels for valid
+progress, correct tool use, harmful write and grounded communication.  Measure:
+
+- JSON/valid response rate and latency;
+- AUROC or pairwise accuracy for good versus bad turns;
+- expected calibration error or reliability buckets;
+- judge/outcome correlation across trajectories;
+- false-positive rate on fluent but tool-invalid turns;
+- score invariance under paraphrase;
+- counterfactual sensitivity when one entity or tool argument is changed;
+- conflict rate where judge is positive but terminal verifier fails.
+
+Correlation alone is insufficient.  A judge can correlate with outcome by
+rewarding trajectory length or fluent final answers while missing the causal
+tool error.  Inspect matched counterfactuals and conflict cases.
+
+Recommended activation gates:
+
+1. valid rate is stable and high on held-out tasks;
+2. tool-error counterfactual ranking is reliable;
+3. judge-positive/verifier-failure cases have been manually categorized;
+4. no strong length, verbosity or self-report shortcut is found;
+5. enable `turn_weight=0.02` first, then ablate up to `0.05`; keep the hard
+   `0.1` ceiling;
+6. retain an outcome-only control under the identical evaluator.
+
+## One-Node 4×H200 Launcher
+
+The dedicated experiment launcher uses physical GPU 0 for the shared Qwen3-14B
+user-simulator/Judge endpoint and GPUs 1–3 for the Qwen3-8B veRL trainer.  The
+policy rollout uses TP=1 and three data-parallel ranks.  Existing YAML remains
+unchanged.
 
 ```bash
-# One-click setup (conda + PyTorch 2.7 + CUDA 12.6 + dependencies)
-bash setup.sh
-conda activate agentrl
+cd agentic-grpo-longhorizon
 
-# Or manual:
-pip install torch==2.7.0 --index-url https://download.pytorch.org/whl/cu126
-pip install -r requirements.txt
-cd ../tau-bench && pip install -e .
-cd ../verl && pip install -e .
+AGENTIC_RL_DRY_RUN=1 \
+bash scripts/train/grpo/run_user_simulator_judge_h200_4gpu.sh
+
+AGENTIC_RL_VANILLA_DATA_ROOT=/absolute/path/to/experiments/vanilla \
+bash scripts/train/grpo/run_user_simulator_judge_h200_4gpu.sh
 ```
 
-### 2. Train a Model
+Unlike the diagnostic-only YAML default, this method-specific H200 launcher
+sets `algorithm.judge_turn_reward.enabled=true` with the existing bounded
+weight `0.05`, so it runs a distinct Judge-shaping experiment.  To collect
+diagnostics without changing the policy reward, set:
 
 ```bash
-# Example: Joint (PRM-Lite + LATA)
-cd scripts/train/grpo
-bash run_exp4_prm_lite_lata.sh
-
-# Or: Vanilla GRPO baseline
-bash run_vanilla.sh
+AGENTIC_RL_ENABLE_JUDGE_REWARD=false \
+bash scripts/train/grpo/run_user_simulator_judge_h200_4gpu.sh
 ```
 
-### 3. Independent Evaluation
+Prompt/response limits become `12288/16384`, and policy/user contexts become
+`32768`.  Results are isolated under
+`experiments/h200_4gpu/user_simulator_judge/<run-tag>/`, including checkpoints,
+trainer and simulator logs, launch metadata, exact command and W&B artifacts.
+Online records go to
+[`jiezhengxing-aaaa/agentic-grpo-longhorizon`](https://wandb.ai/jiezhengxing-aaaa/agentic-grpo-longhorizon).
+
+Set `AGENTIC_RL_RUN_TAG=user_judge_seed1` for a stable resumable run identity.
+The launcher rejects an occupied port 8001 by default because it cannot verify
+the service's physical GPU.  Set `AGENTIC_RL_REUSE_USER_SIMULATOR=1` only after
+confirming it uses GPU 0 alone.  It never kills a reused service; if it starts
+the service itself, it cleans up only that owned process.
+
+## Training
 
 ```bash
-# Evaluates step 200/250/300 checkpoints automatically
-cd scripts/eval
-bash eval_exp4_prm_lite_lata.sh
+cd agentic-grpo-longhorizon
+bash scripts/train/grpo/run_user_simulator_judge.sh
 ```
 
-> **Hardware**: 2×A800 (80GB). GPU 0 runs 7B policy vLLM; GPU 1 runs 72B-AWQ user simulator vLLM.  
-> **Offline Mode**: All scripts inject `HF_HUB_OFFLINE=1` and `TRANSFORMERS_OFFLINE=1` for air-gapped environments.
+Default diagnostic-only contract:
 
----
+```yaml
+algorithm:
+  adv_estimator: grpo
+  judge_turn_reward:
+    enabled: false
+    turn_weight: 0.05
+```
 
-## 📚 Documentation
+Only after calibration should `enabled` be changed to `true`.  Doing so creates
+bounded trajectory shaping, not turn-aware advantages.
 
-| 📄 Document | 📝 Content |
-|----------|---------|
-| [`docs/ablation/ablation_diagnosis_report.md`](docs/ablation/ablation_diagnosis_report.md) | **Main report**: training curves, eval data, mechanism analysis, hypothesis validation |
-| [`docs/ablation/ablation_plan.md`](docs/ablation/ablation_plan.md) | Experiment design manual: code implementation, PRM-Lite rule set, hacking risk analysis |
-| [`docs/vanilla_grpo/vanilla_grpo_diagnosis.md`](docs/vanilla_grpo/vanilla_grpo_diagnosis.md) | Vanilla GRPO collapse diagnosis: three root causes, five checkpoints analysis |
-| [`../agentic-grpo-longhorizon-blog.md`](../agentic-grpo-longhorizon-blog.md) | 🆕 Technical blog: from training collapse to stable convergence (PRM-Lite + LATA) |
+## Unified Evaluation
 
----
+```bash
+cd agentic-grpo-longhorizon
+bash scripts/eval/eval_user_simulator_judge.sh
+```
 
-## 🛠️ Tech Stack
+The launcher evaluates steps `50 100 150 200` under the same task split,
+Qwen3-14B user simulator, sampling settings and turn budget as the other
+branches.  It reports standard at-least-one `pass@k`, all-success `pass^k` and
+`any_success` separately.
 
-- **Training Framework**: [veRL](https://github.com/volcengine/verl) 0.6.1 (FSDP + vLLM V1)
-- **Policy Model**: Qwen2.5-7B-Instruct
-- **User Simulator**: Qwen2.5-72B-Instruct-AWQ
-- **Benchmark**: [τ-bench](https://github.com/sierra-research/tau-bench) airline (50 tasks)
-- **Inference Engine**: vLLM V1 with tool-call parsing (Hermes)
-- **Attention**: FlashAttention-2
+```bash
+AGENTIC_RL_EVAL_STEPS="100 200" \
+AGENTIC_RL_EVAL_SPLIT_FILE=/absolute/path/to/split.json \
+bash scripts/eval/eval_user_simulator_judge.sh
+```
 
----
+## Important Files
 
-## 🙏 Acknowledgements
+| File | Role |
+|---|---|
+| `agentic-grpo-longhorizon/src/envs/user_simulator_judge.py` | prompt, parsing and structured scoring |
+| `agentic-grpo-longhorizon/src/envs/reward_fusion.py` | neutral centering and consistency helper |
+| `agentic-grpo-longhorizon/src/envs/tau_bench_interaction.py` | per-cycle judge invocation and terminal metadata |
+| `verl/verl/trainer/ppo/ray_trainer.py` | diagnostics and optional bounded fusion |
+| `agentic-grpo-longhorizon/configs/interaction_config/tau_bench_airline_judge.yaml` | simulator/judge service contract |
+| `agentic-grpo-longhorizon/configs/train/grpo/user_simulator_judge.yaml` | training contract |
+| `agentic-grpo-longhorizon/scripts/validate/reward_consistency.py` | offline outcome/judge consistency check |
 
-- [veRL](https://github.com/volcengine/verl) for the open-source RL training framework
-- [τ-bench](https://github.com/sierra-research/tau-bench) for the challenging long-horizon agent benchmark
-- [Qwen](https://github.com/QwenLM/Qwen) series models for strong base policies
+## Verification
 
----
+```bash
+pytest -q agentic-grpo-longhorizon/src/envs/tests/test_user_simulator_judge.py
+pytest -q verl/tests/trainer/ppo/test_judge_turn_reward_fusion.py
+pytest -q agentic-grpo-longhorizon/src/evaluation/tests/test_pass_k_metrics.py
+```
 
-> **Why this matters**: Most RLHF/RLAIF work focuses on single-turn QA or coding. This project tackles the harder problem — **multi-turn, multi-tool, partially-observable conversational agents** — where vanilla GRPO catastrophically fails. The PRM-Lite + LATA joint design offers a principled, lightweight, and interpretable path to stable training without requiring expensive learned reward models.
+These tests cover structured parsing, neutral centering, error-aware context,
+unavailable-judge fallback, bounded fusion, outcome dominance, cross-trajectory
+diagnostics and evaluation metrics.  They do not establish judge calibration.
 
----
+## References
 
-## Star History
+- [UserRL](https://arxiv.org/abs/2509.19736)
+- [Official UserRL implementation](https://github.com/SalesforceAIResearch/UserRL)
+- [τ-bench](https://arxiv.org/abs/2406.12045)
+- [veRL](https://github.com/volcengine/verl)
 
-<a href="https://www.star-history.com/?repos=qiqihezh%2Fagentic-grpo-longhorizon&type=date&legend=bottom-right">
- <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=qiqihezh/agentic-grpo-longhorizon&type=date&theme=dark&legend=bottom-right" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=qiqihezh/agentic-grpo-longhorizon&type=date&legend=bottom-right" />
-   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=qiqihezh/agentic-grpo-longhorizon&type=date&legend=bottom-right" />
- </picture>
-</a>
+## License
+
+See [LICENSE](LICENSE).

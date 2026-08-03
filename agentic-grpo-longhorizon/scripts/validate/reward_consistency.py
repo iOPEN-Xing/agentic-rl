@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate environment/judge correlation from a JSON list of reward records."""
+"""Validate terminal-outcome/judge correlation from trajectory JSON records."""
 
 from __future__ import annotations
 
@@ -14,11 +14,21 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("input", type=Path)
     parser.add_argument("--threshold", type=float, default=0.3)
+    parser.add_argument("--environment-key", default="outcome_reward")
+    parser.add_argument("--judge-key", default="judge_mean_score")
     args = parser.parse_args()
 
     records = json.loads(args.input.read_text(encoding="utf-8"))
-    environment = [float(record["environment_reward"]) for record in records]
-    judge = [float(record["judge_reward"]) for record in records]
+    paired_records = [
+        record
+        for record in records
+        if record.get(args.environment_key) is not None
+        and record.get(args.judge_key) is not None
+    ]
+    environment = [
+        float(record[args.environment_key]) for record in paired_records
+    ]
+    judge = [float(record[args.judge_key]) for record in paired_records]
     result = reward_consistency(
         environment,
         judge,

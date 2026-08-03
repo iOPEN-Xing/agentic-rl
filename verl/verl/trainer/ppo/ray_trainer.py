@@ -159,13 +159,79 @@ def apply_kl_penalty(data: DataProto, kl_ctrl: core_algos.AdaptiveKLController, 
 
     return data, metrics
 
+
+def summarize_judge_diagnostics(
+    non_tensor_batch: dict,
+    *,
+    warning_threshold: float = 0.3,
+) -> dict[str, float]:
+    """Summarize judge calibration over a rollout batch.
+
+    Correlation is computed across trajectories using each trajectory's
+    terminal verifier outcome and mean valid judge score. This avoids the
+    degenerate within-trajectory correlation against mostly-zero incremental
+    τ-bench rewards.
+    """
+
+    def finite_values(key: str) -> list[float]:
+        values = []
+        for value in non_tensor_batch.get(key, []):
+            if value is None:
+                continue
+            try:
+                numeric = float(value)
+            except (TypeError, ValueError):
+                continue
+            if np.isfinite(numeric):
+                values.append(numeric)
+        return values
+
+    metrics: dict[str, float] = {}
+    valid_rates = finite_values("judge_valid_rate")
+    judge_scores = finite_values("judge_mean_score")
+    if valid_rates:
+        metrics["reward/judge_valid_rate"] = float(np.mean(valid_rates))
+    if judge_scores:
+        metrics["reward/judge_score_mean"] = float(np.mean(judge_scores))
+
+    outcomes = non_tensor_batch.get("outcome_reward", [])
+    scores = non_tensor_batch.get("judge_mean_score", [])
+    paired = []
+    if len(outcomes) == len(scores):
+        for outcome, score in zip(outcomes, scores, strict=True):
+            if outcome is None or score is None:
+                continue
+            try:
+                pair = (float(outcome), float(score))
+            except (TypeError, ValueError):
+                continue
+            if all(np.isfinite(value) for value in pair):
+                paired.append(pair)
+
+    if len(paired) >= 3:
+        env_values = np.asarray([pair[0] for pair in paired], dtype=np.float64)
+        judge_values = np.asarray([pair[1] for pair in paired], dtype=np.float64)
+        if env_values.std() > 0.0 and judge_values.std() > 0.0:
+            correlation = float(np.corrcoef(env_values, judge_values)[0, 1])
+            metrics["reward/judge_outcome_correlation"] = correlation
+            metrics["reward/judge_outcome_conflict"] = float(
+                correlation < warning_threshold
+            )
+    return metrics
+
+
 def combine_judge_turn_rewards(
     session_scores: torch.Tensor,
     turn_scores: torch.Tensor,
     turn_event_mask: torch.Tensor,
     config: Optional[AlgoConfig] = None,
 ) -> tuple[torch.Tensor, dict[str, float]]:
-    """Add a bounded mean turn signal while preserving environment-outcome dominance."""
+    """Add a bounded mean Judge signal while preserving outcome dominance.
+
+    With the branch's standard GRPO estimator, token rewards are subsequently
+    summed into one trajectory score. Event positions therefore retain
+    provenance but do not create turn-specific advantages.
+    """
     if session_scores.shape != turn_scores.shape or turn_scores.shape != turn_event_mask.shape:
         raise ValueError("session, turn score, and event mask tensors must have identical shapes")
 
@@ -177,6 +243,13 @@ def combine_judge_turn_rewards(
     if not 0.0 <= turn_weight <= 0.1:
         raise ValueError("judge turn_weight must be in [0, 0.1] to preserve outcome dominance")
 
+    active_scores = turn_scores[turn_event_mask.to(dtype=torch.bool)]
+    if active_scores.numel() > 0:
+        if not torch.isfinite(active_scores).all():
+            raise ValueError("judge turn scores must be finite")
+        if torch.any(active_scores.abs() > 1.0):
+            raise ValueError("judge turn scores must be centered and bounded in [-1, 1]")
+
     event_mask = turn_event_mask.to(dtype=turn_scores.dtype)
     event_counts = event_mask.sum(dim=-1, keepdim=True).clamp_min(1.0)
     normalized_turn_scores = turn_scores * event_mask / event_counts
@@ -187,7 +260,6 @@ def combine_judge_turn_rewards(
         "reward/judge_turn_contribution_mean": float(turn_contribution.sum(dim=-1).mean().item()),
     }
     return combined, metrics
-
 
 
 def compute_response_mask(data: DataProto):
@@ -573,6 +645,8 @@ class RayPPOTrainer:
         sample_errors = []
         sample_outcome_rewards = []
         sample_process_scores = []
+        sample_judge_scores = []
+        sample_judge_valid_rates = []
 
         for test_data in self.val_dataloader:
             test_batch = DataProto.from_single_dict(test_data)
@@ -679,6 +753,10 @@ class RayPPOTrainer:
                 sample_outcome_rewards.extend(test_batch.non_tensor_batch["outcome_reward"])
             if "process_score" in test_batch.non_tensor_batch:
                 sample_process_scores.extend(test_batch.non_tensor_batch["process_score"])
+            if "judge_mean_score" in test_batch.non_tensor_batch:
+                sample_judge_scores.extend(test_batch.non_tensor_batch["judge_mean_score"])
+            if "judge_valid_rate" in test_batch.non_tensor_batch:
+                sample_judge_valid_rates.extend(test_batch.non_tensor_batch["judge_valid_rate"])
 
         self._maybe_log_val_generations(inputs=sample_inputs, outputs=sample_outputs, scores=sample_scores)
 
@@ -738,6 +816,15 @@ class RayPPOTrainer:
             metric_dict["val-aux/outcome_reward/mean"] = float(np.mean(sample_outcome_rewards))
         if sample_process_scores:
             metric_dict["val-aux/process_score/mean"] = float(np.mean(sample_process_scores))
+        validation_judge_metrics = summarize_judge_diagnostics({
+            "outcome_reward": sample_outcome_rewards,
+            "judge_mean_score": sample_judge_scores,
+            "judge_valid_rate": sample_judge_valid_rates,
+        })
+        metric_dict.update({
+            key.replace("reward/", "val-aux/", 1): value
+            for key, value in validation_judge_metrics.items()
+        })
 
         # Per-split validation metrics (seen / unseen)
         if len(sample_splits) == len(sample_scores):
@@ -1253,6 +1340,7 @@ class RayPPOTrainer:
                         reward_extra_infos_dict: dict[str, list]
                         if self.config.reward_model.launch_reward_fn_async:
                             reward_tensor, reward_extra_infos_dict = ray.get(future_reward)
+                        metrics.update(summarize_judge_diagnostics(batch.non_tensor_batch))
                         token_level_scores = reward_tensor
                         if "turn_level_rewards" in batch.batch and "turn_level_reward_mask" in batch.batch:
                             token_level_scores, judge_turn_metrics = combine_judge_turn_rewards(

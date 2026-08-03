@@ -113,6 +113,19 @@ class TauBenchToolBase(BaseTool):
             # (τ-bench 自己的 tool error 样例: "Unknown action update_reservation_insurance")
             err_msg = f"Error: {type(e).__name__}: {e}"
             logger.warning(f"[Tool.execute] {self.name} raised: {err_msg}")
+            import json as _json
+            assistant_content = CURRENT_ASSISTANT_CONTENT.get()
+            state["action_history"].append({
+                "tool": self.name,
+                "parameters": parameters,
+                "param_str": _json.dumps(parameters, sort_keys=True, ensure_ascii=False).lower(),
+                "inc_reward": 0.0,
+                "done": False,
+                "is_error": True,
+                "observation": err_msg[:1200],
+                "extracted_entities": {},
+                "content": assistant_content or "",
+            })
             return (
                 ToolResponse(text=err_msg),
                 0.0,
@@ -139,6 +152,8 @@ class TauBenchToolBase(BaseTool):
             "inc_reward": inc_reward,
             "done": is_done,
             "is_error": bool(obs and obs.startswith("Error:")),
+            # Judge only needs compact evidence; bound state growth on long trajectories.
+            "observation": obs[:1200],
             "extracted_entities": _extract_entities(obs),
             "content": assistant_content or "",
         })
