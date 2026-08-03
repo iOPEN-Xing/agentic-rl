@@ -278,6 +278,7 @@ bash run_exp4_prm_lite_lata.sh
 | `docs/tech-report-userrl.html` | user simulator/Judge reward boundaries, calibration and failure semantics |
 | `docs/agentic-rl-multiturn-interview.html` | interview-oriented synthesis covering outcome reward, PRM and user simulation |
 | `docs/multiturn-rl-customer-service-deep-dive.html` | business-facing multi-turn customer-service deep dive |
+| `docs/history-summary-interview/README.md` | interview answer: why this dataset does not yet justify history summarization |
 | `docs/HARDWARE_ADAPTATION_PLAN.md` | hardware adaptation decisions and branch-specific constraints |
 | `docs/code-review-report.md` | cross-branch implementation audit and prioritized risks |
 
