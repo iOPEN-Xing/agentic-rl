@@ -272,6 +272,14 @@ bash run_exp4_prm_lite_lata.sh
 | `agentic-grpo-longhorizon/src/evaluation/pass_k_eval.py` | task execution and corrected pass metrics |
 | `agentic-grpo-longhorizon/scripts/eval/eval_checkpoint_series.sh` | shared safe checkpoint evaluator |
 | `agentic-grpo-longhorizon/src/evaluation/tests/test_pass_k_metrics.py` | metric regression contract |
+| `docs/scheme-analysis.html` | three long-horizon Agentic RL schemes and cross-method trade-offs |
+| `docs/tech-report-turnppo.html` | Turn-PPO theory, current-data case study, implementation and tests |
+| `docs/tech-report-trace.html` | TRACE-style hybrid credit, frozen-reference scoring and dataset adaptation |
+| `docs/tech-report-userrl.html` | user simulator/Judge reward boundaries, calibration and failure semantics |
+| `docs/agentic-rl-multiturn-interview.html` | interview-oriented synthesis covering outcome reward, PRM and user simulation |
+| `docs/multiturn-rl-customer-service-deep-dive.html` | business-facing multi-turn customer-service deep dive |
+| `docs/HARDWARE_ADAPTATION_PLAN.md` | hardware adaptation decisions and branch-specific constraints |
+| `docs/code-review-report.md` | cross-branch implementation audit and prioritized risks |
 
 ## Recommended Experimental Order
 

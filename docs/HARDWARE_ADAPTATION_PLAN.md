@@ -377,204 +377,112 @@ def _compute_potential(state: dict, turn_idx: int) -> float:
 
 ---
 
-### 3.3 方案 2: User Simulator as Turn-Level Judge
+### 3.3 方案 2: User Simulator + Interaction-Cycle Judge（修订）
 
-#### 3.3.1 核心思想
+#### 3.3.1 概念边界
 
-用户模拟器不仅生成回复，还应该评估 agent 的行为质量：
+UserRL 原论文中，LLM user simulator 负责生成动态用户回复；规则 Gym 负责状态转移、增量奖励与终局任务完成。当前方案让同一模型额外充当 Judge，是一个本地扩展，**不是 UserRL 原生 turn reward**。因此终局 reward 必须保持为 τ-bench verifier 的 0/1 outcome，Judge 只能是可关闭的辅助诊断。
 
 ```mermaid
 flowchart LR
-    subgraph Traditional["传统方式"]
-        A[Agent] --> B[User Sim]
-        B --> C[Response Only]
-        C --> D[No Reward Signal]
-    end
-    
-    subgraph Enhanced["增强方式"]
-        E[Agent] --> F[User Sim]
-        F --> G[Response + Feedback]
-        G --> H[Turn-level Reward]
-        G --> I[Improvement Hint]
-    end
+    A["Agent interaction cycle"] --> U["Qwen3-14B user simulator"]
+    U --> R["Dynamic user response"]
+    A --> T["τ-bench tools / DB"]
+    T --> V["Rule verifier outcome 0/1"]
+    A --> J["Same-endpoint LLM Judge"]
+    T --> J
+    J --> C["Centered signal [-1,1]"]
+    V --> G["GRPO session score"]
+    C --> D{"Calibration passed?"}
+    D -->|"Default: no"| L["Diagnostics only"]
+    D -->|"Explicit ablation"| W["Mean auxiliary × ≤0.05"]
+    W --> G
 ```
 
-#### 3.3.2 实现方案
+当前实现的 “cycle” 指：从上一次用户回复之后，到当前 assistant 纯文本回复之前的全部工具动作，加上当前回复。它可能包含多个 tool calls，所以不能宣称逐工具动作的因果 credit。
+
+并且当前训练配置仍是标准 `adv_estimator=grpo`：`compute_grpo_outcome_advantage()` 会先把所有 token reward 求和成 trajectory score，再将组归一化后的同一个 advantage 广播给整条 response。因此 cycle signal 在当前框架中只改变**轨迹排序**，不会产生局部 turn advantage；span 位置只用于追踪与未来 estimator 扩展。
+
+#### 3.3.2 Judge 输入与失败语义
+
+Judge 输入必须包含：
+
+- hidden task goal（作为 privileged evaluator context，不进入 policy prompt）；
+- latest assistant message；
+- recent conversation；
+- 当前 interaction cycle 的 tool parameters；
+- tool observation / error reason，而不只是 `is_error` 布尔值。
 
 ```python
-# user_simulator_judge.py
+# reward_fusion.py（当前分支真实语义）
+@dataclass(frozen=True)
+class JudgeSignalPolicy:
+    neutral_score: float = 0.5
 
-class EnhancedUserSimulator:
-    """
-    增强版用户模拟器:
-    1. 生成用户回复
-    2. 评估 agent 上一轮的表现
-    3. 提供 turn-level reward signal
-    """
-    
-    def __init__(self, model, judge_prompt_template):
-        self.model = model
-        self.judge_prompt = judge_prompt_template
-    
-    def generate_response_and_judge(
-        self, 
-        agent_message: str,
-        task_context: dict,
-        conversation_history: list
-    ) -> tuple[str, dict]:
-        """返回 (用户回复, judge 反馈)"""
-        
-        # 1. 生成用户回复
-        user_response = self._generate_user_response(
-            agent_message, task_context, conversation_history
-        )
-        
-        # 2. 生成 turn-level judge 反馈
-        judge_feedback = self._judge_agent_performance(
-            agent_message, task_context, conversation_history
-        )
-        
-        # 3. 构建 reward signal
-        reward_signal = {
-            "helpfulness": judge_feedback.get("helpfulness", 0.0),
-            "relevance": judge_feedback.get("relevance", 0.0),
-            "clarity": judge_feedback.get("clarity", 0.0),
-            "improvement_hint": judge_feedback.get("hint", ""),
-        }
-        
-        return user_response, reward_signal
-    
-    def _judge_agent_performance(
-        self,
-        agent_message: str,
-        task_context: dict,
-        history: list
-    ) -> dict:
-        """使用 LLM-as-Judge 评估 agent 表现"""
-        
-        judge_prompt = self.judge_prompt.format(
-            agent_message=agent_message,
-            task_goal=task_context.get("goal", ""),
-            conversation="\n".join([
-                f"{m['role']}: {m['content'][:200]}"
-                for m in history[-5:]  # 最近 5 轮
-            ])
-        )
-        
-        response = self.model.generate(judge_prompt)
-        
-        # 解析 judge 反馈
-        try:
-            feedback = json.loads(response)
-            return feedback
-        except:
-            return {"helpfulness": 0.0, "relevance": 0.0, "clarity": 0.0}
-    
-    @property
-    def judge_prompt_template(self):
-        return """
-You are evaluating an AI agent's performance in a customer service conversation.
+    def compute(self, feedback: JudgeFeedback) -> Optional[float]:
+        if not feedback.valid:
+            return None  # 不补 0，不产生 event，不改变其他 reward 的分母
 
-## Task Goal
-{task_goal}
-
-## Agent's Latest Response
-{agent_message}
-
-## Recent Conversation
-{conversation}
-
-## Evaluation Criteria
-Rate the agent's response on a scale of 0-1 for:
-- helpfulness: Did the agent help advance the task?
-- relevance: Is the response relevant to the user's needs?
-- clarity: Is the response clear and easy to understand?
-
-## Output Format
-Return a JSON object:
-{{
-    "helpfulness": 0.0-1.0,
-    "relevance": 0.0-1.0,
-    "clarity": 0.0-1.0,
-    "hint": "Optional improvement suggestion"
-}}
-"""
+        score = min(1.0, max(0.0, feedback.score))
+        if score >= self.neutral_score:
+            return (score - self.neutral_score) / (1 - self.neutral_score)
+        return (score - self.neutral_score) / self.neutral_score
 ```
 
-#### 3.3.3 与环境 reward 的融合
+Judge 原始总分仍为：
 
 ```python
-# reward_fusion.py
-
-class HybridRewardCalculator:
-    """
-    多源 reward 融合:
-    1. Environment reward (ground truth)
-    2. User judge reward (LLM-as-judge)
-    3. PRM-Lite rules reward (verifiable)
-    """
-    
-    def __init__(
-        self,
-        env_weight: float = 0.6,
-        judge_weight: float = 0.3,
-        prm_weight: float = 0.1,
-    ):
-        self.env_weight = env_weight
-        self.judge_weight = judge_weight
-        self.prm_weight = prm_weight
-    
-    def compute_turn_reward(
-        self,
-        env_reward: float,
-        judge_reward: dict,
-        prm_score: float,
-    ) -> float:
-        """融合多源 reward"""
-        
-        # 归一化 judge reward
-        judge_score = (
-            judge_reward.get("helpfulness", 0) * 0.5 +
-            judge_reward.get("relevance", 0) * 0.3 +
-            judge_reward.get("clarity", 0) * 0.2
-        )
-        
-        # 加权融合
-        fused_reward = (
-            self.env_weight * env_reward +
-            self.judge_weight * judge_score +
-            self.prm_weight * (prm_score + 0.5)  # PRM score 从 [-0.5, +0.5] 映射到 [0, 1]
-        )
-        
-        return fused_reward
-    
-    def compute_session_reward(
-        self,
-        outcome: float,
-        turn_rewards: list,
-        fusion_strategy: str = "last_k_mean",
-        k: int = 5,
-    ) -> float:
-        """
-        Session-level reward 计算
-        可选择不同策略
-        """
-        if fusion_strategy == "outcome_only":
-            return outcome
-        elif fusion_strategy == "weighted_sum":
-            # outcome 为主，turn rewards 为辅
-            turn_contribution = sum(turn_rewards) * 0.1
-            return outcome + turn_contribution
-        elif fusion_strategy == "last_k_mean":
-            # 最近 k 个 turn 的平均 + outcome
-            last_k = turn_rewards[-k:] if len(turn_rewards) >= k else turn_rewards
-            avg_turn = sum(last_k) / len(last_k) if last_k else 0
-            return outcome * 0.8 + avg_turn * 0.2
-        else:
-            return outcome
+raw_score = (
+    0.45 * task_progress
+    + 0.40 * tool_correctness
+    + 0.15 * communication
+)
 ```
 
-> **技术依据**: [UserRL: Training Interactive User-Centric Agent](https://arxiv.org/pdf/2509.19736), [Multi-Turn RL Best Practices](https://fireworks.ai/blog/best-practices-for-multi-turn-RL)
+`raw_score=0.5` 映射为 0；小于 0.5 是负辅助信号，大于 0.5 是正辅助信号。Judge timeout、非法 JSON 或非数值字段返回 `None`，对应 token event mask 不置位。
+
+#### 3.3.3 与环境 outcome 解耦
+
+```python
+# tau_bench_interaction.py
+session_score = environment_outcome  # 唯一 terminal task reward
+
+# ray_trainer.py；只有显式开启训练 gate 时执行
+event_mean = centered_turn_scores.sum() / valid_event_count
+auxiliary = turn_weight * event_mean  # 建议 0.02 / 0.05
+trajectory_score = session_score + auxiliary
+```
+
+安全默认配置：
+
+```yaml
+interaction:
+  judge_enabled: true
+  judge_neutral_score: 0.5
+
+algorithm:
+  adv_estimator: grpo
+  judge_turn_reward:
+    enabled: false  # diagnostic-only
+    turn_weight: 0.05
+```
+
+禁止恢复旧版 `0.6 * env + 0.3 * judge + 0.1 * PRM` session fusion。该设计会让失败轨迹凭主观 Judge 得到正 terminal score，还会在 session/turn 两条路径重复计奖。
+
+#### 3.3.4 监控与进入训练的门槛
+
+相关性必须在 rollout batch / epoch 的**跨轨迹**粒度上计算：
+
+- Judge valid rate；
+- mean Judge score；
+- terminal outcome 与 trajectory mean Judge 的 Pearson correlation；
+- success/failure 分桶；
+- tool-error、wrong-write、transfer 条件分布；
+- 同模型 Judge 与独立 Judge 的冲突案例。
+
+只有 diagnostic-only 在 held-out 数据上通过校准，且独立 Judge 结果一致，才开启 0.02/0.05 的小权重消融。详细推导、task 0 真实 case 与代码对齐见 [`tech-report-userrl.html`](tech-report-userrl.html)。
+
+> **技术依据**: [UserRL 论文](https://arxiv.org/html/2509.19736), [UserRL 官方源码](https://github.com/SalesforceAIResearch/UserRL)。注意：官方 UserRL 使用规则 Gym 的 turn reward 与 `grpo_multiturn`；当前方案是受其环境解耦原则启发的 LLM Judge 扩展。
 
 ---
 
@@ -837,7 +745,7 @@ def compute_adaptive_alpha(
 | 方案 | 论文 | 核心贡献 | 链接 |
 |------|------|----------|------|
 | **Turn-Level MDP** | Turn-PPO | 证明 turn-level advantage 比 token-level 更稳定 | [arxiv.org/html/2512.17008v2](https://arxiv.org/html/2512.17008v2) |
-| **User Sim as Judge** | UserRL | 用户模拟器应提供 turn-level reward signal | [arxiv.org/pdf/2509.19736](https://arxiv.org/pdf/2509.19736) |
+| **User-centric Gym / reward mapping** | UserRL | LLM 生成动态用户回复；规则 Gym 提供 turn reward 与 terminal verifier；当前 LLM Judge 属于本地扩展 | [arxiv.org/html/2509.19736](https://arxiv.org/html/2509.19736) |
 | **Credit Assignment** | TRACE | TD-based credit estimation for long-horizon | [arxiv.org/html/2607.13988](https://arxiv.org/html/2607.13988) |
 | **MT-GRPO** | MT-GRPO | 多轮 GRPO 的 credit assignment 策略 | [openreview.net/pdf?id=7cgTBPuwMr](https://openreview.net/pdf?id=7cgTBPuwMr) |
 | **Best Practices** | Fireworks AI | Multi-turn RL 最佳实践 | [fireworks.ai/blog/best-practices-for-multi-turn-RL](https://fireworks.ai/blog/best-practices-for-multi-turn-RL) |
@@ -955,10 +863,10 @@ gantt
     section 核心开发
     Judge Prompt 设计     :2026-08-15, 1d
     LLM-as-Judge 集成     :2026-08-16, 2d
-    Hybrid Reward 计算    :2026-08-18, 3d
+    Cycle 信号中性化      :2026-08-18, 2d
     section 验证
-    Judge 质量评估        :2026-08-21, 2d
-    与 baseline 对比       :2026-08-23, 2d
+    Diagnostic-only 校准  :2026-08-20, 3d
+    0.02/0.05 消融        :2026-08-23, 2d
 ```
 
 **Judge Prompt 示例** (需要根据具体任务调整):
@@ -966,12 +874,14 @@ gantt
 ```
 你是一个航空客服对话的质量评估员。评估 AI 客服代理在以下维度的表现：
 1. 任务进展 (task_progress): 是否帮助用户接近目标?
-2. 工具使用 (tool_usage): 调用的工具是否合理、参数是否正确?
-3. 对话质量 (conversation): 回答是否清晰、有帮助?
+2. 工具正确性 (tool_correctness): 以真实 tool observation/error 为准，工具与参数是否正确?
+3. 对话质量 (communication): 回答是否清晰、有帮助?
 
 评分范围: 0.0 - 1.0
 输出 JSON 格式，包含每项得分和简短理由。
 ```
+
+本阶段默认不改变 GRPO；先比较 outcome=1/0 的 Judge 分布、valid rate、冲突 case，并用独立 Judge 复核。同源 Qwen3-14B Judge 未通过校准前，不进入辅助训练。
 
 ### 5.4 Phase 3: Hybrid Advantage (Week 6-8)
 
@@ -1012,7 +922,7 @@ gantt
 |------|--------|------|----------|
 | **RTX 5090 + 4090 混部兼容问题** | 中 | 高 | Phase 0 重点验证 NCCL 通信 |
 | **Turn-level reward 引入噪声** | 中 | 中 | 从小权重开始，逐步增加 |
-| **User judge 与 env reward 冲突** | 中 | 高 | 实施分层验证，确保 outcome 主导 |
+| **User judge 与 env outcome 冲突/同源偏差** | 中 | 高 | terminal outcome 不融合；默认 diagnostic-only，独立 Judge 校准后才开 ≤0.05 |
 | **长轨迹训练不稳定** | 高 | 高 | 保持 LATA 的 √L 归一化 |
 | **计算资源不足** | 低 | 高 | 从小模型 (14B) 开始，验证后扩展 |
 
@@ -1217,25 +1127,22 @@ algorithm:
     alpha: 1.05
   kl_ctrl:
     kl_coef: 0.01
+  # 方案二安全默认：Judge 只采集诊断，不改写 terminal outcome
+  judge_turn_reward:
+    enabled: false
+    turn_weight: 0.05
 
 # 新增: 用户模拟器配置
 user_simulator:
   enabled: true
-  model: "Qwen/Qwen2.5-72B-Instruct-AWQ"
+  model: "/data/xjz/model/qwen3-14b"  # 以当前方案二代码为准
   api_base: "http://localhost:8001/v1"
   judge_enabled: true
   judge_config:
-    helpfulness_weight: 0.5
-    relevance_weight: 0.3
-    clarity_weight: 0.2
-
-# 新增: Reward 融合配置
-reward_fusion:
-  env_weight: 0.6
-  judge_weight: 0.3
-  prm_weight: 0.1
-  session_strategy: "last_k_mean"
-  k: 5
+    task_progress_weight: 0.45
+    tool_correctness_weight: 0.40
+    communication_weight: 0.15
+    neutral_score: 0.5
 
 trainer:
   total_epochs: 50
@@ -1415,25 +1322,35 @@ def check_advantage_scales():
 - 但环境 reward 可能很低，因为工具调用参数错误
 
 **缓解策略**：
-1. 确保环境 reward 主导（weight = 0.6）
-2. Judge reward 只作为辅助信号（weight = 0.3）
-3. 监控两者的相关性，确保不是负相关
+1. terminal session score 严格等于环境 outcome，不与 Judge 融合
+2. Judge 默认只做诊断；校准通过后才以 0.02/0.05 的有界均值辅助
+3. Judge unavailable 不补分、不产生 event，并监控 valid rate
+4. 相关性在跨 trajectory 的 batch/epoch 粒度计算，不能在单条稀疏轨迹内计算
 
 **验证指标**：
 ```python
-def validate_reward_consistency():
+def validate_reward_consistency(outcomes, trajectory_judge_means):
     """
-    验证不同 reward source 的一致性
+    验证 terminal outcome 与 trajectory mean Judge 的一致性
     """
-    # 计算 judge reward 和 env reward 的相关性
-    correlation = np.corrcoef(judge_rewards, env_rewards)[0, 1]
-    
-    # 如果相关性 < 0.3，可能存在冲突
+    paired = [
+        (outcome, judge)
+        for outcome, judge in zip(outcomes, trajectory_judge_means)
+        if judge is not None
+    ]
+    if len(paired) < 3:
+        return {"correlation": None, "training_ready": False}
+
+    env_values, judge_values = zip(*paired)
+    correlation = np.corrcoef(env_values, judge_values)[0, 1]
     if correlation < 0.3:
         print("⚠️ Warning: Judge reward 与 Env reward 相关性低")
-        print("建议降低 judge_weight 或检查 judge prompt")
+        print("保持 training gate 关闭，审核冲突 case / Judge prompt")
     
-    return correlation > 0.3
+    return {
+        "correlation": correlation,
+        "training_ready": correlation >= 0.3,
+    }
 ```
 
 ### B.5 总结：穿刺结论
@@ -1597,73 +1514,28 @@ if __name__ == "__main__":
 
 ### D.2 Reward 一致性验证脚本
 
-```python
-# scripts/validate/reward_consistency.py
+输入应是 trajectory 级 JSON 数组，每条记录至少包含：
 
-import numpy as np
-from scipy.stats import pearsonr, spearmanr
-
-def check_reward_consistency(env_rewards, judge_rewards, prm_rewards):
-    """
-    验证不同 reward source 之间的相关性
-    """
-    results = {
-        "env_judge_corr": None,
-        "env_prm_corr": None,
-        "judge_prm_corr": None,
-        "warnings": [],
-    }
-    
-    # 计算相关性
-    if len(env_rewards) > 2:
-        env_rewards = np.array(env_rewards)
-        judge_rewards = np.array(judge_rewards)
-        prm_rewards = np.array(prm_rewards)
-        
-        # Pearson 相关系数
-        results["env_judge_corr"] = pearsonr(env_rewards, judge_rewards)[0]
-        results["env_prm_corr"] = pearsonr(env_rewards, prm_rewards)[0]
-        results["judge_prm_corr"] = pearsonr(judge_rewards, prm_rewards)[0]
-    
-    # 检查警告
-    if results["env_judge_corr"] is not None:
-        if results["env_judge_corr"] < 0.3:
-            results["warnings"].append(
-                f"⚠️ Env-Judge 相关性低 ({results['env_judge_corr']:.3f}), "
-                "可能存在 reward 冲突"
-            )
-        if results["env_prm_corr"] is not None and results["env_prm_corr"] < 0.3:
-            results["warnings"].append(
-                f"⚠️ Env-PRM 相关性低 ({results['env_prm_corr']:.3f})"
-            )
-    
-    return results
-
-if __name__ == "__main__":
-    import argparse
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--check_correlation", action="store_true")
-    args = parser.parse_args()
-    
-    # 模拟数据
-    np.random.seed(42)
-    env_rewards = np.random.rand(100)
-    judge_rewards = env_rewards + np.random.randn(100) * 0.3
-    prm_rewards = env_rewards * 0.8 + np.random.randn(100) * 0.2
-    
-    results = check_reward_consistency(env_rewards, judge_rewards, prm_rewards)
-    
-    print("===== Reward 一致性验证 =====")
-    if results["env_judge_corr"] is not None:
-        print(f"Env-Judge 相关性: {results['env_judge_corr']:.4f}")
-        print(f"Env-PRM 相关性: {results['env_prm_corr']:.4f}")
-        print(f"Judge-PRM 相关性: {results['judge_prm_corr']:.4f}")
-    
-    for warning in results["warnings"]:
-        print(warning)
+```json
+{
+  "outcome_reward": 1.0,
+  "judge_mean_score": 0.82
+}
 ```
+
+使用当前分支脚本：
+
+```bash
+cd agentic-grpo-longhorizon
+python scripts/validate/reward_consistency.py trajectory_rewards.json \
+  --environment-key outcome_reward \
+  --judge-key judge_mean_score \
+  --threshold 0.3
+```
+
+脚本只对两个字段都有效的配对轨迹计算 Pearson correlation；不足 3 条、outcome 无方差或 Judge 无方差时，correlation 应视为不可识别，而不是强行记为 0。训练期间相同口径已接入 `ray_trainer.py::summarize_judge_diagnostics()`。
 
 ---
 
 *文档由 Cursor AI 辅助生成，基于 2026 年 7 月的最新技术报告和最佳实践。*
-*最后更新：2026-07-30，修正了 RTX 5090 规格和 72B 模型显存需求问题*
+*最后更新：2026-07-30，修正了 RTX 5090 规格、72B 模型显存需求，以及方案二 UserRL / LLM Judge 边界与奖励解耦问题*

@@ -1,0 +1,894 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="TRACE 与 Hybrid Advantage 的双向技术报告：论文公式、τ-bench 航空数据适配、task 0 真实轨迹、冻结参考模型前缀评分和 veRL 实现逐项对齐。">
+    <title>TRACE × τ-bench｜Hybrid Advantage 论文、实现与真实业务落地</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&amp;family=JetBrains+Mono:wght@400;600&amp;family=Noto+Sans+SC:wght@400;500;600;700&amp;display=swap" rel="stylesheet">
+    <script>
+        window.MathJax = {
+            tex: { inlineMath: [['$', '$'], ['\\(', '\\)']], displayMath: [['$$', '$$'], ['\\[', '\\]']] },
+            options: { skipHtmlTags: ['script', 'noscript', 'style', 'textarea', 'pre', 'code'] }
+        };
+    </script>
+    <script id="MathJax-script" async src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
+    <script type="module">
+        import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
+        mermaid.initialize({
+            startOnLoad: true,
+            securityLevel: 'strict',
+            theme: 'base',
+            themeVariables: {
+                primaryColor: '#ecd7c2',
+                primaryTextColor: '#2d2924',
+                primaryBorderColor: '#985d38',
+                lineColor: '#71665c',
+                secondaryColor: '#fffaf2',
+                tertiaryColor: '#f0e3d1',
+                fontFamily: 'Inter, Noto Sans SC, sans-serif'
+            }
+        });
+    </script>
+    <style>
+        :root {
+            --paper: #f8f1e5;
+            --surface: #fffaf2;
+            --surface-strong: #f0e3d1;
+            --ink: #2d2924;
+            --muted: #71665c;
+            --line: #ddcdb9;
+            --accent: #985d38;
+            --accent-soft: #ecd7c2;
+            --shadow: 0 10px 24px rgba(67, 48, 34, 0.08);
+        }
+        * { box-sizing: border-box; }
+        html { scroll-behavior: smooth; scroll-padding-top: 88px; }
+        body {
+            margin: 0;
+            color: var(--ink);
+            background: var(--paper);
+            font-family: Inter, "Noto Sans SC", system-ui, sans-serif;
+            font-size: 17px;
+            line-height: 1.82;
+        }
+        a { color: var(--accent); text-underline-offset: 3px; }
+        a:hover { text-decoration-thickness: 2px; }
+        a:focus-visible, button:focus-visible, summary:focus-visible {
+            outline: 3px solid rgba(152, 93, 56, 0.35);
+            outline-offset: 3px;
+        }
+        .topbar {
+            position: sticky;
+            top: 0;
+            z-index: 20;
+            border-bottom: 1px solid rgba(152, 93, 56, 0.2);
+            background: rgba(248, 241, 229, 0.96);
+            backdrop-filter: blur(10px);
+        }
+        .nav {
+            max-width: 1120px;
+            min-height: 64px;
+            margin: 0 auto;
+            padding: 0 24px;
+            display: flex;
+            align-items: center;
+            gap: 22px;
+            overflow-x: auto;
+            white-space: nowrap;
+            scrollbar-width: none;
+        }
+        .nav::-webkit-scrollbar { display: none; }
+        .nav a { color: var(--muted); font-size: 14px; font-weight: 600; text-decoration: none; }
+        .nav a:first-child { color: var(--ink); margin-right: auto; }
+        .nav a:last-child { color: var(--accent); }
+        main { max-width: 960px; margin: 0 auto; padding: 0 28px 96px; }
+        .hero { padding: 72px 0 42px; }
+        .eyebrow {
+            margin: 0 0 16px;
+            color: var(--accent);
+            font-family: "JetBrains Mono", monospace;
+            font-size: 13px;
+            font-weight: 600;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+        }
+        h1, h2, h3 { line-height: 1.25; letter-spacing: -0.025em; }
+        h1 { max-width: 840px; margin: 0; font-size: clamp(42px, 7vw, 72px); }
+        h2 { margin: 0 0 18px; font-size: clamp(30px, 4vw, 44px); }
+        h3 { margin: 28px 0 12px; font-size: 22px; }
+        p { margin: 0 0 18px; }
+        .dek {
+            max-width: 800px;
+            margin: 24px 0 22px;
+            color: #4f4841;
+            font-size: clamp(19px, 2.3vw, 24px);
+            line-height: 1.65;
+        }
+        .paper-meta, .hero-actions {
+            display: flex;
+            flex-wrap: wrap;
+            align-items: center;
+            gap: 10px;
+        }
+        .paper-meta { color: var(--muted); font-size: 14px; }
+        .chip {
+            display: inline-flex;
+            align-items: center;
+            min-height: 32px;
+            padding: 4px 11px;
+            border: 1px solid var(--line);
+            border-radius: 999px;
+            background: rgba(255, 250, 242, 0.7);
+            color: var(--muted);
+            font-size: 13px;
+            font-weight: 600;
+        }
+        .chip.accent { border-color: var(--accent); color: var(--accent); }
+        .hero-actions { margin-top: 26px; }
+        .button-link {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            min-height: 44px;
+            padding: 8px 15px;
+            border: 1px solid var(--accent);
+            border-radius: 10px;
+            color: var(--accent);
+            font-weight: 700;
+            text-decoration: none;
+        }
+        .button-link.primary { background: var(--accent); color: #fffaf2; }
+        .tldr {
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 14px;
+            margin-top: 40px;
+        }
+        .tldr-card {
+            min-height: 174px;
+            padding: 24px;
+            border: 1px solid var(--line);
+            border-radius: 16px;
+            background: var(--surface);
+            box-shadow: var(--shadow);
+        }
+        .tldr-card span {
+            color: var(--accent);
+            font-family: "JetBrains Mono", monospace;
+            font-size: 12px;
+            font-weight: 700;
+            letter-spacing: 0.06em;
+        }
+        .tldr-card h3 { margin: 12px 0 8px; font-size: 19px; }
+        .tldr-card p { margin: 0; color: var(--muted); font-size: 15px; line-height: 1.7; }
+        .reading-path {
+            margin: 0 0 26px;
+            padding: 18px 22px;
+            border-left: 4px solid var(--accent);
+            background: var(--surface-strong);
+            color: #51483f;
+            font-weight: 600;
+        }
+        section { padding: 72px 0; border-top: 1px solid var(--line); }
+        .section-kicker {
+            margin-bottom: 10px;
+            color: var(--accent);
+            font-family: "JetBrains Mono", monospace;
+            font-size: 12px;
+            font-weight: 700;
+            letter-spacing: 0.08em;
+        }
+        .lead { max-width: 820px; color: #4d463f; font-size: 19px; }
+        .flow {
+            display: grid;
+            grid-template-columns: repeat(3, minmax(0, 1fr));
+            gap: 12px;
+            margin: 30px 0;
+        }
+        .flow-step, .compare-card, .metric, .judgment-card {
+            border: 1px solid var(--line);
+            border-radius: 14px;
+            background: var(--surface);
+        }
+        .flow-step { position: relative; padding: 22px; }
+        .flow-step:not(:last-child)::after {
+            content: "→";
+            position: absolute;
+            right: -19px;
+            top: 50%;
+            z-index: 2;
+            width: 26px;
+            color: var(--accent);
+            background: var(--paper);
+            font-weight: 700;
+            text-align: center;
+            transform: translateY(-50%);
+        }
+        .flow-step b { display: block; margin-bottom: 6px; }
+        .flow-step small { color: var(--muted); line-height: 1.55; }
+        .compare-grid, .metric-grid, .judgment-grid {
+            display: grid;
+            grid-template-columns: repeat(3, minmax(0, 1fr));
+            gap: 14px;
+            margin: 28px 0;
+        }
+        .compare-card, .judgment-card { padding: 22px; }
+        .compare-card h3, .judgment-card h3 { margin: 0 0 10px; font-size: 18px; }
+        .compare-card p, .judgment-card p { margin: 0; color: var(--muted); font-size: 15px; line-height: 1.7; }
+        .compare-card.featured { border: 2px solid var(--accent); }
+        .paper-figure {
+            margin: 32px 0;
+            overflow: hidden;
+            border: 1px solid var(--line);
+            border-radius: 16px;
+            background: var(--surface);
+            box-shadow: var(--shadow);
+        }
+        .image-button { width: 100%; padding: 18px; border: 0; background: #fff; cursor: zoom-in; }
+        .image-button img { display: block; width: 100%; height: auto; }
+        figcaption { padding: 18px 22px 20px; border-top: 1px solid var(--line); }
+        figcaption p { margin: 0; }
+        .caption-source { margin-top: 7px; color: var(--muted); font-size: 13px; }
+        .figure-toggle {
+            margin-top: 12px;
+            padding: 0;
+            border: 0;
+            color: var(--accent);
+            background: transparent;
+            font: inherit;
+            font-size: 14px;
+            font-weight: 700;
+            cursor: pointer;
+        }
+        .figure-detail {
+            max-height: 0;
+            overflow: hidden;
+            color: var(--muted);
+            opacity: 0;
+            transform: translateY(-4px);
+            transition: max-height 260ms ease, opacity 200ms ease, transform 200ms ease;
+        }
+        .figure-detail.active { max-height: 760px; margin-top: 12px; opacity: 1; transform: translateY(0); }
+        .figure-detail ul { margin: 0; padding-left: 22px; }
+        .formula {
+            margin: 22px 0;
+            padding: 22px;
+            overflow-x: auto;
+            border: 1px solid var(--line);
+            border-radius: 14px;
+            background: #fffdf8;
+            text-align: center;
+        }
+        .formula-note { margin-top: 12px; color: var(--muted); font-size: 14px; text-align: left; }
+        .callout { margin: 24px 0; padding: 20px 22px; border-left: 4px solid var(--accent); background: var(--accent-soft); }
+        .callout p:last-child { margin-bottom: 0; }
+        .mermaid-wrap {
+            margin: 28px 0;
+            padding: 20px;
+            overflow-x: auto;
+            border: 1px solid var(--line);
+            border-radius: 16px;
+            background: #fffdf8;
+            box-shadow: var(--shadow);
+        }
+        .mermaid { min-width: 760px; text-align: center; }
+        .case-grid {
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 14px;
+            margin: 24px 0;
+        }
+        .case-card {
+            padding: 20px;
+            border: 1px solid var(--line);
+            border-radius: 14px;
+            background: var(--surface);
+        }
+        .case-card h3 { margin: 0 0 10px; font-size: 18px; }
+        .case-card p, .case-card li { color: var(--muted); font-size: 14px; line-height: 1.7; }
+        .case-card p:last-child { margin-bottom: 0; }
+        .code-links a { overflow-wrap: anywhere; }
+        .table-wrap { margin: 26px 0; overflow-x: auto; border: 1px solid var(--line); border-radius: 14px; }
+        table { width: 100%; border-collapse: collapse; min-width: 680px; background: var(--surface); }
+        th, td { padding: 15px 17px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }
+        th { background: var(--surface-strong); font-size: 14px; }
+        td { font-size: 15px; }
+        tr:last-child td { border-bottom: 0; }
+        ul, ol { padding-left: 24px; }
+        li { margin-bottom: 8px; }
+        details { margin: 16px 0; border: 1px solid var(--line); border-radius: 14px; background: var(--surface); }
+        summary { padding: 18px 20px; cursor: pointer; font-weight: 700; }
+        summary span { display: block; margin-top: 4px; color: var(--muted); font-size: 13px; font-weight: 400; }
+        .details-body { padding: 0 20px 20px; }
+        code, pre { font-family: "JetBrains Mono", monospace; }
+        pre {
+            margin: 0;
+            padding: 18px;
+            overflow-x: auto;
+            border-radius: 12px;
+            background: #312d28;
+            color: #f8f1e5;
+            font-size: 13px;
+            line-height: 1.7;
+        }
+        .metric { padding: 22px; }
+        .metric strong { display: block; color: var(--accent); font-size: 30px; line-height: 1.1; }
+        .metric span { display: block; margin-top: 8px; color: var(--muted); font-size: 14px; }
+        .source-list { padding-left: 20px; }
+        footer { padding: 42px 0 10px; border-top: 1px solid var(--line); color: var(--muted); font-size: 14px; }
+        dialog {
+            width: min(1180px, calc(100vw - 32px));
+            max-height: calc(100vh - 32px);
+            padding: 48px 18px 18px;
+            overflow: auto;
+            border: 1px solid var(--line);
+            border-radius: 16px;
+            background: #fff;
+        }
+        dialog::backdrop { background: rgba(35, 30, 25, 0.78); }
+        dialog img { display: block; max-width: 100%; height: auto; margin: auto; }
+        .dialog-close {
+            position: absolute;
+            top: 10px;
+            right: 12px;
+            min-width: 36px;
+            min-height: 36px;
+            border: 1px solid var(--line);
+            border-radius: 999px;
+            background: var(--surface);
+            color: var(--ink);
+            cursor: pointer;
+        }
+        @media (max-width: 880px) {
+            body { font-size: 16px; }
+            .nav { padding: 0 18px; gap: 18px; }
+            main { padding: 0 18px 72px; }
+            .hero { padding-top: 48px; }
+            .tldr, .flow, .compare-grid, .metric-grid, .judgment-grid, .case-grid { grid-template-columns: 1fr; }
+            .flow-step:not(:last-child)::after {
+                content: "↓";
+                right: 50%;
+                top: auto;
+                bottom: -24px;
+                transform: translateX(50%);
+            }
+            section { padding: 56px 0; }
+            .paper-figure { border-radius: 12px; }
+            .image-button { padding: 8px; }
+            .mermaid { min-width: 660px; }
+        }
+        @media (prefers-reduced-motion: reduce) {
+            html { scroll-behavior: auto; }
+            *, *::before, *::after { transition-duration: 0.01ms !important; animation-duration: 0.01ms !important; }
+        }
+    </style>
+</head>
+<body>
+    <header class="topbar">
+        <nav class="nav" aria-label="报告导航">
+            <a href="scheme-analysis.html">← 返回方案总览</a>
+            <a href="#problem">为什么需要</a>
+            <a href="#method">方法怎么做</a>
+            <a href="#mapping">工程落地</a>
+            <a href="#case-study">真实 Case</a>
+            <a href="#implementation">代码对齐</a>
+            <a href="#evidence">证据与边界</a>
+            <a href="#judgment">验收判断</a>
+            <a href="https://arxiv.org/abs/2607.13988" target="_blank" rel="noopener noreferrer">原论文 ↗</a>
+        </nav>
+    </header>
+
+    <main>
+        <article>
+            <header class="hero">
+                <p class="eyebrow">Paper ↔ code ↔ τ-bench · Bidirectional technical report</p>
+                <h1>TRACE × τ-bench：从论文公式到航空订票的 Hybrid Advantage</h1>
+                <p class="dek">冻结 Reference Model 只做“任务目标是否更容易被预测”的稳定探针；τ-bench 原生 0/1 verifier 仍是成功判据。报告同时解释论文、审计方案三分支，并用真实 task 0 展开数据、rollout、前缀评分、TD credit 与业务验收。</p>
+                <div class="paper-meta">
+                    <span class="chip accent">arXiv preprint</span>
+                    <span class="chip">2026.07</span>
+                    <span class="chip">Tao et al.</span>
+                    <span class="chip">本地实现已按 Algorithm 1 重构</span>
+                    <span>UW–Madison · Microsoft Research</span>
+                </div>
+                <div class="hero-actions">
+                    <a class="button-link primary" href="https://arxiv.org/abs/2607.13988" target="_blank" rel="noopener noreferrer">阅读原论文</a>
+                    <a class="button-link" href="https://arxiv.org/html/2607.13988v1" target="_blank" rel="noopener noreferrer">查看 arXiv HTML</a>
+                </div>
+
+                <div class="tldr" aria-label="30 秒摘要">
+                    <article class="tldr-card">
+                        <span>01 · 背景</span>
+                        <h3>长程 Agent 可能调用几十到上百次工具</h3>
+                        <p>终局正确性仍然可靠，但随着轨迹变长，它会变得极度稀疏、方差高，无法解释中间动作。</p>
+                    </article>
+                    <article class="tldr-card">
+                        <span>02 · 矛盾</span>
+                        <h3>失败轨迹里也可能有大量正确动作</h3>
+                        <p>一次错误结论会让 outcome-only 训练惩罚整条轨迹，连早期找到关键证据的搜索也一起被否定。</p>
+                    </article>
+                    <article class="tldr-card">
+                        <span>03 · 方法</span>
+                        <h3>Gold 概率 → Log-Ratio Value → TD Credit</h3>
+                        <p>冻结模型为每个工具边界的前缀打分；相邻价值差生成 Turn credit，再与 GRPO 终局优势联合优化。</p>
+                    </article>
+                    <article class="tldr-card">
+                        <span>04 · 本项目结论</span>
+                        <h3>可以适配，但不能沿用旧分支的环境 MC reward</h3>
+                        <p>当前代码已改为 canonical Gold Target + frozen-reference prefix scoring + log-ratio TD；真实收益仍须先过离线归因门槛，再做小权重在线消融。</p>
+                    </article>
+                </div>
+            </header>
+
+            <p class="reading-path">阅读路径：问题与论文公式 → 旧分支为何不等于 TRACE → 当前代码如何生成 Gold Target 和 prefix score → task 0 六轮订票逐步拆解 → 论文差异、风险与上线验收。</p>
+
+            <section id="problem">
+                <p class="section-kicker">01 · Problem</p>
+                <h2>终局奖励能判断“对不对”，却不知道“哪一步开始变对”</h2>
+                <p class="lead">在深度搜索中，早期 query、打开哪篇文档、在文档里找哪个关键词，都会改变后续证据。最终答案错了，并不意味着这些动作都没价值；最终答案对了，也不意味着每次工具调用都值得强化。</p>
+
+                <figure class="paper-figure">
+                    <button class="image-button" type="button" data-lightbox data-src="https://arxiv.org/html/2607.13988v1/x1.png" data-alt="TRACE 原论文 Figure 1：Outcome reward 与 Turn-level credit 在失败搜索轨迹上的区别" aria-label="放大查看 TRACE 原论文 Figure 1">
+                        <img src="https://arxiv.org/html/2607.13988v1/x1.png" alt="TRACE 原论文 Figure 1：Outcome reward 与 Turn-level credit 在失败搜索轨迹上的区别" loading="lazy" referrerpolicy="no-referrer">
+                    </button>
+                    <figcaption>
+                        <p><strong>Figure 1 · 应该看什么：</strong>同一条失败轨迹里，早期 search/open 已增加任务相关证据，后期分支才把答案带偏。Outcome-only 给所有动作同一个负优势；TRACE 在每个工具边界比较前缀价值。</p>
+                        <p class="caption-source">来源：TRACE 原论文 Figure 1。点击图片可放大。</p>
+                        <button class="figure-toggle" type="button" data-figure-toggle aria-expanded="false">展开逐区说明 ▸</button>
+                        <div class="figure-detail">
+                            <ul>
+                                <li><strong>轨迹切分：</strong>每次工具 action 与 observation 组成一次状态转移；信用不在任意 token 处切，而在可解释的工具边界切。</li>
+                                <li><strong>早期有效动作：</strong>搜索和打开相关文档提高 Gold Answer 的可预测性，即使最终回答错误，它们仍应得到正或接近正的局部信用。</li>
+                                <li><strong>后期错误分支：</strong>无关检索或错误证据会降低答案准备度，因此相邻前缀价值差为负。</li>
+                                <li><strong>Outcome-only：</strong>终局 verifier 只能把整条轨迹归入成功或失败，无法定位误差发生在哪个工具调用。</li>
+                                <li><strong>TRACE：</strong>保留终局正确性作为锚，同时增加 trajectory-local 的 Turn credit，避免“前面全做对、最后一步错”时全部被惩罚。</li>
+                            </ul>
+                        </div>
+                    </figcaption>
+                </figure>
+
+                <div class="compare-grid">
+                    <article class="compare-card">
+                        <h3>训练 Process RM</h3>
+                        <p>能给细粒度监督，但需要额外标注、合成 step label 或训练一个专门评估器。</p>
+                    </article>
+                    <article class="compare-card">
+                        <h3>训练 Critic</h3>
+                        <p>能估计状态价值，但长轨迹的稀疏终局回报会让 critic 本身难学，且增加模型与显存成本。</p>
+                    </article>
+                    <article class="compare-card featured">
+                        <h3>TRACE</h3>
+                        <p>不训练新评估器；让冻结 Reference Model 只回答一个更窄的问题：当前前缀让已知 Gold Answer 变得多可预测？</p>
+                    </article>
+                </div>
+            </section>
+
+            <section id="method">
+                <p class="section-kicker">02 · Method</p>
+                <h2>方法全景：Reference Model 是探针，不是 Judge</h2>
+                <p class="lead">TRACE 不让 Reference Model 直接判断动作好坏，也不让它生成自然语言评分。它只计算 Gold Answer 在每个轨迹前缀下的平均 log-probability，再把“距离可预测还差多少”转换为状态价值。</p>
+
+                <figure class="paper-figure">
+                    <button class="image-button" type="button" data-lightbox data-src="https://arxiv.org/html/2607.13988v1/x2.png" data-alt="TRACE 原论文 Figure 2：工具调用边界上的 Log-Ratio State Value、TD Credit 与联合优化" aria-label="放大查看 TRACE 原论文 Figure 2">
+                        <img src="https://arxiv.org/html/2607.13988v1/x2.png" alt="TRACE 原论文 Figure 2：工具调用边界上的 Log-Ratio State Value、TD Credit 与联合优化" loading="lazy" referrerpolicy="no-referrer">
+                    </button>
+                    <figcaption>
+                        <p><strong>Figure 2 · 应该看什么：</strong>轨迹先按工具调用切成前缀状态；冻结模型为每个前缀计算 Gold Answer 概率；相邻 Log-Ratio Value 的差得到 TD credit；局部 credit 最后与终局 GRPO advantage 相加。</p>
+                        <p class="caption-source">来源：TRACE 原论文 Figure 2。点击图片可放大。</p>
+                        <button class="figure-toggle" type="button" data-figure-toggle aria-expanded="false">展开逐区说明 ▸</button>
+                        <div class="figure-detail">
+                            <ul>
+                                <li><strong>Tool-boundary states：</strong>$S_k$ 包含问题与前 $k$ 次 action–observation；每次工具返回后形成下一个可比较前缀。</li>
+                                <li><strong>Reference score：</strong>冻结 $\pi_{\mathrm{ref}}$ 在每个 $S_k$ 后 teacher-force Gold Answer，得到逐 token 平均 log-probability $\bar\ell_k$。</li>
+                                <li><strong>Remaining gap：</strong>$d_k=-\bar\ell_k+\epsilon$ 表示答案仍有多“不容易被预测”；gap 越小，当前状态越接近答案准备完成。</li>
+                                <li><strong>Log-ratio value：</strong>$V(S_k)=\log(d_0/d_k)$ 测量相对初始状态已经关闭了多少 gap，避免直接概率差在不同置信度区间尺度不一致。</li>
+                                <li><strong>TD 与 K-step：</strong>相邻 value 差定位本次工具调用的贡献；短 K-step backup 把稍后才显现的证据价值传回搜索动作。</li>
+                                <li><strong>Joint objective：</strong>Turn credit 只是辅助项；最终 verifier 的组相对优势仍保留，防止模型只追求“看起来更接近答案”却答错。</li>
+                            </ul>
+                        </div>
+                    </figcaption>
+                </figure>
+
+                <h3>三条公式抓住 TRACE</h3>
+                <div class="formula">
+                    $$\bar{\ell}_k=\frac{1}{|y^\star|}\sum_{t=1}^{|y^\star|}
+                    \log\pi_{\mathrm{ref}}(y^\star_t\mid S_k,y^\star_{&lt;t}),
+                    \qquad d_k=-\bar{\ell}_k+\epsilon$$
+                    <p class="formula-note"><strong>怎么读：</strong>用 teacher forcing 测量 Gold Answer 在当前前缀下的平均 log-probability；$d_k$ 是“剩余答案似然 gap”。公式中的小于号已做 HTML 转义。</p>
+                </div>
+                <div class="formula">
+                    $$V(S_k)=\log\frac{d_0}{d_k},\qquad
+                    \delta_k=V(S_{k+1})-V(S_k)=\log\frac{d_k}{d_{k+1}}$$
+                    <p class="formula-note"><strong>怎么读：</strong>如果这次工具调用让剩余 gap 减半，$\delta_k=\log 2$；gap 不变则为 0，gap 变大则为负。</p>
+                </div>
+                <div class="formula">
+                    $$c^{(K)}_{g,k}=
+                    \frac{\sum_{u=k}^{h_{g,k}}\gamma_{\mathrm{td}}^{u-k}\delta_{g,u}}
+                    {\sum_{u=k}^{h_{g,k}}\gamma_{\mathrm{td}}^{u-k}},\quad
+                    r^{\mathrm{turn}}_{g,k}=c^{(K)}_{g,k}
+                    +\mathbf 1[h_{g,k}=T_g-1]\lambda_{\mathrm{term}}
+                    \gamma_{\mathrm{td}}^{T_g-k}A_g^{\mathrm{out}}$$
+                    <p class="formula-note"><strong>实现参数：</strong>论文主实验与当前配置均为 $\epsilon=0.1$、$K=3$、$\gamma_{\mathrm{td}}=0.8$、$\lambda_{\mathrm{term}}=2.0$。分母 $Z$ 不能漏；terminal fill 的指数是 $T_g-k$，最后一个工具 Turn 仍折扣一次。</p>
+                </div>
+                <div class="formula">
+                    $$\hat A_{g,t}=\alpha_{\mathrm{out}}A_g^{\mathrm{out}}
+                    +\alpha_{\mathrm{turn}}r^{\mathrm{turn}}_{g,\mathrm{turn}(t)}$$
+                    <p class="formula-note"><strong>怎么读：</strong>每个 assistant 决策 Turn 的 policy token 同时接收终局组相对优势和本 Turn 的局部信用；tool/user observation token 被 mask；两个权重决定“最终答对”和“局部进展”各占多大影响。</p>
+                </div>
+
+                <div class="callout">
+                    <p><strong>为什么冗余调用不能刷分：</strong>one-step credit 会 telescope：$\sum_k\delta_k=V(S_T)-V(S_0)$。在起点和终点相同的情况下，多插几个无用步骤不会增加总信用。实际方法再加入 K-step backup 与 terminal fill，以换取延迟证据传播和终局锚定。</p>
+                </div>
+
+                <div class="callout">
+                    <p><strong>源码状态（核验日期：2026-07-30）：</strong>arXiv 摘要页与正文没有提供作者代码仓库；页面只给出论文、PDF 与 TeX source。因此本项目实现是依据论文 Algorithm 1、公式 (5)–(12) 和 Appendix A.1 重建，不应宣称为“官方代码移植”。报告中所有实现差异都单独列出。</p>
+                </div>
+
+                <details>
+                    <summary>算法执行顺序：从一组 rollout 到策略更新
+                        <span>展开查看 TRACE 的最小实现骨架；重点是 Reference Model 的批量前缀打分。</span>
+                    </summary>
+                    <div class="details-body">
+                        <pre><code>sample G trajectories for the same prompt
+compute terminal rewards and group-normalized outcome advantages
+
+for each trajectory:
+    split prefixes at decision/observation boundaries
+    score the gold answer under the frozen reference model
+    convert scores to log-ratio state values
+    compute one-step TD deltas and K-step turn credit
+
+mix outcome advantage with turn credit
+update the policy with a clipped objective</code></pre>
+                    </div>
+                </details>
+            </section>
+
+            <section id="mapping">
+                <p class="section-kicker">03 · Engineering landing</p>
+                <h2>旧分支为什么不准确，以及当前实现如何闭环</h2>
+                <p class="lead">原方案三分支虽然名为 Hybrid Advantage，但使用的是 τ-bench incremental reward 的 MC reward-to-go，再按相同 Turn 跨 rollout 标准化，并让训练后期逐步降低 session 权重。这不是 TRACE；更关键的是，τ-bench 原生环境在非终止步骤通常返回 0，根本不能提供预期的密集进展信号。</p>
+
+                <div class="table-wrap">
+                    <table>
+                        <thead><tr><th>审核项</th><th>旧分支</th><th>论文要求 / 当前修正</th><th>结论</th></tr></thead>
+                        <tbody>
+                            <tr><td>局部信号来源</td><td>环境 tool/user incremental reward</td><td>冻结 $\pi_{\mathrm{ref}}$ 对同一 Gold Target 的 prefix average log-probability</td><td>已替换；环境恢复纯 0/1 outcome</td></tr>
+                            <tr><td>信用传播</td><td>折扣 MC return，无 value</td><td>$d_k\rightarrow V_k\rightarrow\delta_k$，再做归一化 K-step TD</td><td>已按 Algorithm 1 实现</td></tr>
+                            <tr><td>Turn 归一化</td><td>同 uid、同 turn index 跨 rollout z-score</td><td>论文明确不对 turn values 做 group normalization</td><td>已移除</td></tr>
+                            <tr><td>融合权重</td><td>session 0.8→0.2 cosine schedule</td><td>固定 $\alpha_{\mathrm{out}}=1.0$、$\alpha_{\mathrm{turn}}=0.2$；局部信号始终只是辅助</td><td>已改为固定权重</td></tr>
+                            <tr><td>Outcome 标准差</td><td>沿用 veRL 的 sample std</td><td>论文公式使用除以 $G$ 的 population std</td><td>Hybrid 路径单独实现 population std</td></tr>
+                            <tr><td>Potential shaping</td><td>旧计划曾依赖规则/potential，且有 terminal 泄露风险</td><td>TRACE 不需要 handcrafted potential</td><td>不进入当前实现</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+
+                <h3>τ-bench 中的 Gold Target：对齐 verifier，而不是复述用户话术</h3>
+                <p>每条 parquet 数据由 task id 索引；builder 从 τ-bench 的 <code>Task.actions</code> 与 <code>Task.outputs</code> 生成确定性的 JSON。它不包含用户模拟器的风格说明，也不包含执行后才出现的动态 reservation id。该字符串只进入 reference scoring batch，绝不进入 actor prompt。</p>
+                <pre><code>{
+  "version": "tau_bench_airline_actions_outputs_v1",
+  "required_actions": [{
+    "name": "book_reservation",
+    "kwargs": {
+      "origin": "JFK",
+      "destination": "SEA",
+      "cabin": "economy",
+      "flights": ["HAT136@2024-05-20", "HAT039@2024-05-20"],
+      "payment": ["certificate_7504069:250", "credit_card_4421486:5"],
+      "total_baggages": 3,
+      "insurance": "no"
+    }
+  }],
+  "required_outputs": []
+}</code></pre>
+                <p class="caption-source">上面为便于阅读的等价缩写；代码保存的是包含乘客、完整 flight/payment 字段且 key 排序稳定的 canonical JSON。</p>
+
+                <div class="mermaid-wrap" aria-label="TRACE 在当前项目中的端到端流程图">
+                    <pre class="mermaid">
+flowchart LR
+    A["split.json<br/>seen task ids"] --> B["build_grpo_parquet.py"]
+    T["τ-bench Task.actions + outputs"] --> B
+    B --> C["Actor prompt<br/>只有 system；初始 user 由 env.reset 生成"]
+    B --> G["training-only canonical Gold Target"]
+    C --> D["Online rollout<br/>Qwen actor ↔ tool ↔ user simulator"]
+    D --> E["state boundaries<br/>每次 assistant 生成前"]
+    E --> F["prefix + 同一 Gold Target<br/>teacher forcing"]
+    G --> F
+    R["Frozen reference model<br/>temperature = 1"] --> F
+    F --> H["avg log p → d → log-ratio V<br/>δ → K=3 credit + terminal fill"]
+    V["τ-bench DB/output verifier<br/>terminal reward 0/1"] --> I["population GroupNorm outcome advantage"]
+    H --> J["A = 1.0 × A_out + 0.2 × r_turn"]
+    I --> J
+    J --> K["Clipped policy update<br/>只作用于 assistant tokens"]
+                    </pre>
+                </div>
+
+                <h3>边界定义是一次有意、可审计的任务适配</h3>
+                <div class="case-grid">
+                    <article class="case-card">
+                        <h3>论文：tool-only transition</h3>
+                        <p>每个 assistant Turn 要么调用一个 browser tool，要么输出 final answer，因此工具边界天然等于决策边界。</p>
+                    </article>
+                    <article class="case-card">
+                        <h3>本项目：decision–observation transition</h3>
+                        <p>航空任务还包含纯对话澄清。当前实现把“assistant 决策 → tool observation 或 user reply → 下一次 assistant 生成前”作为状态转移；最后一次 assistant 回复只接收 outcome，不伪造一个不存在的后继状态。</p>
+                    </article>
+                </div>
+                <div class="callout">
+                    <p><strong>这不是无条件可用：</strong>结构化 JSON 比论文的短答案长，固定字段名和标点可能稀释真正的业务信息。上线训练前必须在历史轨迹上验证：正确航班搜索、有效澄清、用户信息读取、成功写操作是否总体提高 $\bar\ell$；错误支付、重复调用、错误写入是否降低它。过不了这道离线门槛，就应回退 outcome-only GRPO，而不是调大 turn weight。</p>
+                </div>
+                <div class="callout">
+                    <p><strong>最关键的理论外推：</strong><code>Task.actions</code> 描述 verifier 要看到的终局数据库变化，并不是每个 prefix 后唯一正确的“下一条 assistant 回复”。完整 JSON 里还会包含已经执行过的 action，而模型原生 tool-call 格式也未必等于这份序列化。因此它只能作为固定的任务完成记录来探测 progress，不能当 behavior-cloning label；若冻结模型主要在响应 JSON 格式，而不是在响应业务事实，$\delta_k$ 就没有可用的信用含义。离线校准应优先比较完整 JSON、压缩 value-bearing target 与 tokenizer 原生 tool-call skeleton，并要求 target 在所有 prefix 上保持完全相同、始终不进入 actor prompt。</p>
+                </div>
+            </section>
+
+            <section id="case-study">
+                <p class="section-kicker">04 · Real data walkthrough</p>
+                <h2>task 0：一条真实六轮订票轨迹如何变成 TRACE 训练样本</h2>
+                <p class="lead">这个任务属于当前 seen train split。历史成功样本 <code>sample_idx=2</code> 有 6 个 assistant Turn、4 次工具调用、终局 reward=1。历史 JSONL 只用于解释和离线校准；RL 训练不会 replay 它，而是从 parquet 的 task id 开始在线重新采样 actor、tool 与 user simulator 的交互。</p>
+
+                <div class="case-grid">
+                    <article class="case-card">
+                        <h3>用户约束</h3>
+                        <ul>
+                            <li>JFK → SEA，2024-05-20，单程，11:00 EST 以后。</li>
+                            <li>economy；直飞优先，没有合适直飞则一站；最低价。</li>
+                            <li>3 件行李、不买保险；大额 $250 certificate + 7447 card 补差。</li>
+                        </ul>
+                    </article>
+                    <article class="case-card">
+                        <h3>verifier 的 canonical target</h3>
+                        <ul>
+                            <li>HAT136（JFK→ATL）+ HAT039（ATL→SEA）。</li>
+                            <li>Mia Li，DOB 1990-04-05，economy。</li>
+                            <li>certificate_7504069: 250 + credit_card_4421486: 5。</li>
+                            <li>3 bags、0 nonfree、insurance=no。</li>
+                        </ul>
+                    </article>
+                </div>
+
+                <div class="mermaid-wrap" aria-label="task 0 六轮订票轨迹时序图">
+                    <pre class="mermaid">
+sequenceDiagram
+    participant U as "τ-bench user simulator"
+    participant A as "Actor"
+    participant E as "Airline tools / DB"
+    participant R as "Frozen reference scorer"
+    participant V as "Terminal verifier"
+
+    U->>A: "JFK→SEA, May 20, economy, after 11, 3 bags, no insurance"
+    Note over A,R: "S0: score canonical target"
+    A->>E: "Turn 1 · search_direct_flight"
+    E-->>A: "Only 06:00 / 01:00 direct flights; violate time"
+    Note over A,R: "S1: direct path ruled out"
+    A->>E: "Turn 2 · search_onestop_flight"
+    E-->>A: "HAT136 + HAT039 is valid, $255"
+    Note over A,R: "S2: correct itinerary becomes predictable"
+    A->>U: "Turn 3 · present option and ask to proceed"
+    U-->>A: "Confirm; user id + payment preference"
+    Note over A,R: "S3: hidden payment constraints revealed"
+    A->>E: "Turn 4 · get_user_details"
+    E-->>A: "DOB + certificate/payment ids"
+    Note over A,R: "S4: booking arguments almost complete"
+    A->>E: "Turn 5 · book_reservation"
+    E-->>A: "Reservation created with exact $250 + $5"
+    Note over A,R: "S5: target state is evidenced"
+    A->>U: "Turn 6 · final confirmation"
+    U-->>V: "STOP"
+    V-->>A: "DB hash and required outputs match → reward 1"
+                    </pre>
+                </div>
+
+                <h3>从 prefix score 到每 Turn advantage：一个可复算的教学数例</h3>
+                <p>下表的工具、约束与顺序来自真实轨迹；$\bar\ell_k$ 是为解释公式设置的示例值，<strong>不是历史日志或训练结果</strong>。假设同 prompt 的 8 条 rollout 形成 $A^{out}=+1$，并使用当前配置 $\epsilon=0.1,K=3,\gamma=0.8,\lambda=2,\alpha_{turn}=0.2$。</p>
+                <div class="table-wrap">
+                    <table>
+                        <thead><tr><th>状态 / 被归因 Turn</th><th>真实新增信息</th><th>示例 $\bar\ell$</th><th>$V$ / one-step $\delta$</th><th>含 K-step 与 terminal fill 的 $r^{turn}$</th><th>Turn token 最终 advantage</th></tr></thead>
+                        <tbody>
+                            <tr><td>$S_0$ → Turn 1</td><td>尚未搜索</td><td>-4.20</td><td>$V_0=0$；$\delta_0=0.0976$</td><td>0.2720</td><td>$1+0.2×0.2720=1.0544$</td></tr>
+                            <tr><td>$S_1$ → Turn 2</td><td>排除不满足时间的直飞</td><td>-3.80</td><td>$V_1=0.0976$；$\delta_1=0.4447$</td><td>0.3753</td><td>1.0751</td></tr>
+                            <tr><td>$S_2$ → Turn 3</td><td>发现 HAT136 + HAT039</td><td>-2.40</td><td>$V_2=0.5423$；$\delta_2=0.3285$</td><td>1.4910</td><td>1.2982</td></tr>
+                            <tr><td>$S_3$ → Turn 4</td><td>用户确认并披露付款偏好</td><td>-1.70</td><td>$V_3=0.8708$；$\delta_3=0.3254$</td><td>1.8431</td><td>1.3686</td></tr>
+                            <tr><td>$S_4$ → Turn 5</td><td>拿到 DOB、certificate/card id</td><td>-1.20</td><td>$V_4=1.1963$；$\delta_4=0.8602$</td><td>2.4602</td><td>1.4920</td></tr>
+                            <tr><td>$S_5$ / Turn 6</td><td>DB 已返回正确 reservation；生成最终确认</td><td>-0.45</td><td>$V_5=2.0565$</td><td>不构造虚假后继状态</td><td>仅 $A^{out}=1$</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+                <p>这里后段 Turn credit 大，并非算法规定“越晚越重要”，而是示例 prefix 在拿到付款 id 和成功写 DB 后关闭了更多剩余 gap，同时 K-step terminal fill 只覆盖能看见轨迹末端的窗口。若某次搜索引入错误信息，$\bar\ell$ 变得更负，$\delta$ 会自然为负。</p>
+
+                <h3>真实错误恢复：不要把每次 tool error 硬编码成负奖励</h3>
+                <p>同一 task 的历史 <code>sample_idx=15</code> 首次预订把付款写成 $250+$55，总额 $305，与票价 $255 不符；工具返回 <code>Error: payment amount does not add up</code>。随后 actor 修正为 $250+$5 并成功。TRACE 的合理行为是：错误 observation 可能降低 target likelihood，修正动作再显著提高；最终 verifier 仍给成功 rollout 正 outcome。若用规则直接把任何 error 永久判负，会误伤“可恢复探索”，这正是当前实现不再消费 handcrafted incremental reward 的原因。</p>
+            </section>
+
+            <section id="implementation">
+                <p class="section-kicker">05 · Code ↔ report alignment</p>
+                <h2>实现对应表：哪些是论文原式，哪些是数据集适配</h2>
+                <div class="table-wrap code-links">
+                    <table>
+                        <thead><tr><th>职责</th><th>实现文件</th><th>关键不变量</th></tr></thead>
+                        <tbody>
+                            <tr><td>Gold Target 构建</td><td><a href="https://github.com/iOPEN-Xing/agentic-rl/blob/codex/hybrid-advantage/agentic-grpo-longhorizon/scripts/train/grpo/build_grpo_parquet.py">build_grpo_parquet.py</a></td><td>只来自 actions/outputs；不进入 actor prompt；每次 launch 重建 TRACE parquet</td></tr>
+                            <tr><td>决策/状态边界</td><td><a href="https://github.com/iOPEN-Xing/agentic-rl/blob/codex/hybrid-advantage/verl/verl/experimental/agent_loop/turn_reward_utils.py">turn_reward_utils.py</a> · <a href="https://github.com/iOPEN-Xing/agentic-rl/blob/codex/hybrid-advantage/verl/verl/experimental/agent_loop/tool_agent_loop.py">tool_agent_loop.py</a></td><td>prefix 位于 assistant 生成前；最后回复只有 outcome</td></tr>
+                            <tr><td>Reference scoring batch</td><td><a href="https://github.com/iOPEN-Xing/agentic-rl/blob/codex/hybrid-advantage/verl/verl/trainer/ppo/trace_reference.py">trace_reference.py</a></td><td>同一 target、teacher forcing、target-token mean、temperature=1、禁止静默截断</td></tr>
+                            <tr><td>TRACE 公式与 Hybrid Advantage</td><td><a href="https://github.com/iOPEN-Xing/agentic-rl/blob/codex/hybrid-advantage/verl/verl/trainer/ppo/hybrid_advantage.py">hybrid_advantage.py</a></td><td>population GroupNorm；不归一化 turn credit；$Z$、terminal exponent 和固定权重准确</td></tr>
+                            <tr><td>训练器接线</td><td><a href="https://github.com/iOPEN-Xing/agentic-rl/blob/codex/hybrid-advantage/verl/verl/trainer/ppo/ray_trainer.py">ray_trainer.py</a></td><td>复用冻结 ref worker；score 一次后散射回 rollout；只给 assistant token 梯度</td></tr>
+                            <tr><td>配置与启动</td><td><a href="https://github.com/iOPEN-Xing/agentic-rl/blob/codex/hybrid-advantage/agentic-grpo-longhorizon/configs/train/grpo/hybrid_advantage.yaml">hybrid_advantage.yaml</a> · <a href="https://github.com/iOPEN-Xing/agentic-rl/blob/codex/hybrid-advantage/agentic-grpo-longhorizon/scripts/train/grpo/run_hybrid_advantage.sh">run_hybrid_advantage.sh</a></td><td>论文 turn 参数固定；现有 GPU、模型与 LoRA 路径保持项目配置</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+
+                <details open>
+                    <summary>核心公式在代码中的最小可运行形态
+                        <span>省略输入检查；真实实现包含 shape、有限值、mask、span 对齐和 context length 校验。</span>
+                    </summary>
+                    <div class="details-body">
+                        <pre><code>remaining_gap = -avg_gold_log_probs + gap_epsilon
+state_values = torch.log(remaining_gap[0] / remaining_gap)
+deltas = state_values[1:] - state_values[:-1]
+
+for k in range(num_transitions):
+    h = min(k + td_horizon - 1, num_transitions - 1)
+    discounts = td_gamma ** torch.arange(h - k + 1)
+    local = (discounts * deltas[k:h + 1]).sum() / discounts.sum()
+    terminal = (
+        terminal_scale * td_gamma ** (num_transitions - k) * outcome_adv
+        if h == num_transitions - 1 else 0.0
+    )
+    turn_reward[k] = local + terminal
+
+advantage_on_turn_k = outcome_weight * outcome_adv + turn_weight * turn_reward[k]</code></pre>
+                    </div>
+                </details>
+
+                <h3>论文复现项与项目适配项必须分开解读</h3>
+                <div class="table-wrap">
+                    <table>
+                        <thead><tr><th>项目</th><th>TRACE 论文</th><th>当前实现</th><th>判断</th></tr></thead>
+                        <tbody>
+                            <tr><td>Credit 核心</td><td>log-ratio、K=3、γ=.8、terminal scale=2、turn weight=.2</td><td>逐项一致</td><td>严格实现</td></tr>
+                            <tr><td>Reference</td><td>policy initialization 的冻结副本</td><td>LoRA 下禁用 adapter 的 base / 独立 ref worker；score temperature=1</td><td>语义一致</td></tr>
+                            <tr><td>边界</td><td>一个 assistant Turn 对应一个 browser tool transition</td><td>assistant 决策 + tool 或 user observation；并行多 tool 视为一个决策 Turn</td><td>交互数据适配，需消融</td></tr>
+                            <tr><td>Gold</td><td>短、唯一的 QA answer</td><td>verifier-aligned canonical actions + outputs JSON</td><td>必要适配，也是最大代理风险</td></tr>
+                            <tr><td>Final answer tail</td><td>search answer span 使用 group-mean rule ×0.05</td><td>τ-bench 最后是面向用户的确认话术，不是 verifier gold；仅使用 outcome advantage</td><td>有意不照搬，报告明确披露</td></tr>
+                            <tr><td>KL / 初始策略</td><td>KL=0、base policy、无 cold-start SFT</td><td>以代码为准：<code>/data/xjz/model/qwen3-8b</code> + LoRA r=16/α=32，未配置 <code>lora_adapter_path</code>，KL loss=0.01</td><td>不能从旧实验文档推断本分支已加载 SFT；结果也不能当论文复现</td></tr>
+                            <tr><td>Rollout sampling</td><td>temperature=1、top-p=1</td><td>沿用项目 temperature=.7、top-p=.9；仅 ref score 固定 temperature=1</td><td>硬件/业务配置保持不变</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+                <div class="callout">
+                    <p><strong>权重语义以当前配置为准：</strong>当前分支显式指向 <code>/data/xjz/model/qwen3-8b</code>，Reference Model 指向同一路径；LoRA 模式下 reference scoring 通过禁用 adapter 获得冻结初始化策略。仓库其他文档曾记录 <code>sft_lora_merged</code> 实验，但本配置没有该路径或 adapter checkpoint，因此本报告不把它写成当前运行事实。</p>
+                </div>
+
+                <h3>测试与静态证据</h3>
+                <ul class="code-links">
+                    <li><a href="https://github.com/iOPEN-Xing/agentic-rl/blob/codex/hybrid-advantage/verl/tests/trainer/ppo/test_hybrid_advantage.py">test_hybrid_advantage.py</a>：复算论文 Appendix A.2 的 1.1806 / 0.4052；覆盖 K-step、$K=0$、terminal fill、population std、Turn mapping 与“禁止 turn group normalization”。</li>
+                    <li><a href="https://github.com/iOPEN-Xing/agentic-rl/blob/codex/hybrid-advantage/verl/tests/trainer/ppo/test_trace_reference.py">test_trace_reference.py</a>：证明所有 prefix teacher-force 同一 target、只平均 target token，并拒绝单样本截断与跨样本 padding 越过 scoring 上限。</li>
+                    <li><a href="https://github.com/iOPEN-Xing/agentic-rl/blob/codex/hybrid-advantage/agentic-grpo-longhorizon/src/training/tests/test_trace_targets.py">test_trace_targets.py</a>：证明 task 0 target 确定、包含 HAT136、不会泄露到 actor prompt，并保留多 action / required output。</li>
+                    <li><a href="https://github.com/iOPEN-Xing/agentic-rl/blob/codex/hybrid-advantage/agentic-grpo-longhorizon/scripts/validate/trace_credit.py">trace_credit.py</a>：独立检查论文数例与 one-step telescoping。</li>
+                </ul>
+                <div class="callout">
+                    <p><strong>验证范围：</strong>本轮没有启动模型、Ray、vLLM、训练或 GPU。新增/改动 Python 文件通过了本机可解析部分的语法编译；系统 Python 3.9 无 pytest/torch，且 veRL worker 原文件使用 Python 3.10 <code>match</code> 语法，因此完整 pytest 与分布式接线需要在项目既有 <code>cu12.8</code> 环境执行。报告不把“静态通过”写成“训练已验证”。</p>
+                </div>
+            </section>
+
+            <section id="evidence">
+                <p class="section-kicker">06 · Evidence</p>
+                <h2>数字很强，但适用边界也很清楚</h2>
+                <div class="metric-grid">
+                    <article class="metric"><strong>7.2 → 35.6</strong><span>Qwen3-4B 在 closed-web BrowseComp-Plus 上的 Base 到 TRACE。</span></article>
+                    <article class="metric"><strong>8.4 → 42.6</strong><span>Qwen3-30B-A3B 在同一基准上的 Base 到 TRACE。</span></article>
+                    <article class="metric"><strong>29.5 → 34.0</strong><span>4B 模型四个基准平均分：Outcome-only GRPO 到 TRACE；30B-A3B 为 32.5 → 38.1。</span></article>
+                </div>
+
+                <ul>
+                    <li><strong>受控比较：</strong>GRPO、GSPO、GiGRPO 与 TRACE 使用相同骨干、浏览工具、数据、终局奖励和评测接口，差异主要来自 credit signal。</li>
+                    <li><strong>迁移证据：</strong>训练发生在 closed synthetic search，提升仍迁移到 BrowseComp、GAIA 与中文 xbench-DeepSearch。</li>
+                    <li><strong>训练配方：</strong>没有 cold-start SFT、agentic mid-training、live-web training、强 Judge 或训练好的 process reward model。</li>
+                    <li><strong>统计边界：</strong>论文说明受控消融通常是单次训练运行，小差异应理解为方向性结果，而不是已校正方差的定论。</li>
+                    <li><strong>任务边界：</strong>验证集中在答案短且有已知 ground truth 的长程搜索。代码补丁、开放式助理和复杂结构化输出需要新的 state-value target。</li>
+                </ul>
+            </section>
+
+            <section id="judgment">
+                <p class="section-kicker">07 · Decision & acceptance</p>
+                <h2>最终判断：理论链已经正确，数据代理仍需先证伪后训练</h2>
+                <div class="judgment-grid">
+                    <article class="judgment-card">
+                        <h3>代码层面</h3>
+                        <p>当前分支不再把环境 reward、potential 或 MC return 冒充 TRACE。Algorithm 1 的核心公式、mask、数据 target 与 frozen-ref scoring 已形成完整接线。</p>
+                    </article>
+                    <article class="judgment-card">
+                        <h3>理论层面</h3>
+                        <p>TRACE 的 policy invariance 并非自动保证；它是一个辅助代理目标。one-step telescoping 只约束累计局部 credit，不证明 JSON likelihood 等价于真实业务进展。</p>
+                    </article>
+                    <article class="judgment-card">
+                        <h3>数据层面</h3>
+                        <p>τ-bench 的 actions/outputs 能提供 verifier-aligned target，因此比“预订成功”这类弱文本更合理；但目标较长、任务仅 50 个，过拟合 task-specific value tokens 是主要风险。</p>
+                    </article>
+                </div>
+
+                <h3>先离线、再在线的五道验收门</h3>
+                <div class="table-wrap">
+                    <table>
+                        <thead><tr><th>顺序</th><th>必须回答的问题</th><th>建议指标</th><th>失败动作</th></tr></thead>
+                        <tbody>
+                            <tr><td>1 · Target validity</td><td>同一 task 的正确 prefix 是否比错误 prefix 更容易预测 canonical target？</td><td>pairwise ranking accuracy；成功/失败 endpoint AUC；按 task bootstrap CI</td><td>改 target 表达；仍不稳定则停用 TRACE</td></tr>
+                            <tr><td>2 · Local attribution</td><td>credit 方向是否符合真实动作语义？</td><td>正确搜索、澄清、read→write chain、错误写入、恢复操作的人工盲审一致率</td><td>调整 boundary/target，不得先调大权重</td></tr>
+                            <tr><td>3 · Safety</td><td>更高 likelihood 是否诱导未确认写操作或参数猜测？</td><td>wrong write、write-tool error、未确认 booking/cancel/update、transfer rate</td><td>安全项变差即阻断</td></tr>
+                            <tr><td>4 · Generalization</td><td>收益是否只记住 seen 40 tasks？</td><td>unseen 10 tasks pass@1 / pass^k；按 booking/change/cancel/read-only 分桶；多 seed CI</td><td>只 seen 提升不接受</td></tr>
+                            <tr><td>5 · Efficiency</td><td>额外 ref forward 是否换来值得的成功率？</td><td>success-conditioned turns/tokens、scored prefixes、ref scoring wall time、OOM/超长比例</td><td>收益不足则回退 outcome-only</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+
+                <h3>最小消融矩阵</h3>
+                <ol>
+                    <li><strong>Baseline：</strong>现有 outcome-only GRPO，保持全部 rollout/模型/数据配置一致。</li>
+                    <li><strong>TRACE-core：</strong>$\alpha_{turn}=0.2,K=3$，当前实现；这是主比较。</li>
+                    <li><strong>无 TD：</strong>$K=0$，只保留 outcome 与末端锚，检验 prefix TD 是否真正贡献。</li>
+                    <li><strong>权重敏感性：</strong>$\alpha_{turn}\in\{0.05,0.1,0.2\}$；不建议直接测试大权重，论文也显示过大会退化。</li>
+                    <li><strong>边界敏感性：</strong>tool-only vs tool+user clarification；这是 τ-bench 特有的关键消融。</li>
+                    <li><strong>Target 敏感性：</strong>完整 canonical JSON vs 压缩 value-bearing target vs tokenizer 原生 tool-call skeleton；用于区分业务进展信号与固定 schema / 格式似然。</li>
+                </ol>
+
+                <div class="callout">
+                    <p><strong>Go / No-Go：</strong>现在可以进入“离线 reference scoring 校准”阶段，但还不能据此宣称方案三已在 τ-bench 有效。只有 unseen success 在多 seed 下提升，同时 wrong-write、tool-error、transfer 和成功条件成本不恶化，才进入正式训练结论。任何情况下，Reference Model 都不能替代 DB hash、required output 和用户确认所组成的终局 verifier。</p>
+                </div>
+            </section>
+        </article>
+
+        <footer>
+            <p><strong>原文与权威来源</strong></p>
+            <ul class="source-list">
+                <li><a href="https://arxiv.org/abs/2607.13988" target="_blank" rel="noopener noreferrer">TRACE · arXiv:2607.13988v1 · 2026-07</a></li>
+                <li><a href="https://arxiv.org/html/2607.13988v1" target="_blank" rel="noopener noreferrer">TRACE · arXiv HTML 全文与原始 Figures</a></li>
+                <li><a href="https://github.com/iOPEN-Xing/agentic-rl/blob/codex/hybrid-advantage/verl/verl/trainer/ppo/hybrid_advantage.py">当前项目 TRACE / Hybrid Advantage 核心实现</a></li>
+                <li><a href="https://github.com/iOPEN-Xing/agentic-rl/blob/codex/hybrid-advantage/agentic-grpo-longhorizon/experiments/sft_collect_airline/task_0000.jsonl">当前数据集 task 0 历史轨迹（case 证据）</a></li>
+                <li><a href="scheme-analysis.html">返回 Agentic-GRPO 航空订票方案总览</a></li>
+            </ul>
+            <p>本页把论文事实、当前代码事实、教学性数例与待验证假设分开标注。论文截至 2026-07-30 未在 arXiv 页面提供作者代码；航空订票适配属于本项目工程实现，不是论文已报告实验。</p>
+        </footer>
+    </main>
+
+    <dialog id="lightbox" aria-label="论文图片放大预览">
+        <button class="dialog-close" type="button" aria-label="关闭图片预览">×</button>
+        <img src="" alt="">
+    </dialog>
+
+    <script>
+        document.querySelectorAll('[data-figure-toggle]').forEach((button) => {
+            button.addEventListener('click', () => {
+                const detail = button.nextElementSibling;
+                const expanded = button.getAttribute('aria-expanded') === 'true';
+                button.setAttribute('aria-expanded', String(!expanded));
+                detail.classList.toggle('active', !expanded);
+                button.textContent = expanded ? '展开逐区说明 ▸' : '收起逐区说明 ▴';
+            });
+        });
+
+        const lightbox = document.getElementById('lightbox');
+        const lightboxImage = lightbox.querySelector('img');
+        const closeButton = lightbox.querySelector('.dialog-close');
+
+        document.querySelectorAll('[data-lightbox]').forEach((button) => {
+            button.addEventListener('click', () => {
+                lightboxImage.src = button.dataset.src;
+                lightboxImage.alt = button.dataset.alt;
+                if (typeof lightbox.showModal === 'function') {
+                    lightbox.showModal();
+                } else {
+                    lightbox.setAttribute('open', '');
+                }
+            });
+        });
+
+        closeButton.addEventListener('click', () => lightbox.close());
+        lightbox.addEventListener('click', (event) => {
+            if (event.target === lightbox) lightbox.close();
+        });
+    </script>
+</body>
+</html>

@@ -1,0 +1,925 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="UserRL × τ-bench 方案二双向技术报告：区分原论文的规则化增量奖励与当前 LLM-as-Judge 扩展，审计航空订票数据、奖励接线、真实 case、代码实现和上线边界。">
+    <title>UserRL × τ-bench｜方案二论文、实现与真实业务落地</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&amp;family=JetBrains+Mono:wght@400;600&amp;family=Noto+Sans+SC:wght@400;500;600;700&amp;display=swap" rel="stylesheet">
+    <script>
+        window.MathJax = {
+            tex: { inlineMath: [['$', '$'], ['\\(', '\\)']], displayMath: [['$$', '$$'], ['\\[', '\\]']] },
+            options: { skipHtmlTags: ['script', 'noscript', 'style', 'textarea', 'pre', 'code'] }
+        };
+    </script>
+    <script id="MathJax-script" async src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
+    <script type="module">
+        import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
+        mermaid.initialize({
+            startOnLoad: true,
+            securityLevel: 'strict',
+            theme: 'base',
+            themeVariables: {
+                primaryColor: '#ecd7c2',
+                primaryTextColor: '#2d2924',
+                primaryBorderColor: '#985d38',
+                lineColor: '#71665c',
+                secondaryColor: '#fffaf2',
+                tertiaryColor: '#f0e3d1',
+                fontFamily: 'Inter, Noto Sans SC, sans-serif'
+            }
+        });
+    </script>
+    <style>
+        :root {
+            --paper: #f8f1e5;
+            --surface: #fffaf2;
+            --surface-strong: #f0e3d1;
+            --ink: #2d2924;
+            --muted: #71665c;
+            --line: #ddcdb9;
+            --accent: #985d38;
+            --accent-soft: #ecd7c2;
+            --shadow: 0 10px 24px rgba(67, 48, 34, 0.08);
+        }
+        * { box-sizing: border-box; }
+        html { scroll-behavior: smooth; scroll-padding-top: 88px; }
+        body {
+            margin: 0;
+            color: var(--ink);
+            background: var(--paper);
+            font-family: Inter, "Noto Sans SC", system-ui, sans-serif;
+            font-size: 17px;
+            line-height: 1.82;
+        }
+        a { color: var(--accent); text-underline-offset: 3px; }
+        a:hover { text-decoration-thickness: 2px; }
+        a:focus-visible, button:focus-visible, summary:focus-visible {
+            outline: 3px solid rgba(152, 93, 56, 0.35);
+            outline-offset: 3px;
+        }
+        .topbar {
+            position: sticky;
+            top: 0;
+            z-index: 20;
+            border-bottom: 1px solid rgba(152, 93, 56, 0.2);
+            background: rgba(248, 241, 229, 0.96);
+            backdrop-filter: blur(10px);
+        }
+        .nav {
+            max-width: 1120px;
+            min-height: 64px;
+            margin: 0 auto;
+            padding: 0 24px;
+            display: flex;
+            align-items: center;
+            gap: 22px;
+            overflow-x: auto;
+            white-space: nowrap;
+            scrollbar-width: none;
+        }
+        .nav::-webkit-scrollbar { display: none; }
+        .nav a { color: var(--muted); font-size: 14px; font-weight: 600; text-decoration: none; }
+        .nav a:first-child { color: var(--ink); margin-right: auto; }
+        .nav a:last-child { color: var(--accent); }
+        main { max-width: 960px; margin: 0 auto; padding: 0 28px 96px; }
+        .hero { padding: 72px 0 42px; }
+        .eyebrow {
+            margin: 0 0 16px;
+            color: var(--accent);
+            font-family: "JetBrains Mono", monospace;
+            font-size: 13px;
+            font-weight: 600;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+        }
+        h1, h2, h3 { line-height: 1.25; letter-spacing: -0.025em; }
+        h1 { max-width: 840px; margin: 0; font-size: clamp(42px, 7vw, 72px); }
+        h2 { margin: 0 0 18px; font-size: clamp(30px, 4vw, 44px); }
+        h3 { margin: 28px 0 12px; font-size: 22px; }
+        p { margin: 0 0 18px; }
+        .dek {
+            max-width: 790px;
+            margin: 24px 0 22px;
+            color: #4f4841;
+            font-size: clamp(19px, 2.3vw, 24px);
+            line-height: 1.65;
+        }
+        .paper-meta, .hero-actions, .tag-row {
+            display: flex;
+            flex-wrap: wrap;
+            align-items: center;
+            gap: 10px;
+        }
+        .paper-meta { color: var(--muted); font-size: 14px; }
+        .chip {
+            display: inline-flex;
+            align-items: center;
+            min-height: 32px;
+            padding: 4px 11px;
+            border: 1px solid var(--line);
+            border-radius: 999px;
+            background: rgba(255, 250, 242, 0.7);
+            color: var(--muted);
+            font-size: 13px;
+            font-weight: 600;
+        }
+        .chip.accent { border-color: var(--accent); color: var(--accent); }
+        .hero-actions { margin-top: 26px; }
+        .button-link {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            min-height: 44px;
+            padding: 8px 15px;
+            border: 1px solid var(--accent);
+            border-radius: 10px;
+            color: var(--accent);
+            font-weight: 700;
+            text-decoration: none;
+        }
+        .button-link.primary { background: var(--accent); color: #fffaf2; }
+        .tldr {
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 14px;
+            margin-top: 40px;
+        }
+        .tldr-card {
+            min-height: 174px;
+            padding: 24px;
+            border: 1px solid var(--line);
+            border-radius: 16px;
+            background: var(--surface);
+            box-shadow: var(--shadow);
+        }
+        .tldr-card span {
+            color: var(--accent);
+            font-family: "JetBrains Mono", monospace;
+            font-size: 12px;
+            font-weight: 700;
+            letter-spacing: 0.06em;
+        }
+        .tldr-card h3 { margin: 12px 0 8px; font-size: 19px; }
+        .tldr-card p { margin: 0; color: var(--muted); font-size: 15px; line-height: 1.7; }
+        .reading-path {
+            margin: 0 0 26px;
+            padding: 18px 22px;
+            border-left: 4px solid var(--accent);
+            background: var(--surface-strong);
+            color: #51483f;
+            font-weight: 600;
+        }
+        section { padding: 72px 0; border-top: 1px solid var(--line); }
+        .section-kicker {
+            margin-bottom: 10px;
+            color: var(--accent);
+            font-family: "JetBrains Mono", monospace;
+            font-size: 12px;
+            font-weight: 700;
+            letter-spacing: 0.08em;
+        }
+        .lead { max-width: 820px; color: #4d463f; font-size: 19px; }
+        .flow {
+            display: grid;
+            grid-template-columns: repeat(3, minmax(0, 1fr));
+            gap: 12px;
+            margin: 30px 0;
+        }
+        .flow-step, .compare-card, .metric, .judgment-card {
+            border: 1px solid var(--line);
+            border-radius: 14px;
+            background: var(--surface);
+        }
+        .flow-step { position: relative; padding: 22px; }
+        .flow-step:not(:last-child)::after {
+            content: "→";
+            position: absolute;
+            right: -19px;
+            top: 50%;
+            z-index: 2;
+            width: 26px;
+            color: var(--accent);
+            background: var(--paper);
+            font-weight: 700;
+            text-align: center;
+            transform: translateY(-50%);
+        }
+        .flow-step b { display: block; margin-bottom: 6px; }
+        .flow-step small { color: var(--muted); line-height: 1.55; }
+        .compare-grid, .metric-grid, .judgment-grid {
+            display: grid;
+            grid-template-columns: repeat(3, minmax(0, 1fr));
+            gap: 14px;
+            margin: 28px 0;
+        }
+        .compare-card, .judgment-card { padding: 22px; }
+        .compare-card h3, .judgment-card h3 { margin: 0 0 10px; font-size: 18px; }
+        .compare-card p, .judgment-card p { margin: 0; color: var(--muted); font-size: 15px; line-height: 1.7; }
+        .compare-card.featured { border: 2px solid var(--accent); }
+        .paper-figure {
+            margin: 32px 0;
+            overflow: hidden;
+            border: 1px solid var(--line);
+            border-radius: 16px;
+            background: var(--surface);
+            box-shadow: var(--shadow);
+        }
+        .image-button { width: 100%; padding: 18px; border: 0; background: #fff; cursor: zoom-in; }
+        .image-button img { display: block; width: 100%; height: auto; }
+        figcaption { padding: 18px 22px 20px; border-top: 1px solid var(--line); }
+        figcaption p { margin: 0; }
+        .caption-source { margin-top: 7px; color: var(--muted); font-size: 13px; }
+        .figure-toggle {
+            margin-top: 12px;
+            padding: 0;
+            border: 0;
+            color: var(--accent);
+            background: transparent;
+            font: inherit;
+            font-size: 14px;
+            font-weight: 700;
+            cursor: pointer;
+        }
+        .figure-detail {
+            max-height: 0;
+            overflow: hidden;
+            color: var(--muted);
+            opacity: 0;
+            transform: translateY(-4px);
+            transition: max-height 260ms ease, opacity 200ms ease, transform 200ms ease;
+        }
+        .figure-detail.active { max-height: 720px; margin-top: 12px; opacity: 1; transform: translateY(0); }
+        .figure-detail ul { margin: 0; padding-left: 22px; }
+        .formula {
+            margin: 22px 0;
+            padding: 22px;
+            overflow-x: auto;
+            border: 1px solid var(--line);
+            border-radius: 14px;
+            background: #fffdf8;
+            text-align: center;
+        }
+        .formula-note { margin-top: 12px; color: var(--muted); font-size: 14px; text-align: left; }
+        .callout { margin: 24px 0; padding: 20px 22px; border-left: 4px solid var(--accent); background: var(--accent-soft); }
+        .callout p:last-child { margin-bottom: 0; }
+        .table-wrap { margin: 26px 0; overflow-x: auto; border: 1px solid var(--line); border-radius: 14px; }
+        table { width: 100%; border-collapse: collapse; min-width: 680px; background: var(--surface); }
+        th, td { padding: 15px 17px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }
+        th { background: var(--surface-strong); font-size: 14px; }
+        td { font-size: 15px; }
+        tr:last-child td { border-bottom: 0; }
+        ul, ol { padding-left: 24px; }
+        li { margin-bottom: 8px; }
+        details { margin: 16px 0; border: 1px solid var(--line); border-radius: 14px; background: var(--surface); }
+        summary { padding: 18px 20px; cursor: pointer; font-weight: 700; }
+        summary span { display: block; margin-top: 4px; color: var(--muted); font-size: 13px; font-weight: 400; }
+        .details-body { padding: 0 20px 20px; }
+        code, pre { font-family: "JetBrains Mono", monospace; }
+        pre {
+            margin: 0;
+            padding: 18px;
+            overflow-x: auto;
+            border-radius: 12px;
+            background: #312d28;
+            color: #f8f1e5;
+            font-size: 13px;
+            line-height: 1.7;
+        }
+        .mermaid-wrap {
+            margin: 28px 0;
+            padding: 20px;
+            overflow-x: auto;
+            border: 1px solid var(--line);
+            border-radius: 16px;
+            background: var(--surface);
+            box-shadow: var(--shadow);
+        }
+        .mermaid {
+            min-width: 760px;
+            color: var(--ink);
+            background: transparent;
+            text-align: center;
+        }
+        .case-grid {
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 14px;
+            margin: 26px 0;
+        }
+        .case-card {
+            padding: 22px;
+            border: 1px solid var(--line);
+            border-radius: 14px;
+            background: var(--surface);
+        }
+        .case-card h3 { margin: 0 0 10px; font-size: 18px; }
+        .case-card p, .case-card li { color: var(--muted); font-size: 14px; line-height: 1.7; }
+        .status {
+            display: inline-block;
+            margin-right: 6px;
+            padding: 2px 8px;
+            border-radius: 999px;
+            font-family: "JetBrains Mono", monospace;
+            font-size: 11px;
+            font-weight: 700;
+        }
+        .status.good { color: #245b3a; background: #dceede; }
+        .status.warn { color: #80551e; background: #f5e5be; }
+        .status.bad { color: #842d2d; background: #f2d4d0; }
+        .code-note { margin-top: 10px; color: var(--muted); font-size: 13px; }
+        .metric { padding: 22px; }
+        .metric strong { display: block; color: var(--accent); font-size: 30px; line-height: 1.1; }
+        .metric span { display: block; margin-top: 8px; color: var(--muted); font-size: 14px; }
+        .source-list { padding-left: 20px; }
+        footer { padding: 42px 0 10px; border-top: 1px solid var(--line); color: var(--muted); font-size: 14px; }
+        dialog {
+            width: min(1180px, calc(100vw - 32px));
+            max-height: calc(100vh - 32px);
+            padding: 48px 18px 18px;
+            overflow: auto;
+            border: 1px solid var(--line);
+            border-radius: 16px;
+            background: #fff;
+        }
+        dialog::backdrop { background: rgba(35, 30, 25, 0.78); }
+        dialog img { display: block; max-width: 100%; height: auto; margin: auto; }
+        .dialog-close {
+            position: absolute;
+            top: 10px;
+            right: 12px;
+            min-width: 36px;
+            min-height: 36px;
+            border: 1px solid var(--line);
+            border-radius: 999px;
+            background: var(--surface);
+            color: var(--ink);
+            cursor: pointer;
+        }
+        @media (max-width: 880px) {
+            body { font-size: 16px; }
+            .nav { padding: 0 18px; gap: 18px; }
+            main { padding: 0 18px 72px; }
+            .hero { padding-top: 48px; }
+            .tldr, .flow, .compare-grid, .metric-grid, .judgment-grid, .case-grid { grid-template-columns: 1fr; }
+            .flow-step:not(:last-child)::after {
+                content: "↓";
+                right: 50%;
+                top: auto;
+                bottom: -24px;
+                transform: translateX(50%);
+            }
+            section { padding: 56px 0; }
+            .paper-figure { border-radius: 12px; }
+            .image-button { padding: 8px; }
+            .mermaid { min-width: 660px; }
+        }
+        @media (prefers-reduced-motion: reduce) {
+            html { scroll-behavior: auto; }
+            *, *::before, *::after { transition-duration: 0.01ms !important; animation-duration: 0.01ms !important; }
+        }
+    </style>
+</head>
+<body>
+    <header class="topbar">
+        <nav class="nav" aria-label="报告导航">
+            <a href="scheme-analysis.html">← 返回方案总览</a>
+            <a href="#boundary">概念边界</a>
+            <a href="#paper">原论文算法</a>
+            <a href="#audit">代码穿刺</a>
+            <a href="#case-study">真实 Case</a>
+            <a href="#implementation">实现对齐</a>
+            <a href="#decision">上线判断</a>
+            <a href="https://arxiv.org/abs/2509.19736" target="_blank" rel="noopener noreferrer">原论文 ↗</a>
+        </nav>
+    </header>
+
+    <main>
+        <article>
+            <header class="hero">
+                <p class="eyebrow">Bidirectional audit · Scheme 2 · 2026-07-30</p>
+                <h1>UserRL × τ-bench：方案二应当怎样落地</h1>
+                <p class="dek">先说结论：UserRL 适合当前航空订票任务的“动态用户 + 规则环境”范式，但当前 <code>user-simulator-judge</code> 分支不是 UserRL 原算法复现。它是 LLM-as-Judge 扩展，必须把终局规则奖励与 Judge 辅助信号彻底解耦。</p>
+                <div class="paper-meta">
+                    <span class="chip accent">论文—源码—数据双向对齐</span>
+                    <span class="chip">官方源码已公开</span>
+                    <span class="chip">当前分支：codex/user-simulator-judge</span>
+                    <span>只做静态/逻辑检查，未启动训练或模型</span>
+                </div>
+                <div class="hero-actions">
+                    <a class="button-link primary" href="https://arxiv.org/abs/2509.19736" target="_blank" rel="noopener noreferrer">阅读原论文</a>
+                    <a class="button-link" href="https://github.com/SalesforceAIResearch/UserRL" target="_blank" rel="noopener noreferrer">查看官方代码</a>
+                    <a class="button-link" href="https://github.com/iOPEN-Xing/agentic-rl/blob/codex/user-simulator-judge/agentic-grpo-longhorizon/src/envs/user_simulator_judge.py">查看当前 Judge 实现</a>
+                </div>
+
+                <div class="tldr" aria-label="30 秒摘要">
+                    <article class="tldr-card">
+                        <span>01 · 论文事实</span>
+                        <h3>User simulator 不是 Judge</h3>
+                        <p>UserRL 中 LLM 负责生成动态用户回复；有限状态 Gym 的规则转移负责增量奖励与终局任务完成，二者职责不同。</p>
+                    </article>
+                    <article class="tldr-card">
+                        <span>02 · 当前代码</span>
+                        <h3>这是一个相关但独立的扩展</h3>
+                        <p>同一 Qwen3-14B 同时扮演用户和 Judge，评价一次用户回复前的整个交互段；信号相关、有偏，不能替代 verifier。</p>
+                    </article>
+                    <article class="tldr-card">
+                        <span>03 · 已修语义</span>
+                        <h3>Outcome 纯净，Judge 有界且可关闭</h3>
+                        <p>session score 只保留 τ-bench 0/1 outcome；Judge 以 0.5 为中性点映射到 [-1,1]，失败不补值、不改权重。</p>
+                    </article>
+                    <article class="tldr-card">
+                        <span>04 · 建议默认</span>
+                        <h3>先诊断，后小权重训练</h3>
+                        <p>默认仅记录 Judge 分数、有效率与跨轨迹 outcome 相关性；通过 held-out 校准后，才打开至多 0.05 的辅助贡献。</p>
+                    </article>
+                </div>
+            </header>
+
+            <p class="reading-path">阅读路径：先拆清 UserRL 与 LLM Judge 的边界 → 对照论文公式和官方源码 → 看旧分支为何会重复计奖 → 用 task 0 真实订票 case 解剖每个信号 → 最后决定何时可进入训练消融。</p>
+
+            <section id="boundary">
+                <p class="section-kicker">01 · Concept boundary</p>
+                <h2>先纠正最容易混淆的一点：UserRL ≠ 用户模拟器打分</h2>
+                <p class="lead">UserRL 的设计是“双系统”：LLM user simulator 负责自然、动态的用户语言；Gym 作为有限状态机，以确定性规则更新状态并产生增量奖励，最终任务完成仍由规则判定。当前分支则新增第二次 LLM 调用，让用户模型兼任 Judge。这可以是工程实验，但不能借用 UserRL 名义把主观分数写成规则真值。</p>
+
+                <div class="table-wrap">
+                    <table>
+                        <thead><tr><th>问题</th><th>UserRL 原论文 / 官方框架</th><th>当前分支</th><th>审核后定位</th></tr></thead>
+                        <tbody>
+                            <tr><td>谁生成用户回复</td><td>LLM user simulator</td><td>Qwen3-14B simulator</td><td><span class="status good">对齐</span>动态用户保留</td></tr>
+                            <tr><td>谁判任务完成</td><td>规则 Gym / verifier</td><td>原实现把 outcome、Judge、PRM 融成 session score</td><td><span class="status bad">已修</span>只允许 τ-bench outcome</td></tr>
+                            <tr><td>逐 Turn 信号来源</td><td>Gym 原始增量奖励 $r_t$</td><td>一次交互段的 LLM Judge 分数</td><td><span class="status warn">扩展</span>不是论文等价物</td></tr>
+                            <tr><td>优势估计</td><td><code>grpo_multiturn</code>，分开配置 turn mapper / trajectory scorer</td><td>现有 veRL <code>grpo</code> + trajectory auxiliary scalar</td><td><span class="status warn">未复现</span>event 位置最终被求和，不能产生 turn-specific advantage</td></tr>
+                            <tr><td>Judge 独立性</td><td>论文没有这一 Judge</td><td>与用户模拟器同模型、同 endpoint</td><td><span class="status warn">相关偏差</span>先校准再训练</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+
+                <div class="compare-grid">
+                    <article class="compare-card">
+                        <h3>可继承：环境范式</h3>
+                        <p>动态用户、规则 verifier、分组 rollout、轨迹级排序，这些都很适合当前航空订票。</p>
+                    </article>
+                    <article class="compare-card">
+                        <h3>不可直接套：dense $r_t$</h3>
+                        <p>当前 τ-bench 主要提供终局 0/1，工具调用通常没有可靠的“进展增量奖励”；UserRL 的 mapper 缺少同语义输入。</p>
+                    </article>
+                    <article class="compare-card featured">
+                        <h3>可实验：Judge auxiliary</h3>
+                        <p>Judge 可以补充沟通/过程诊断，但只能是可关闭、可校准、有界的弱信号，不能覆盖 DB、政策与最终状态。</p>
+                    </article>
+                </div>
+
+                <div class="callout">
+                    <p><strong>方案二是否适合当前数据集？</strong>适合作为“用户交互能力 + 辅助过程诊断”方案；不适合把同一个 simulator 的主观判断直接当成新的 terminal reward。若要复现 UserRL 原算法，应先给 τ-bench 构造规则化、可验证的增量事件奖励，再接 <code>grpo_multiturn</code>，而不是用 Judge 分数冒充 $r_t$。</p>
+                </div>
+            </section>
+
+            <section id="paper">
+                <p class="section-kicker">02 · Paper and official source</p>
+                <h2>UserRL 原算法：同一份规则增量奖励，两条独立的重映射路径</h2>
+                <p class="lead">Figure 1 最关键的分界线位于 Reward Calculator：Gym 先产生原始逐 Turn 奖励 $r_t$；计算器再分别生成 trajectory score 与 turn credit。模拟用户只影响交互内容，不拥有终局 verifier 的裁决权。</p>
+
+                <figure class="paper-figure">
+                    <button class="image-button" type="button" data-lightbox data-src="https://arxiv.org/html/2509.19736v1/figures/main.png" data-alt="UserRL 原论文 Figure 1：统一交互工具、多个 Gym、模拟用户与奖励计算训练闭环" aria-label="放大查看 UserRL 原论文 Figure 1">
+                        <img src="https://arxiv.org/html/2509.19736v1/figures/main.png" alt="UserRL 原论文 Figure 1：统一交互工具、多个 Gym、模拟用户与奖励计算训练闭环" loading="lazy" referrerpolicy="no-referrer">
+                    </button>
+                    <figcaption>
+                        <p><strong>Figure 1 · 应该看什么：</strong>Policy 通过同一套工具与不同 Gym 和模拟用户交互；一组多轮轨迹进入 Reward Calculator 后，同时产出 trajectory-level score 和 turn-level rewards，再组合成 token-level advantage 更新策略。</p>
+                        <p class="caption-source">来源：UserRL 原论文 Figure 1。点击图片可放大。</p>
+                        <button class="figure-toggle" type="button" data-figure-toggle aria-expanded="false">展开逐区说明 ▸</button>
+                        <div class="figure-detail">
+                            <ul>
+                                <li><strong>统一工具层：</strong>所有 Gym 将交互压缩为 Action、Search、Answer 三类操作，减少每个环境定制一套 Agent 接口的成本。</li>
+                                <li><strong>Gym 与模拟用户：</strong>规则系统维护任务状态和可验证目标，LLM 用户根据当前状态生成自然反馈、偏好或回答。</li>
+                                <li><strong>分组 rollout：</strong>同一初始任务采样多条轨迹，为 GRPO 的组相对归一化提供可比较样本。</li>
+                                <li><strong>Trajectory scorer：</strong>把整条轨迹的增量奖励聚合成单一标量，决定该轨迹相对同组样本整体有多好。</li>
+                                <li><strong>Turn reward mapper：</strong>把原始逐 Turn 奖励改造成 Equalized、R2G 或 EM 等信号，再广播给该 Turn 的模型 token。</li>
+                                <li><strong>策略更新：</strong>两层信号共同形成 token advantage，但环境定义与优化目标保持解耦，便于系统做消融。</li>
+                            </ul>
+                        </div>
+                    </figcaption>
+                </figure>
+
+                <div class="callout">
+                    <p><strong>源码状态（核验日期：2026-07-30）：</strong>官方仓库已公开，并提供 <code>algorithm.adv_estimator=grpo_multiturn</code>、Equalized/R2G/EM turn mapping 与 Sum/R2G trajectory scoring。当前项目分支没有移植该 estimator，因此只能称为“受 UserRL 启发的 Judge 辅助 GRPO”。</p>
+                </div>
+
+                <h3>统一接口只有三种动作</h3>
+                <div class="flow">
+                    <div class="flow-step"><b>Action</b><small>与模拟用户直接沟通；Gym 返回动态用户回复。</small></div>
+                    <div class="flow-step"><b>Search</b><small>检索外部知识或候选项；后端返回结构化或文本结果。</small></div>
+                    <div class="flow-step"><b>Answer</b><small>提交候选解；目标可验证时由 Gym 检查正确性或完成状态。</small></div>
+                </div>
+
+                <h3>TauGym 是相关证据，但不是当前 τ-bench 包装器的同一实现</h3>
+                <div class="table-wrap">
+                    <table>
+                        <thead><tr><th>能力类型</th><th>Gym</th><th>主要考察</th></tr></thead>
+                        <tbody>
+                            <tr><td>理解与沟通</td><td>IntentionGym · PersuadeGym</td><td>隐式意图、说服与态度变化</td></tr>
+                            <tr><td>协作推理</td><td>TurtleGym · TelepathyGym · FunctionGym</td><td>提问、线索利用、假设检验与规律归纳</td></tr>
+                            <tr><td>检索与规划</td><td>SearchGym · TravelGym</td><td>知识检索、偏好澄清与个性化规划</td></tr>
+                            <tr><td>事务型工具</td><td>TauGym</td><td>由 Tau-Bench 改造，论文评测任务完成；与当前数据域最接近，但 reward API 与本项目仍需逐项核对</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+
+                <h3>论文训练设定与当前配置不能互相代称</h3>
+                <div class="table-wrap">
+                    <table>
+                        <thead><tr><th>维度</th><th>UserRL 论文/官方代码</th><th>当前方案二配置</th><th>解释</th></tr></thead>
+                        <tbody>
+                            <tr><td>Advantage</td><td><code>grpo_multiturn</code></td><td><code>grpo</code></td><td>当前是辅助 reward 接线，不是论文 estimator</td></tr>
+                            <tr><td>Turn / trajectory</td><td>Equalized、R2G、EM / Sum、R2G，$\gamma=0.8$</td><td>centered Judge event mean</td><td>输入和数学都不同</td></tr>
+                            <tr><td>KL</td><td>论文公式明确省略 KL loss</td><td><code>use_kl_loss=true</code>，coef=0.01</td><td>以当前代码为准，但实验不是原论文复现</td></tr>
+                            <tr><td>Cold start</td><td>论文强调 SFT 对持续 RL 改进很关键</td><td>Qwen3-8B + LoRA r=16/α=32；配置未指定 <code>lora_adapter_path</code></td><td>不能从文档推断已加载 SFT adapter</td></tr>
+                            <tr><td>User simulator</td><td>主要比较 GPT-4o 与 Qwen3-32B</td><td>Qwen3-14B</td><td>是本项目资源选择，需重新校准用户行为</td></tr>
+                            <tr><td>Judge</td><td>无同源 LLM Judge</td><td>与 simulator 同 Qwen3-14B / 同 endpoint</td><td>必须单测同源偏差</td></tr>
+                            <tr><td>数据切分</td><td>TauGym train 500 / test 165（论文表 2）</td><td>τ-bench airline 官方仅本地 <code>test</code> 50 tasks；parquet 再切 seen 40 / unseen 10</td><td><code>task_split=test</code> 是环境数据名，泛化口径由 parquet 的 seen/unseen 决定</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+
+                <details>
+                    <summary>论文公式与官方 <code>core_algos.py</code> 的两个不一致
+                        <span>报告和实验必须显式选择语义，不能把“官方源码”自动等同于“论文公式”。</span>
+                    </summary>
+                    <div class="details-body">
+                        <ol>
+                            <li><strong>Trajectory Sum：</strong>论文式 (5) 是 $\sum_t r_t$；官方源码 <code>compute_turn_credits()</code> 的 “Sum” 实际计算 <code>sum(turn_rewards) / len(turn_rewards)</code>，是均值。对变长轨迹，两者排序不同。</li>
+                            <li><strong>标准差：</strong>论文给出总体标准差（除以 $n$）；官方源码使用 PyTorch 默认 <code>torch.std</code>，通常是样本标准差修正。小 group 下数值会不同。</li>
+                            <li><strong>Turn advantage 组合：</strong>论文式 (7) 直接写成 $(\tilde r_t-\mu_Q)/(\sigma_Q+\eta)$；官方源码先把 turn credits 填到 token，再用组归一化 trajectory score 计算一个整轨迹 scaling factor，使 turn-credit 总量匹配 trajectory advantage。除特殊情形外，两者不是同一个数值算法。</li>
+                        </ol>
+                        <p>因此若后续移植原算法，建议先将“paper-exact”与“official-source-compatible”做成两个明确模式，并用固定数例锁定，而不是静默选一个。</p>
+                    </div>
+                </details>
+            </section>
+
+            <section id="reward">
+                <p class="section-kicker">03 · Reward design</p>
+                <h2>两层奖励必须分开：本轮怎么分，整条怎么排</h2>
+                <p class="lead">UserRL 最实用的贡献，是把 <strong>Turn-Level Reward Shaping</strong> 与 <strong>Trajectory-Level Scoring</strong> 变成两个独立旋钮。前者决定同一轨迹里各 Turn 的训练信号，后者决定同一任务下不同轨迹如何比较。</p>
+
+                <h3>第一层：把原始 Turn 奖励映射给本轮 token</h3>
+                <div class="formula">
+                    $$R(x_{t,k})=\tilde r_t,\qquad k=1,\ldots,L_t$$
+                    <p class="formula-note"><strong>怎么读：</strong>第 $t$ 个 Turn 内所有策略 token 共用 $\tilde r_t$；不同 Turn 可以不同。$\tilde r_t$ 不是固定定义，而是可选择的奖励映射。</p>
+                </div>
+
+                <div class="compare-grid">
+                    <article class="compare-card">
+                        <h3>Equalized</h3>
+                        <p>每个 Turn 给常量 $c$。强调所有交互的结构性价值，但完全不区分贡献。</p>
+                    </article>
+                    <article class="compare-card featured">
+                        <h3>Reward-to-Go</h3>
+                        <p>$\tilde r_t=\sum_{j=t}^{T}\gamma^{j-t}r_j$。把未来收益传回早期动作，鼓励铺垫性 Turn。</p>
+                    </article>
+                    <article class="compare-card">
+                        <h3>Exponential Mapping</h3>
+                        <p>把 $[0,1]$ 非线性映射到 $[0.5,1]$，避免小的正向进展被淹没。</p>
+                    </article>
+                </div>
+
+                <h3>第二层：把整条轨迹压成 GRPO 的标量</h3>
+                <div class="formula">
+                    $$R_{\mathrm{traj}}^{\mathrm{sum}}(\tau)=\sum_{t=1}^{T}r_t,\qquad
+                    R_{\mathrm{traj}}^{\mathrm{r2g}}(\tau)=\sum_{t=1}^{T}\gamma^{t-1}r_t$$
+                    <p class="formula-note"><strong>怎么读：</strong>Sum 只关心累计进展；Trajectory R2G 让更早取得进展的轨迹得分更高，因此把“少绕路”编码进组内排序。</p>
+                </div>
+
+                <h3>最后：用轨迹统计量标准化每个 Turn</h3>
+                <div class="formula">
+                    $$A(x_{t,k}\mid Q)=
+                    \frac{\tilde r_t^{(i)}-\mu_Q}{\sigma_Q+\eta}$$
+                    <p class="formula-note"><strong>怎么读：</strong>分子是本轨迹第 $t$ 个 Turn 的映射奖励，基准却来自同一任务各轨迹的 trajectory score 均值与方差；这正是 UserRL 把“局部信号”和“全局排序”结合的位置。</p>
+                </div>
+
+                <div class="callout">
+                    <p><strong>论文自己的反思：</strong>简单 heuristic 并不能真正识别 Turn 的因果贡献。EM 会把所有零奖励 Turn 映射成同样的中间值；R2G 依赖 reward 的时序与质量。论文实验更支持“trajectory scoring 比细粒度 turn differentiation 更关键”。这正是当前分支不应让未经校准的 Judge 同时进入 session 与 turn 两条链路的原因。</p>
+                </div>
+            </section>
+
+            <section id="audit">
+                <p class="section-kicker">04 · Code audit</p>
+                <h2>旧分支的主要逻辑问题，以及本轮如何修正</h2>
+                <p class="lead">问题不在模型能否加载，而在奖励语义：原代码把 environment、Judge、PRM 融成 session score，同时又把同一 Judge 结果作为 turn reward 注入 token。这样一份证据被重复计入，且 Judge 超时还会改变 active weight 与奖励尺度。</p>
+
+                <div class="mermaid-wrap" aria-label="方案二审核前后奖励数据流">
+                    <pre class="mermaid">
+flowchart LR
+    subgraph OLD["旧实现：证据耦合"]
+        E1["τ-bench outcome / inc_reward"] --> F1["0.6 Env + 0.3 Judge + 0.1 PRM"]
+        J1["同模型 LLM Judge"] --> F1
+        P1["PRM-Lite"] --> F1
+        F1 --> S1["fused session score"]
+        F1 --> T1["fused turn reward"]
+        S1 --> G1["GRPO"]
+        T1 --> G1
+    end
+    subgraph NEW["审核后：主目标与辅助信号解耦"]
+        E2["规则 verifier outcome 0/1"] --> S2["pure session score"]
+        J2["interaction-cycle Judge"] --> C2["center at 0.5 → [-1,1]"]
+        C2 --> D2{"held-out 校准通过？"}
+        D2 -->|"默认：否"| L2["仅日志诊断"]
+        D2 -->|"显式启用"| W2["≤0.05 mean auxiliary"]
+        S2 --> G2["GRPO"]
+        W2 --> G2
+    end
+                    </pre>
+                </div>
+
+                <div class="table-wrap">
+                    <table>
+                        <thead><tr><th>穿刺点</th><th>旧实现影响</th><th>当前修正</th><th>剩余边界</th></tr></thead>
+                        <tbody>
+                            <tr><td>Terminal score 被融合</td><td>失败轨迹可因 Judge 高分得到正 session reward；成功轨迹也会被低 Judge/PRM 压低</td><td><span class="status good">已修</span><code>calculate_score()["score"] = outcome</code></td><td>若 <code>reward_mode</code> 改成非 binary，属于另一个实验</td></tr>
+                            <tr><td>Judge 双重计奖</td><td>session fusion + token turn injection 重复使用同一证据</td><td><span class="status good">已修</span>Judge 只保留一条 auxiliary path</td><td>默认训练 gate 关闭</td></tr>
+                            <tr><td>Judge 不可用时重归一化</td><td>超时本身改变 reward scale</td><td><span class="status good">已修</span>返回 <code>None</code>，event mask 不置位</td><td>仍需监控有效率，避免选择性缺失</td></tr>
+                            <tr><td>只有 <code>is_error</code>，没有错误证据</td><td>Judge 无法分辨工具为什么失败，tool correctness 容易臆测</td><td><span class="status good">已修</span>传入截断后的 tool observation / exception</td><td>敏感字段应按业务需要脱敏</td></tr>
+                            <tr><td>“逐 Turn”命名过度</td><td>实际只在用户回复前调用 Judge，多个工具动作共用一个分数</td><td><span class="status good">已修</span>定义为 interaction-cycle signal</td><td>不宣称工具级因果归因</td></tr>
+                            <tr><td>一致性相关系数</td><td>在单轨迹内把大量 0 的 inc_reward 与 Judge 做 Pearson，常退化</td><td><span class="status good">已修</span>跨 rollout batch 比较 terminal outcome 与 trajectory mean Judge</td><td>相关不等于校准，还需分桶/AUC/冲突样本</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+
+                <details>
+                    <summary>当前安全语义的核心代码
+                        <span>以下片段对应分支中的真实实现，不是伪代码。</span>
+                    </summary>
+                    <div class="details-body">
+<pre><code>@dataclass(frozen=True)
+class JudgeSignalPolicy:
+    neutral_score: float = 0.5
+
+    def compute(self, feedback: JudgeFeedback) -&gt; Optional[float]:
+        if not feedback.valid:
+            return None  # 无事件，不补 0，不改变分母
+        score = max(0.0, min(1.0, feedback.score))
+        if score &gt;= self.neutral_score:
+            return (score - self.neutral_score) / (1 - self.neutral_score)
+        return (score - self.neutral_score) / self.neutral_score
+
+# session 主目标始终来自规则环境
+return {
+    "score": outcome,
+    "outcome_score": outcome,
+    "judge_mean_score": mean(valid_scores) if valid_scores else None,
+}</code></pre>
+                        <p class="code-note">路径：<code>src/envs/reward_fusion.py</code> 与 <code>src/envs/tau_bench_interaction.py</code>。Judge score=0.825、neutral=0.5 时，辅助信号为 0.65；最终注入权重若为 0.05，整轨迹平均贡献最多 0.05。</p>
+                    </div>
+                </details>
+            </section>
+
+            <section id="case-study">
+                <p class="section-kicker">05 · Real dataset case</p>
+                <h2>用当前数据集 task 0 解剖一次完整训练样本</h2>
+                <p class="lead">案例直接来自当前分支 <code>tau-bench/tau_bench/envs/airline/tasks_test.py</code> 的第一个任务：用户 Mia 从纽约飞西雅图，5 月 20 日单程、11 点后、经济舱、低价优先、三件行李、不买保险，并有证书与信用卡支付约束。目标动作是一次参数完整的 <code>book_reservation</code>。</p>
+
+                <div class="case-grid">
+                    <article class="case-card">
+                        <h3>隐藏任务约束</h3>
+                        <ul>
+                            <li>用户只回答被问到的信息，不主动泄露全部 slot。</li>
+                            <li>JFK → SEA、2024-05-20、economy、低价优先。</li>
+                            <li>3 件行李、insurance=no。</li>
+                            <li>证书优先；受单证书限制时选更大证书，再用 7447 卡补差。</li>
+                            <li>生日应从 user profile 获取，不应反复询问。</li>
+                        </ul>
+                    </article>
+                    <article class="case-card">
+                        <h3>规则终局目标</h3>
+                        <p>Verifier 检查最终数据库状态是否等价于 gold <code>book_reservation</code>：正确用户、航班 HAT136/HAT039、Mia Li 的 DOB、三件行李、支付拆分和 no insurance。只有这个结果决定 outcome=1。</p>
+                    </article>
+                </div>
+
+                <div class="mermaid-wrap" aria-label="task 0 在方案二中的交互与奖励时序">
+                    <pre class="mermaid">
+sequenceDiagram
+    participant U as "Qwen3-14B 用户模拟器"
+    participant A as "Qwen3-8B Agent"
+    participant T as "τ-bench 工具/DB"
+    participant J as "同 endpoint Judge"
+    participant R as "GRPO Reward"
+
+    U->>A: "我想订纽约到西雅图的航班"
+    A->>T: get_user_details(mia_li_3668)
+    T-->>A: "DOB、certificate、credit card..."
+    A->>T: search_direct_flight(JFK, SEA, 2024-05-20)
+    T-->>A: "候选航班与价格"
+    A->>U: "确认 11 点后、经济舱、三件行李且不买保险？"
+    U-->>A: "是的"
+    Note over J: 评价本 interaction cycle：两次工具 + 当前澄清
+    T-->>J: compact parameters + observations/errors
+    J-->>R: raw 0.825 → centered +0.65
+    Note over R: 默认只记日志；显式启用时整轨迹权重 ≤ 0.05
+    A->>T: book_reservation(canonical parameters)
+    T-->>A: reservation created
+    A->>U: "预订已完成，费用与支付方式如下..."
+    U-->>A: 结束
+    T-->>R: verifier outcome = 1
+    R->>R: session score = 1（Judge 不可改写）
+                    </pre>
+                </div>
+
+                <h3>这条轨迹里，哪些信号能信，哪些只能参考</h3>
+                <div class="table-wrap">
+                    <table>
+                        <thead><tr><th>事件</th><th>证据类型</th><th>可否进入主目标</th><th>原因</th></tr></thead>
+                        <tbody>
+                            <tr><td><code>get_user_details</code> 返回 DOB/支付工具</td><td>工具 observation</td><td>可构造规则进展事件，但当前尚未实现</td><td>结构化、可复核；适合未来 UserRL-style $r_t$</td></tr>
+                            <tr><td>航班搜索返回满足 11 点后的候选</td><td>工具结果 + hidden constraints</td><td>可构造规则进展事件，但需避免把搜索次数当进展</td><td>候选集合缩减可验证</td></tr>
+                            <tr><td>Judge 认为澄清“有帮助”</td><td>LLM 主观分数</td><td>否；默认只诊断</td><td>与 simulator 同模型，且能看到隐藏目标</td></tr>
+                            <tr><td><code>book_reservation</code> 参数命中 gold</td><td>DB/state verifier</td><td>是，terminal outcome</td><td>业务结果确定、可复现</td></tr>
+                            <tr><td>Agent 声称“预订成功”</td><td>自然语言</td><td>否</td><td>必须以工具 observation 与 DB 状态为准</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+
+                <div class="formula">
+                    $$R_{\mathrm{session}}=R_{\mathrm{env}}\in\{0,1\},\qquad
+                    s_{\mathrm{judge}}=
+                    \begin{cases}
+                    \frac{q-0.5}{0.5}, &amp; q&lt;0.5\\
+                    \frac{q-0.5}{1-0.5}, &amp; q\ge 0.5
+                    \end{cases}$$
+                    <p class="formula-note"><strong>task 0 数例：</strong>若一次交互段 Judge 原始分 $q=0.825$，则 $s_{\mathrm{judge}}=0.65$。两次有效 Judge 分别为 0.65 与 0.20，整轨迹取事件均值后为 0.425；权重 0.05 时辅助贡献为 0.02125。最终成功轨迹得分约为 1.02125，失败轨迹即使 Judge 满分也不超过 0.05，且默认配置根本不注入该项。</p>
+                </div>
+            </section>
+
+            <section id="implementation">
+                <p class="section-kicker">06 · Implementation alignment</p>
+                <h2>当前代码实现了什么，没有实现什么</h2>
+                <p class="lead">审核后的分支是一条“outcome-only GRPO + 可选 interaction-cycle Judge auxiliary”链路。它解决的是稀疏奖励下的过程诊断，不是完整 UserRL estimator。报告、配置名和实验结论都必须保持这一边界。</p>
+
+                <div class="table-wrap">
+                    <table>
+                        <thead><tr><th>技术点</th><th>当前代码位置</th><th>状态</th><th>准确语义</th></tr></thead>
+                        <tbody>
+                            <tr><td>结构化 Judge 输出与解析</td><td><code>src/envs/user_simulator_judge.py</code></td><td><span class="status good">实现</span></td><td>三维 [0,1] 分数、JSON 解析、clamp、失败显式 unavailable</td></tr>
+                            <tr><td>工具结果/错误证据</td><td><code>src/envs/tau_bench_tools.py</code></td><td><span class="status good">实现</span></td><td>每个动作保存最多 1200 字 observation；exception 也进入 cycle trace</td></tr>
+                            <tr><td>交互段边界</td><td><code>last_judged_action_index</code></td><td><span class="status good">实现</span></td><td>从上次 user reply 到当前 reply 之间的全部工具动作，共享一个 Judge signal</td></tr>
+                            <tr><td>有界中性化</td><td><code>JudgeSignalPolicy</code></td><td><span class="status good">实现</span></td><td>0.5→0、端点→±1、invalid→None</td></tr>
+                            <tr><td>纯 terminal outcome</td><td><code>TauBenchInteraction.calculate_score</code></td><td><span class="status good">实现</span></td><td>Judge 开启时也不改写 outcome</td></tr>
+                            <tr><td>event 物化</td><td><code>materialize_turn_rewards</code></td><td><span class="status warn">仅记录位置</span></td><td>信号放到交互段最后一个可训练 token；但标准 GRPO 随后对 token reward 求和并广播同一 trajectory advantage，位置不产生局部 credit</td></tr>
+                            <tr><td>训练 gate</td><td><code>algorithm.judge_turn_reward.enabled</code></td><td><span class="status good">默认关闭</span></td><td>开启后按有效事件均值注入，weight ∈ [0,0.1]，建议 0.05</td></tr>
+                            <tr><td>跨轨迹诊断</td><td><code>summarize_judge_diagnostics</code></td><td><span class="status good">实现</span></td><td>记录 valid rate、mean score、outcome correlation/conflict</td></tr>
+                            <tr><td>UserRL <code>grpo_multiturn</code></td><td>当前分支无</td><td><span class="status warn">未实现</span></td><td>没有 Equalized/R2G/EM token credit 与独立 trajectory scorer</td></tr>
+                            <tr><td>规则化 dense $r_t$</td><td>当前 τ-bench wrapper 无</td><td><span class="status warn">未实现</span></td><td>不能直接声称复现论文 TauGym 训练设置</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+
+                <details>
+                    <summary>训练接线：辅助分数怎样进入 GRPO
+                        <span>只在两个配置 gate 显式一致时才会产生非零训练贡献。</span>
+                    </summary>
+                    <div class="details-body">
+<pre><code># interaction config: 始终收集 Judge，用于离线/在线诊断
+judge_enabled: true
+judge_neutral_score: 0.5
+
+# train config: 安全默认，不改变策略目标
+algorithm:
+  adv_estimator: grpo
+  judge_turn_reward:
+    enabled: false
+    turn_weight: 0.05
+
+# 显式消融时才改 enabled=true
+event_counts = event_mask.sum(-1).clamp_min(1)
+aux = turn_weight * centered_turn_scores / event_counts
+token_level_scores = terminal_reward_tensor + aux</code></pre>
+                        <p class="code-note">这里的辅助信号最终会先在 <code>compute_grpo_outcome_advantage()</code> 中按序列求和，变成一个 trajectory scalar，再组内归一化并广播给所有 response token。interaction-cycle span 只保留可观测性，不形成局部梯度；它没有实现论文式逐 Turn advantage，也不应标成 <code>grpo_multiturn</code>。</p>
+                    </div>
+                </details>
+
+                <details>
+                    <summary>静态测试锁定的关键不变量
+                        <span>本轮按用户要求未执行测试；这些测试用于后续可运行验证。</span>
+                    </summary>
+                    <div class="details-body">
+                        <ul>
+                            <li>Judge fenced JSON 能解析，越界维度被 clamp，非数值响应显式 unavailable。</li>
+                            <li>Judge prompt 包含真实工具 observation / error，而不是只有 <code>is_error</code> 布尔值。</li>
+                            <li>raw Judge=0.825 映射为 centered signal=0.65；invalid Judge 返回 None。</li>
+                            <li>开启 Judge 时，session score 仍严格等于 outcome；失败轨迹不会因高 Judge 获得正 terminal score。</li>
+                            <li>trainer 拒绝 [-1,1] 之外的 active signal，拒绝大于 0.1 的 turn weight。</li>
+                            <li>Judge/outcome 相关性在跨轨迹 batch 上计算，不在单轨迹稀疏事件上计算。</li>
+                        </ul>
+                    </div>
+                </details>
+
+                <h3>若要继续走 paper-faithful UserRL，正确顺序是什么</h3>
+                <ol>
+                    <li>从 τ-bench gold actions、DB state diff、policy checks 中定义<strong>规则化增量事件</strong>，例如首次获得必要实体、候选集合满足约束、正确 write state transition；不要从终局 outcome 反推。</li>
+                    <li>在固定离线轨迹上验证 $r_t$ 的单调性、不可重复刷分、错误回滚与成功路径覆盖。</li>
+                    <li>分别实现并测试 paper-exact 与 official-source-compatible 的 Sum、R2G、std 语义。</li>
+                    <li>再接 <code>grpo_multiturn</code>，先做 Equalized/R2G 与 outcome-only GRPO 对照；Judge 保持诊断，不与规则 $r_t$ 同时混合。</li>
+                </ol>
+            </section>
+
+            <section id="decision">
+                <p class="section-kicker">07 · Decision and ablation</p>
+                <h2>最终判断：方案可做，但结论必须拆成两条实验线</h2>
+                <div class="judgment-grid">
+                    <article class="judgment-card">
+                        <h3>A 线：当前可进入校准</h3>
+                        <p>Outcome-only GRPO 保持主目标；Judge 仅记录 interaction-cycle 诊断。先看有效率、成功/失败分布、冲突样本和不同 simulator 的稳定性。</p>
+                    </article>
+                    <article class="judgment-card">
+                        <h3>B 线：真正 UserRL 适配</h3>
+                        <p>另行构建规则化 dense $r_t$ 与 <code>grpo_multiturn</code>；不能把 Judge score 直接改名为 UserRL turn reward，也不能与 A 线同时改多个变量。</p>
+                    </article>
+                    <article class="judgment-card">
+                        <h3>当前置信度</h3>
+                        <p>代码语义已从“不可解释的多源融合”修到“可解释、默认无侵入”。但没有训练数据证明 Judge auxiliary 会提升 unseen success，因此现阶段只能判为可消融，不能判为有效。</p>
+                    </article>
+                </div>
+
+                <h3>最小、可归因的实验矩阵</h3>
+                <ol>
+                    <li><strong>Baseline：</strong>当前 outcome-only GRPO，Judge 采集关闭或仅日志；锁定模型、rollout、seed、simulator 与 verifier。</li>
+                    <li><strong>Diagnostic-only：</strong>Judge 开启、training gate 关闭。校准指标至少包含 valid rate、成功/失败均值差、outcome correlation、冲突 top cases、tool-error 条件分布。</li>
+                    <li><strong>Aux-0.02 / Aux-0.05：</strong>只有 Diagnostic-only 通过门槛后，开启两个小权重；不建议先试 0.1。</li>
+                    <li><strong>Independent Judge：</strong>同模型 Judge vs 独立模型/规则 Judge，检验“同源偏差”是否造成虚假收益。</li>
+                    <li><strong>User style split：</strong>reactive、情绪化、反悔/替代方案、政策冲突任务分别统计，而不是只看总体 success。</li>
+                    <li><strong>UserRL track：</strong>规则 dense $r_t$ + Equalized/R2G；单独实验名、单独报告，不与 LLM Judge auxiliary 混称。</li>
+                </ol>
+
+                <div class="table-wrap">
+                    <table>
+                        <thead><tr><th>Go 条件</th><th>No-Go 条件</th></tr></thead>
+                        <tbody>
+                            <tr><td>Judge valid rate 稳定且不随轨迹难度显著选择性缺失</td><td>失败/超时集中在长轨迹或 tool-error 轨迹，导致 event mask 有偏</td></tr>
+                            <tr><td>成功轨迹 Judge 均值显著更高，并能解释主要冲突样本</td><td>同模型 Judge 高分主要奖励礼貌、冗长或对隐藏目标的表面复述</td></tr>
+                            <tr><td>Aux 相对 baseline 在多 seed 提升 unseen success，且 wrong-write/tool-error 不升</td><td>只提升训练任务 Judge score，terminal success、政策合规或效率不升</td></tr>
+                            <tr><td>换独立 simulator/judge 后收益保持</td><td>收益只在同一 Qwen3-14B 同时模拟和评价时存在</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+
+                <div class="callout">
+                    <p><strong>Go / No-Go：</strong>现在可以进入“离线 Judge 校准 + diagnostic-only rollout”阶段；还不能宣称复现 UserRL，也不能宣称方案二已提升当前数据集。只有 terminal success 在 unseen split、多 seed、独立 simulator/judge 下稳定提升，同时 policy violation、wrong write、tool error、transfer rate 与有效 turns 不恶化，才允许把 0.05 辅助信号作为正式训练配置。</p>
+                </div>
+            </section>
+        </article>
+
+        <footer>
+            <p><strong>原文与权威来源</strong></p>
+            <ul class="source-list">
+                <li><a href="https://arxiv.org/abs/2509.19736" target="_blank" rel="noopener noreferrer">UserRL · arXiv:2509.19736 · 2025-09</a></li>
+                <li><a href="https://arxiv.org/html/2509.19736" target="_blank" rel="noopener noreferrer">UserRL · arXiv HTML 全文、公式与 Figures</a></li>
+                <li><a href="https://github.com/SalesforceAIResearch/UserRL" target="_blank" rel="noopener noreferrer">SalesforceAIResearch/UserRL · 官方代码与数据</a></li>
+                <li><a href="https://github.com/iOPEN-Xing/agentic-rl/blob/codex/user-simulator-judge/agentic-grpo-longhorizon/src/envs/tau_bench_interaction.py">当前方案二 τ-bench / Judge 接线</a></li>
+                <li><a href="https://github.com/iOPEN-Xing/agentic-rl/blob/codex/user-simulator-judge/agentic-grpo-longhorizon/src/envs/reward_fusion.py">当前 Judge 中性化与一致性诊断</a></li>
+                <li><a href="https://github.com/iOPEN-Xing/agentic-rl/blob/codex/user-simulator-judge/tau-bench/tau_bench/envs/airline/tasks_test.py">当前航空数据集 task 0（case 证据）</a></li>
+                <li><a href="scheme-analysis.html">返回 Agentic-GRPO 航空订票方案总览</a></li>
+            </ul>
+            <p>本页把论文事实、官方源码事实、当前分支实现、真实数据 case、教学数例与待验证假设分开标注。硬件、显卡与权重加载以项目代码为准；本轮按要求未运行训练、模型、Ray 或 GPU。</p>
+        </footer>
+    </main>
+
+    <dialog id="lightbox" aria-label="论文图片放大预览">
+        <button class="dialog-close" type="button" aria-label="关闭图片预览">×</button>
+        <img src="" alt="">
+    </dialog>
+
+    <script>
+        document.querySelectorAll('[data-figure-toggle]').forEach((button) => {
+            button.addEventListener('click', () => {
+                const detail = button.nextElementSibling;
+                const expanded = button.getAttribute('aria-expanded') === 'true';
+                button.setAttribute('aria-expanded', String(!expanded));
+                detail.classList.toggle('active', !expanded);
+                button.textContent = expanded ? '展开逐区说明 ▸' : '收起逐区说明 ▴';
+            });
+        });
+
+        const lightbox = document.getElementById('lightbox');
+        const lightboxImage = lightbox.querySelector('img');
+        const closeButton = lightbox.querySelector('.dialog-close');
+
+        document.querySelectorAll('[data-lightbox]').forEach((button) => {
+            button.addEventListener('click', () => {
+                lightboxImage.src = button.dataset.src;
+                lightboxImage.alt = button.dataset.alt;
+                if (typeof lightbox.showModal === 'function') {
+                    lightbox.showModal();
+                } else {
+                    lightbox.setAttribute('open', '');
+                }
+            });
+        });
+
+        closeButton.addEventListener('click', () => lightbox.close());
+        lightbox.addEventListener('click', (event) => {
+            if (event.target === lightbox) lightbox.close();
+        });
+    </script>
+</body>
+</html>

@@ -1,0 +1,1558 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="Agentic RL 与多轮强化学习面试版：从 τ-bench 真实任务出发，统一讲解 GRPO、Turn-PPO、UserRL、TRACE、PRM、用户模拟器、credit assignment、系统实现与实验方法。">
+    <title>Agentic RL 多轮强化学习 · 面试版</title>
+    <script>
+        window.MathJax = {
+            tex: {
+                inlineMath: [['$', '$'], ['\\(', '\\)']],
+                displayMath: [['$$', '$$'], ['\\[', '\\]']]
+            }
+        };
+    </script>
+    <script async src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
+    <style>
+        :root {
+            --ink: #132238;
+            --muted: #58677a;
+            --paper: #f2f6f7;
+            --surface: #ffffff;
+            --surface-soft: #f7fafb;
+            --line: #d9e2e7;
+            --navy: #102a43;
+            --blue: #1976a3;
+            --blue-soft: #e5f3f8;
+            --teal: #087f73;
+            --teal-soft: #e3f6f2;
+            --orange: #c86419;
+            --orange-soft: #fff0e4;
+            --red: #a73a3a;
+            --red-soft: #faeaea;
+            --green: #247a4b;
+            --green-soft: #e8f5ed;
+            --shadow: 0 16px 45px rgba(16, 42, 67, 0.08);
+            --radius: 18px;
+        }
+
+        * { box-sizing: border-box; }
+        html { scroll-behavior: smooth; }
+        body {
+            margin: 0;
+            color: var(--ink);
+            background:
+                radial-gradient(circle at 8% 3%, rgba(25, 118, 163, 0.11), transparent 28rem),
+                radial-gradient(circle at 92% 8%, rgba(8, 127, 115, 0.10), transparent 30rem),
+                var(--paper);
+            font-family: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI",
+                "PingFang SC", "Microsoft YaHei", sans-serif;
+            line-height: 1.76;
+        }
+
+        a { color: var(--blue); text-decoration-thickness: 1px; text-underline-offset: 3px; }
+        a:hover { color: var(--teal); }
+        code, pre { font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace; }
+        code {
+            padding: 0.12em 0.38em;
+            border: 1px solid #dbe5e9;
+            border-radius: 5px;
+            background: #f4f8f9;
+            color: #0c5f77;
+            font-size: 0.9em;
+        }
+
+        .page { width: min(1180px, calc(100% - 34px)); margin: 0 auto; }
+        .hero {
+            position: relative;
+            margin: 28px auto 20px;
+            padding: 70px 64px 58px;
+            overflow: hidden;
+            border-radius: 26px;
+            color: white;
+            background:
+                linear-gradient(135deg, rgba(8, 127, 115, 0.96), rgba(16, 42, 67, 0.98) 62%),
+                var(--navy);
+            box-shadow: 0 28px 70px rgba(16, 42, 67, 0.22);
+        }
+        .hero::after {
+            content: "";
+            position: absolute;
+            right: -80px;
+            bottom: -150px;
+            width: 430px;
+            height: 430px;
+            border: 65px solid rgba(255, 255, 255, 0.065);
+            border-radius: 50%;
+        }
+        .eyebrow {
+            position: relative;
+            z-index: 1;
+            margin: 0 0 16px;
+            color: #b7f4e7;
+            font-size: 13px;
+            font-weight: 800;
+            letter-spacing: 0.18em;
+            text-transform: uppercase;
+        }
+        .hero h1 {
+            position: relative;
+            z-index: 1;
+            max-width: 850px;
+            margin: 0;
+            font-size: clamp(34px, 5.5vw, 66px);
+            line-height: 1.08;
+            letter-spacing: -0.045em;
+        }
+        .hero .dek {
+            position: relative;
+            z-index: 1;
+            max-width: 850px;
+            margin: 24px 0 0;
+            color: #dbeaf0;
+            font-size: clamp(17px, 2vw, 21px);
+            line-height: 1.72;
+        }
+        .hero-meta {
+            position: relative;
+            z-index: 1;
+            display: flex;
+            gap: 10px;
+            flex-wrap: wrap;
+            margin-top: 28px;
+        }
+        .chip {
+            display: inline-flex;
+            align-items: center;
+            min-height: 32px;
+            padding: 5px 12px;
+            border: 1px solid rgba(255,255,255,0.22);
+            border-radius: 999px;
+            color: #e9f6f8;
+            background: rgba(255,255,255,0.08);
+            font-size: 13px;
+            font-weight: 700;
+        }
+        .hero-links {
+            position: relative;
+            z-index: 1;
+            display: flex;
+            gap: 12px;
+            flex-wrap: wrap;
+            margin-top: 30px;
+        }
+        .hero-links a {
+            display: inline-flex;
+            align-items: center;
+            padding: 11px 17px;
+            border-radius: 10px;
+            color: white;
+            background: rgba(255,255,255,0.12);
+            font-size: 14px;
+            font-weight: 750;
+            text-decoration: none;
+        }
+        .hero-links a:first-child { color: var(--navy); background: #d7fff5; }
+
+        .nav {
+            position: sticky;
+            top: 10px;
+            z-index: 10;
+            display: flex;
+            gap: 7px;
+            margin: 18px auto 28px;
+            padding: 10px;
+            overflow-x: auto;
+            border: 1px solid rgba(217, 226, 231, 0.9);
+            border-radius: 14px;
+            background: rgba(255, 255, 255, 0.92);
+            box-shadow: 0 9px 24px rgba(16, 42, 67, 0.08);
+            backdrop-filter: blur(12px);
+        }
+        .nav a {
+            flex: 0 0 auto;
+            padding: 8px 12px;
+            border-radius: 8px;
+            color: var(--muted);
+            font-size: 13px;
+            font-weight: 750;
+            text-decoration: none;
+        }
+        .nav a:hover { color: var(--navy); background: var(--blue-soft); }
+
+        main section {
+            margin: 24px 0;
+            padding: clamp(27px, 5vw, 54px);
+            border: 1px solid var(--line);
+            border-radius: var(--radius);
+            background: rgba(255, 255, 255, 0.96);
+            box-shadow: var(--shadow);
+        }
+        .section-kicker {
+            margin: 0 0 9px;
+            color: var(--teal);
+            font-size: 12px;
+            font-weight: 850;
+            letter-spacing: 0.14em;
+            text-transform: uppercase;
+        }
+        h2 {
+            max-width: 920px;
+            margin: 0 0 18px;
+            color: var(--navy);
+            font-size: clamp(27px, 4vw, 43px);
+            line-height: 1.22;
+            letter-spacing: -0.035em;
+        }
+        h3 {
+            margin: 32px 0 12px;
+            color: var(--navy);
+            font-size: 21px;
+            line-height: 1.38;
+        }
+        h4 { margin: 18px 0 8px; font-size: 16px; }
+        p { margin: 12px 0; }
+        .lead {
+            max-width: 950px;
+            margin: 0 0 28px;
+            color: var(--muted);
+            font-size: 18px;
+            line-height: 1.82;
+        }
+        .one-liner {
+            margin: 28px 0;
+            padding: 24px 26px;
+            border-left: 5px solid var(--teal);
+            border-radius: 0 12px 12px 0;
+            background: var(--teal-soft);
+            font-size: 19px;
+        }
+        .one-liner strong { color: var(--teal); }
+        .callout {
+            margin: 24px 0;
+            padding: 19px 22px;
+            border-left: 4px solid var(--blue);
+            border-radius: 0 11px 11px 0;
+            background: var(--blue-soft);
+        }
+        .callout.warn { border-color: var(--orange); background: var(--orange-soft); }
+        .callout.danger { border-color: var(--red); background: var(--red-soft); }
+        .callout.good { border-color: var(--green); background: var(--green-soft); }
+        .callout p:last-child { margin-bottom: 0; }
+
+        .grid-2, .grid-3, .grid-4 {
+            display: grid;
+            gap: 15px;
+            margin: 24px 0;
+        }
+        .grid-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+        .grid-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+        .grid-4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+        .mini-card {
+            padding: 21px;
+            border: 1px solid var(--line);
+            border-radius: 14px;
+            background: var(--surface-soft);
+        }
+        .mini-card h3, .mini-card h4 { margin-top: 0; }
+        .mini-card p { color: var(--muted); font-size: 14px; line-height: 1.7; }
+        .mini-card p:last-child { margin-bottom: 0; }
+        .num {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: 29px;
+            height: 29px;
+            margin-bottom: 12px;
+            border-radius: 9px;
+            color: white;
+            background: var(--teal);
+            font-size: 13px;
+            font-weight: 850;
+        }
+        .tag {
+            display: inline-block;
+            margin: 2px 4px 2px 0;
+            padding: 3px 8px;
+            border-radius: 999px;
+            color: #0f586d;
+            background: #dff2f7;
+            font-size: 12px;
+            font-weight: 750;
+        }
+        .tag.green { color: #22633f; background: #e1f2e7; }
+        .tag.orange { color: #8a4515; background: #ffe8d6; }
+
+        .formula {
+            margin: 24px 0;
+            padding: 20px 22px;
+            overflow-x: auto;
+            border: 1px solid var(--line);
+            border-radius: 14px;
+            background: #fbfdfd;
+            text-align: center;
+        }
+        .formula-note {
+            margin: 10px 0 0;
+            color: var(--muted);
+            font-size: 14px;
+            text-align: left;
+        }
+        .table-wrap {
+            margin: 24px 0;
+            overflow-x: auto;
+            border: 1px solid var(--line);
+            border-radius: 14px;
+        }
+        table { width: 100%; min-width: 760px; border-collapse: collapse; background: white; }
+        th, td {
+            padding: 15px 16px;
+            border-bottom: 1px solid var(--line);
+            text-align: left;
+            vertical-align: top;
+        }
+        th { color: var(--navy); background: #ecf3f5; font-size: 13px; }
+        td { color: #34465b; font-size: 14px; line-height: 1.65; }
+        tr:last-child td { border-bottom: 0; }
+        .good-text { color: var(--green); font-weight: 800; }
+        .warn-text { color: var(--orange); font-weight: 800; }
+        .bad-text { color: var(--red); font-weight: 800; }
+
+        .mermaid-wrap {
+            margin: 28px 0;
+            padding: 22px;
+            overflow-x: auto;
+            border: 1px solid var(--line);
+            border-radius: 16px;
+            background: #fbfdfd;
+        }
+        .mermaid { min-width: 800px; text-align: center; }
+        .caption { margin: -14px 0 28px; color: var(--muted); font-size: 13px; }
+
+        pre {
+            margin: 16px 0;
+            padding: 19px;
+            overflow-x: auto;
+            border-radius: 12px;
+            color: #eaf5f6;
+            background: #102a43;
+            font-size: 13px;
+            line-height: 1.66;
+        }
+        pre code { padding: 0; border: 0; color: inherit; background: transparent; }
+        details {
+            margin: 16px 0;
+            border: 1px solid var(--line);
+            border-radius: 13px;
+            background: #fff;
+        }
+        summary {
+            padding: 16px 19px;
+            color: var(--navy);
+            cursor: pointer;
+            font-weight: 800;
+        }
+        .details-body { padding: 0 19px 19px; }
+        ul, ol { padding-left: 23px; }
+        li { margin: 8px 0; }
+        .qa { counter-reset: qa; }
+        .qa details summary::before {
+            counter-increment: qa;
+            content: "Q" counter(qa) " · ";
+            color: var(--teal);
+        }
+        .answer-lead { color: var(--teal); font-weight: 800; }
+        .decision {
+            display: grid;
+            grid-template-columns: 170px 1fr 1fr 1fr;
+            gap: 1px;
+            margin: 28px 0;
+            overflow: hidden;
+            border: 1px solid var(--line);
+            border-radius: 14px;
+            background: var(--line);
+        }
+        .decision > div { padding: 15px; background: white; font-size: 14px; }
+        .decision .head { color: var(--navy); background: #ecf3f5; font-weight: 800; }
+        .decision .label { color: var(--navy); font-weight: 800; }
+        .speech {
+            margin: 24px 0;
+            padding: 28px;
+            border: 1px solid #bcd7de;
+            border-radius: 16px;
+            background: linear-gradient(135deg, #f1fbfa, #edf6fa);
+            font-size: 17px;
+            line-height: 1.88;
+        }
+        .source-list { columns: 2; column-gap: 34px; }
+        .source-list li { break-inside: avoid; margin-bottom: 12px; }
+        footer {
+            padding: 32px 0 55px;
+            color: var(--muted);
+            font-size: 13px;
+            text-align: center;
+        }
+
+        @media (max-width: 900px) {
+            .hero { padding: 49px 28px 42px; }
+            .grid-3, .grid-4 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+            .decision { grid-template-columns: 135px repeat(3, 210px); overflow-x: auto; }
+        }
+        @media (max-width: 640px) {
+            .page { width: min(100% - 20px, 1180px); }
+            .hero { margin-top: 10px; border-radius: 18px; }
+            main section { padding: 26px 20px; }
+            .grid-2, .grid-3, .grid-4 { grid-template-columns: 1fr; }
+            .source-list { columns: 1; }
+        }
+        @media print {
+            body { background: white; }
+            .page { width: 100%; }
+            .hero, main section { box-shadow: none; break-inside: avoid; }
+            .nav { display: none; }
+            details > * { display: block !important; }
+        }
+    </style>
+</head>
+<body>
+    <div class="page">
+        <header class="hero">
+            <p class="eyebrow">Interview Edition · Agentic RL</p>
+            <h1>多轮强化学习：从“整条轨迹得分”到“每次决策可归因”</h1>
+            <p class="dek">一份面向算法与系统面试的统一讲稿：以 τ-bench 航空订票为业务锚点，把 GRPO、Turn-PPO、UserRL、TRACE、过程奖励模型与用户模拟器放进同一套 Agentic RL 认知框架，讲清训练分布、业务真值、中间信用和优化器如何共同决定能力上限。</p>
+            <div class="hero-meta">
+                <span class="chip">15–30 分钟主讲</span>
+                <span class="chip">τ-bench task 0</span>
+                <span class="chip">Turn-PPO · UserRL · TRACE · PRM</span>
+                <span class="chip">User Simulator · Verifier</span>
+                <span class="chip">理论 × 实现 × 业务</span>
+            </div>
+            <div class="hero-links">
+                <a href="#elevator">从 30 秒回答开始</a>
+                <a href="scheme-analysis.html">原始方案地图 ↗</a>
+                <a href="tech-report-turnppo.html">Turn-PPO 报告 ↗</a>
+                <a href="tech-report-userrl.html">UserRL 报告 ↗</a>
+                <a href="tech-report-trace.html">TRACE 报告 ↗</a>
+            </div>
+        </header>
+
+        <nav class="nav" aria-label="页面目录">
+            <a href="#elevator">核心认知</a>
+            <a href="#formalization">问题建模</a>
+            <a href="#pipeline">训练闭环</a>
+            <a href="#methods">三类方案</a>
+            <a href="#prm">PRM</a>
+            <a href="#simulator">用户模拟器</a>
+            <a href="#case">真实案例</a>
+            <a href="#joint">联合系统</a>
+            <a href="#systems">工程系统</a>
+            <a href="#evaluation">实验评估</a>
+            <a href="#selection">选型</a>
+            <a href="#qa">高频追问</a>
+            <a href="#speech">两分钟回答</a>
+        </nav>
+
+        <main>
+            <section id="elevator">
+                <p class="section-kicker">01 · Mental model</p>
+                <h2>面试先给结论：Agentic RL 不是“给 Agent 一个奖励”</h2>
+                <p class="lead">Agent 在多轮任务中持续观察用户、工具和数据库反馈，之后再决定下一步。因此它不是一次生成、一次打分的 contextual bandit，而是带有部分可观测性、长时延结果和环境副作用的序列决策问题。真正困难的是：如何定义一步、如何验证成功、如何把终局结果归因给中间决策，以及如何在策略分布变化时稳定更新。</p>
+
+                <div class="one-liner">
+                    <strong>一句话：</strong>User Simulator 决定“训练时会遇到怎样的用户”，Verifier 回答“最后做对没有”，PRM/Credit Estimator 回答“哪一步值得鼓励”，Policy Optimizer 再决定“怎样把这些信号稳定地变成参数更新”。
+                </div>
+
+                <div class="grid-4">
+                    <article class="mini-card">
+                        <span class="num">1</span>
+                        <h4>Environment / User</h4>
+                        <p>用户模拟器、工具和数据库共同定义转移分布。Simulator 是否泄露、过度配合或缺乏真实噪声，会直接改变 policy 学到的最优行为。</p>
+                    </article>
+                    <article class="mini-card">
+                        <span class="num">2</span>
+                        <h4>Verifier / Reward</h4>
+                        <p>由规则、数据库终态或可执行测试判断业务是否完成。它应尽量客观、抗 reward hacking，并与线上成功条件一致。</p>
+                    </article>
+                    <article class="mini-card">
+                        <span class="num">3</span>
+                        <h4>PRM / Credit Assignment</h4>
+                        <p>把轨迹级结果解释到 Turn：可以来自 learned critic、规则增量奖励、冻结参考探针，或专门学习动作 promise/progress 的过程奖励模型。</p>
+                    </article>
+                    <article class="mini-card">
+                        <span class="num">4</span>
+                        <h4>Policy Optimization</h4>
+                        <p>使用 PPO/GRPO 比率、clipping、KL、mask 与归一化进行更新，并控制 rollout policy 与当前 policy 的偏差。</p>
+                    </article>
+                </div>
+
+                <h3>真正决定上限的是五个彼此耦合的模块</h3>
+                <div class="grid-3">
+                    <article class="mini-card">
+                        <h4>Policy ceiling</h4>
+                        <p>基座模型的推理、工具 schema 理解、长上下文与错误恢复能力，决定可探索行为的支持集。</p>
+                    </article>
+                    <article class="mini-card">
+                        <h4>Simulator ceiling</h4>
+                        <p>训练 policy 实际优化的是 $P_{\mathrm{sim}}$ 下的回报；模拟用户若过度合作，线上真实用户一犹豫、纠正或表达含糊，策略就会失配。</p>
+                    </article>
+                    <article class="mini-card">
+                        <h4>Verifier ceiling</h4>
+                        <p>若最终状态、政策合规或必要输出没有被准确校验，再好的优化器也只会把 verifier 漏洞放大。</p>
+                    </article>
+                    <article class="mini-card">
+                        <h4>PRM / credit ceiling</h4>
+                        <p>过程信号若把“形式上像进展”误当“真实进展”，会产生 shortcut；若过于稀疏，又无法区分失败轨迹中的好动作。</p>
+                    </article>
+                    <article class="mini-card">
+                        <h4>Optimization ceiling</h4>
+                        <p>mask、behavior log-prob、ratio、group normalization、policy lag 与长度归一化决定正确监督能否不失真地进入梯度。</p>
+                    </article>
+                </div>
+
+                <div class="callout warn">
+                    <p><strong>最常见的概念混淆：</strong>增加一个中间 reward 并不自动解决局部 credit；把 Judge 分数写在某个 Turn 的 token 位置，也不代表标准 GRPO 会产生 Turn 级优势。如果训练器先把所有 token reward 求和为一个轨迹标量，再对所有 assistant token 广播同一个 group advantage，局部位置信息已经消失。</p>
+                </div>
+
+                <h3>为什么多轮 Agent 比普通 RLHF 更难</h3>
+                <div class="grid-3">
+                    <article class="mini-card">
+                        <h4>交互改变后续数据分布</h4>
+                        <p>一次错误澄清、错误检索或错误写操作会改变后续 observation；样本不再是静态 prompt-response pair。</p>
+                    </article>
+                    <article class="mini-card">
+                        <h4>奖励延迟且轨迹变长</h4>
+                        <p>τ-bench 常在数据库最终状态才给 0/1。成功依赖多个前置步骤，失败轨迹中也可能包含大量正确动作。</p>
+                    </article>
+                    <article class="mini-card">
+                        <h4>环境不是语言模型</h4>
+                        <p>工具 schema、业务规则、幂等性、权限、超时和重置语义都会影响训练；只优化自然语言质量无法保证任务完成。</p>
+                    </article>
+                </div>
+            </section>
+
+            <section id="formalization">
+                <p class="section-kicker">02 · Formalization</p>
+                <h2>先把一步切对：多轮交互最好建模为 Turn-MDP / POMDP</h2>
+                <p class="lead">对于事务型 Agent，外部真实状态包含用户隐藏目标、数据库与工具后端；模型只能通过对话历史和工具返回间接观察它，因此严格说更接近 POMDP。训练实现通常把完整可见历史作为信息状态，得到一个可操作的 Turn-MDP。</p>
+
+                <div class="formula">
+                    $$s_t=(x,\;a_1,o_2,\ldots,a_{t-1},o_t),\qquad
+                    a_t=(y_{t,1},\ldots,y_{t,L_t}),\qquad
+                    \tau=(s_1,a_1,r_1,\ldots,s_T,a_T,r_T)$$
+                    <p class="formula-note"><strong>语义：</strong>$s_t$ 是第 $t$ 次模型决策前可见的完整历史；$a_t$ 是本轮完整 assistant response，而不是单个 token；$o_{t+1}$ 可能来自用户、工具或环境。只有 assistant action token 进入 policy loss，用户与工具 observation 只作为条件上下文。</p>
+                </div>
+
+                <h3>标准 outcome-only GRPO 做了什么</h3>
+                <p>对同一任务采样 $G$ 条轨迹，用终局结果在组内标准化，再把同一个轨迹优势广播给该轨迹所有策略 token：</p>
+                <div class="formula">
+                    $$A_g^{\mathrm{out}}=
+                    \frac{R_g-\operatorname{mean}(R_{1:G})}
+                    {\operatorname{std}(R_{1:G})+\epsilon},
+                    \qquad
+                    \hat A_{g,t,k}=A_g^{\mathrm{out}}$$
+                    <p class="formula-note"><strong>优点：</strong>不训练 critic，结果可验证时简单稳健。<strong>局限：</strong>同一轨迹里，正确检索、错误参数、错误恢复和最终提交拿到相同优势；如果一组 rollout 全成或全败，组内方差不足，学习信号还会接近 0。</p>
+                </div>
+
+                <div class="table-wrap">
+                    <table>
+                        <thead>
+                            <tr><th>粒度</th><th>“一步”是什么</th><th>优势信号</th><th>主要问题</th></tr>
+                        </thead>
+                        <tbody>
+                            <tr><td>Token-MDP</td><td>一个 token</td><td>可在 token 级变化</td><td>语言 token 不是独立业务决策；序列很长，critic 与 bootstrapping 难度大。</td></tr>
+                            <tr><td>Trajectory / bandit</td><td>整条会话</td><td>整轨迹一个优势</td><td>简单，但完全忽略中间状态转移与局部贡献。</td></tr>
+                            <tr><td><strong>Turn-MDP</strong></td><td>一次完整模型响应</td><td>同一 Turn 内一致、Turn 间可不同</td><td>更匹配 Agent 决策语义；需要可靠边界与新的 credit estimator。</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+
+                <div class="callout">
+                    <p><strong>面试加分点：</strong>“Turn-level”描述的是决策/优化粒度，不等于“每轮人工造一个 reward”。严格 Turn-PPO 可以只使用终局 0/1 reward，局部差异由 critic 的 TD/GAE 学出来；UserRL 则要求环境本身提供可信的逐 Turn 增量反馈；TRACE 用 reference score 构造局部代理信号。三者的监督来源不同。</p>
+                </div>
+            </section>
+
+            <section id="pipeline">
+                <p class="section-kicker">03 · End-to-end loop</p>
+                <h2>一条完整训练链：生成、执行、验证、归因、更新</h2>
+                <p class="lead">系统设计时要把“谁生成轨迹”和“谁解释轨迹”拆开。Actor 负责决策；用户模拟器、工具与数据库组成环境；Verifier 给最终业务真值；credit estimator 再把这个结果或额外监督映射到 Turn。</p>
+
+                <div class="mermaid-wrap" aria-label="Agentic RL 多轮训练闭环">
+                    <pre class="mermaid">
+flowchart LR
+    D["任务 / 初始用户目标"] --> S["同一任务采样 G 条 rollout"]
+    S --> A["Actor Policy"]
+    A --> E["用户模拟器 + 工具 + 数据库"]
+    E -->|"observation / state change"| A
+    A --> T["轨迹存储<br/>assistant spans · tool obs · terminal state"]
+    E --> T
+    T --> V["规则 Verifier<br/>终局 outcome"]
+    T --> C{"Credit Estimator"}
+    V --> C
+    C -->|"Turn-PPO"| CR["Learned Critic<br/>Turn-GAE"]
+    C -->|"UserRL"| UR["Rule-grounded<br/>dense turn reward"]
+    C -->|"TRACE"| TR["Frozen Reference<br/>gold-prefix scoring"]
+    C -->|"Agent PRM"| PR["Learned Process RM<br/>promise / progress"]
+    CR --> M["Token / Turn advantages"]
+    UR --> M
+    TR --> M
+    PR --> M
+    V --> M
+    M --> O["PPO / GRPO objective<br/>ratio · clip · KL · masks"]
+    O --> A
+
+    classDef env fill:#e3f6f2,stroke:#087f73,color:#132238;
+    classDef model fill:#e5f3f8,stroke:#1976a3,color:#132238;
+    classDef truth fill:#fff0e4,stroke:#c86419,color:#132238;
+    class E env;
+    class A,CR,TR,PR model;
+    class V truth;
+                    </pre>
+                </div>
+                <p class="caption">图中四条 credit 分支应作为互斥基线或可控消融，不应在没有证据时全部叠加。终局 verifier 始终保留为任务完成锚点；learned PRM 还可以在训练前用于 rollout 搜索、best-of-N 与风险拦截。</p>
+
+                <h3>训练数据契约比公式更容易出错</h3>
+                <div class="grid-2">
+                    <article class="mini-card">
+                        <h4>Rollout 必须保存</h4>
+                        <p><code>response_mask</code>、Turn spans/ids、旧策略 log-prob、工具 observation、终局 reward、group identity；Turn-PPO 还需边界 value，TRACE 还需 gold target 与 prefix scores。</p>
+                    </article>
+                    <article class="mini-card">
+                        <h4>环境必须保证</h4>
+                        <p>每条 rollout 独立 reset；写操作可追踪；任务结束后统一 finalize/verify；超时、工具异常和业务拒绝需要区分，不能混成一种“失败”。</p>
+                    </article>
+                </div>
+
+                <pre><code># 统一的概念接口，不代表当前仓库某个具体类
+trajectory = rollout(
+    policy=actor_old,
+    environment=user_simulator + tools + database,
+    task=task,
+)
+
+outcome = verifier(trajectory.final_state, task.gold_constraints)
+local_credit = credit_estimator(
+    trajectory=trajectory,
+    terminal_outcome=outcome,
+    # Turn-PPO: critic values
+    # UserRL: rule-grounded incremental rewards
+    # TRACE: frozen-reference gold-prefix scores
+    # Agent PRM: learned promise/progress at each decision
+)
+
+advantages = combine(outcome, local_credit, masks=trajectory.assistant_mask)
+loss = clipped_policy_objective(actor, actor_old, advantages)</code></pre>
+            </section>
+
+            <section id="methods">
+                <p class="section-kicker">04 · Three methodologies</p>
+                <h2>三个方案不是同义改写，而是三种不同的“局部证据来源”</h2>
+                <p class="lead">原始方案文档提供了三条探索路线，但后续技术报告已经校正了其中最重要的概念边界：方案一应落为严格 Turn-PPO；方案二必须把 User Simulator 与 Judge 分开；方案三不能沿用手工 potential 或环境 Monte Carlo，而应实现 TRACE 的 frozen-reference log-ratio TD。</p>
+
+                <div class="grid-3">
+                    <article class="mini-card">
+                        <span class="tag green">Critic-based</span>
+                        <h3>Turn-PPO</h3>
+                        <p>在每个 Turn 决策边界学习 $V_\phi(s_t)$，用终局 reward 的 TD/GAE 把信用传回不同 Turn，再以整段 response 的概率比做 PPO clipping。</p>
+                        <p><strong>它回答：</strong>从历史数据看，当前状态未来成功概率有多大？</p>
+                    </article>
+                    <article class="mini-card">
+                        <span class="tag orange">Environment-grounded</span>
+                        <h3>UserRL</h3>
+                        <p>由 Gym/规则系统产生逐 Turn 增量 reward，再独立做 turn reward mapping 与 trajectory scoring。用户模拟器负责互动，不负责裁判。</p>
+                        <p><strong>它回答：</strong>环境规则能否直接验证本轮取得了什么进展？</p>
+                    </article>
+                    <article class="mini-card">
+                        <span class="tag">Reference-based</span>
+                        <h3>TRACE</h3>
+                        <p>冻结 reference model，在每个前缀后 teacher-force canonical gold target；目标变得更容易预测，就视为关闭了部分剩余 gap。</p>
+                        <p><strong>它回答：</strong>本轮 observation 是否让正确目标更可预测？</p>
+                    </article>
+                </div>
+
+                <h3>方案一：Turn-PPO——让 critic 学习 Turn 级归因</h3>
+                <div class="formula">
+                    $$\delta_t=r_t+\gamma V_\phi(s_{t+1})-V_\phi(s_t),\qquad
+                    A_t=\delta_t+\gamma\lambda A_{t+1}$$
+                </div>
+                <div class="formula">
+                    $$\rho_t(\theta)=
+                    \frac{\pi_\theta(a_t\mid s_t)}
+                    {\pi_{\theta_{\mathrm{old}}}(a_t\mid s_t)}
+                    =\exp\!\left(\sum_{k\in a_t}
+                    [\log\pi_\theta(y_k)-\log\pi_{\mathrm{old}}(y_k)]\right)$$
+                    <p class="formula-note">同一 response 内 token 共用 $A_t$；不同 Turn 的优势可以不同。critic 只在 Turn 边界学习，轨迹内按 $1/N_i$ 归一化，避免长对话仅因 Turn 多而拥有更大 critic 权重。</p>
+                </div>
+                <div class="callout good">
+                    <p><strong>对当前数据的判断：</strong>τ-bench 的规则终局 reward 可以直接作为 $r_T$，中间 $r_t=0$。这并不妨碍 Turn-PPO；critic 正是在相似任务与轨迹中学习哪些边界状态更可能成功。它适用当前数据与 veRL 框架，也是三条路线中最自然的主线。</p>
+                </div>
+                <div class="callout warn">
+                    <p><strong>核心风险：</strong>长 response 的 token ratio 连乘等价于 log-ratio 求和再指数化，方差可能很大；而二值终局 reward 对 critic 的监督也弱。应监控 ratio/clip fraction、value explained variance、Turn advantage 分布和策略坍缩。几何平均 ratio 可以作为稳定性消融，但不能与严格 Turn-PPO 基线混写。</p>
+                </div>
+
+                <h3>方案二：UserRL——先问环境是否真的拥有 dense progress</h3>
+                <div class="formula">
+                    $$R_{\mathrm{traj}}(\tau)=\operatorname{Score}(r_1,\ldots,r_T),\qquad
+                    \tilde r_t=\operatorname{Map}(r_t,\ldots,r_T)$$
+                    <p class="formula-note">UserRL 的关键是同一份<strong>规则增量 reward</strong>走两条独立路径：trajectory scoring 决定组内整轨迹排序；turn mapping（Equalized、Reward-to-Go、Exponential Mapping）决定轨迹内部如何分配局部信号。</p>
+                </div>
+                <div class="callout danger">
+                    <p><strong>必须说清：</strong>User Simulator 生成用户回复；规则 Gym / Verifier 生成奖励。让同一个 Qwen3-14B 既模拟用户又作为 LLM Judge，是本项目的扩展实验，不是 UserRL 原算法。如果标准 GRPO 最终仍把 Judge events 求成轨迹标量，它只是辅助 outcome shaping，不是严格 Turn credit。</p>
+                </div>
+                <p>当前分支的安全语义是：规则 outcome 始终是主奖励；LLM Judge 默认关闭，只作为 interaction-cycle 诊断信号。只有在与规则 outcome、人工抽检和错误类别完成校准后，才允许小权重注入，而且不能在 session 与 turn 两条路径重复计奖。</p>
+
+                <h3>方案三：TRACE——用冻结模型测量“离正确目标还有多远”</h3>
+                <div class="formula">
+                    $$\bar{\ell}_t=\frac{1}{|y^\star|}\sum_j
+                    \log\pi_{\mathrm{ref}}(y^\star_j\mid S_t,y^\star_{&lt;j}),
+                    \quad d_t=-\bar{\ell}_t+\epsilon$$
+                </div>
+                <div class="formula">
+                    $$V(S_t)=\log\frac{d_0}{d_t},\qquad
+                    \delta_t=V(S_{t+1})-V(S_t)=\log\frac{d_t}{d_{t+1}}$$
+                    <p class="formula-note">如果一次搜索或澄清让 canonical gold target 在 reference 下明显更容易预测，$d_{t+1}$ 下降，局部 TD credit 为正。reference 不是 Judge，只做 teacher-forced likelihood probe；终局规则 outcome 仍保留。</p>
+                </div>
+                <div class="callout">
+                    <p><strong>对当前数据的关键适配：</strong>$y^\star$ 不能只是用户自然语言意图，而应是 verifier-aligned 的 canonical action/output，例如确定排序的 JSON：航班、乘客、支付拆分、行李、保险与必要输出。否则 reference 学到的可能只是复述问题，而不是业务完成进展。</p>
+                </div>
+
+                <div class="table-wrap">
+                    <table>
+                        <thead>
+                            <tr><th>维度</th><th>Turn-PPO</th><th>UserRL</th><th>TRACE</th></tr>
+                        </thead>
+                        <tbody>
+                            <tr><td>局部监督来源</td><td>学习到的 $V_\phi(s_t)$</td><td>Gym/规则逐 Turn reward</td><td>冻结 reference 对 gold target 的前缀似然</td></tr>
+                            <tr><td>是否需要 critic</td><td>需要</td><td>通常不需要额外 critic</td><td>不训练 critic，但需要额外 reference scoring</td></tr>
+                            <tr><td>对数据的额外要求</td><td>足够轨迹覆盖，终局 reward 可信</td><td>中间进展可被规则可靠验证</td><td>每个任务有高质量 canonical target</td></tr>
+                            <tr><td>对失败轨迹的处理</td><td>critic 可区分失败轨迹中的状态价值</td><td>取决于规则是否给正确的局部增量</td><td>目标似然变化可显示局部正/负进展</td></tr>
+                            <tr><td>主要风险</td><td>critic 偏差、长 Turn ratio 方差</td><td>reward hacking、规则不完备、Judge 偏差</td><td>target/reference 失配、前缀评分成本</td></tr>
+                            <tr><td>当前项目定位</td><td><span class="good-text">主线候选，严格实现已闭环</span></td><td><span class="warn-text">Judge 辅助线；完整 UserRL 尚需 estimator</span></td><td><span class="warn-text">公式链已适配；需先验证 target proxy</span></td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </section>
+
+            <section id="prm">
+                <p class="section-kicker">05 · Process reward model</p>
+                <h2>PRM 不是“多加一个分数”，而是一套过程监督系统</h2>
+                <p class="lead">在 Agent 场景中，PRM 的价值不是替代终局 verifier，而是在成功极稀疏、同一失败轨迹仍包含大量正确动作时，估计某个状态—动作前缀对未来成功的 promise，或本轮相对上一轮带来的 progress。它的上限取决于标签是否真实、评分是否对齐 Turn、信号是否正确接入训练器，以及是否经得住策略主动寻找漏洞。</p>
+
+                <div class="table-wrap">
+                    <table>
+                        <thead><tr><th>组件</th><th>它学习/计算什么</th><th>是否局部</th><th>当前项目中的对应物</th></tr></thead>
+                        <tbody>
+                            <tr><td>Outcome Verifier</td><td>最终数据库、必要动作与输出是否满足任务约束</td><td>通常否，终局 0/1</td><td>τ-bench <code>calculate_reward()</code>，是业务真值锚点</td></tr>
+                            <tr><td>规则 shaping</td><td>重复调用、data chain、恢复、思考等人工特征</td><td>特征在局部产生，但可能被聚合</td><td>当前 <code>_compute_reasoning_quality_score()</code></td></tr>
+                            <tr><td>Learned PRM</td><td>$q_\psi(h_t,a_t)$：该前缀/动作未来成功的 promise，或局部 progress</td><td>是，前提是保存并消费逐 Turn score</td><td><span class="warn-text">尚未实现完整训练—校准—接线闭环</span></td></tr>
+                            <tr><td>Turn Critic</td><td>$V^\pi(s_t)$：当前 policy 下从状态出发的期望回报</td><td>是</td><td>Turn-PPO 分支；它随 policy 分布更新</td></tr>
+                            <tr><td>LLM Judge</td><td>自然语言互动质量、相关性、是否推进会话</td><td>可逐轮，但主观且可能同源偏置</td><td>User-simulator-judge 分支中的可关闭辅助实验</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+
+                <div class="callout danger">
+                    <p><strong>工程命名必须诚实：</strong>当前仓库的 “PRM-Lite” 是有价值的规则式 process shaping baseline，但不是一个训练出来的 Process Reward Model。是否叫 PRM 不取决于函数返回了 <code>process_score</code>，而取决于是否存在过程标签、可泛化的评分模型、逐 Turn 对齐、校准指标与训练器消费路径。</p>
+                </div>
+
+                <h3>Learned Agent PRM 到底应该预测什么</h3>
+                <p>数学题常有明确的中间正确/错误；工具 Agent 的一步往往没有唯一答案。先查直飞还是先查中转可能都合理，真正要估计的是“这一步之后成功概率如何变化”。一种可执行的标签来自对同一个前缀采样 $K$ 个 continuation：</p>
+                <div class="formula">
+                    $$\widehat q_t=
+                    \frac{1}{K}\sum_{k=1}^{K}
+                    R_{\mathrm{verify}}\!\left(\tau^{(k)}_{t\rightarrow T}\right),
+                    \qquad
+                    r_t^{\mathrm{progress}}=\widehat q_t-\widehat q_{t-1}$$
+                    <p class="formula-note"><strong>Promise 与 progress：</strong>$\widehat q_t$ 是当前前缀还能成功的概率近似；差分表示本轮关闭了多少成功缺口。$K$ 太小方差很大，且 continuation policy 改变后标签会漂移，因此必须记录生成 policy/version，并定期刷新困难前缀。</p>
+                </div>
+                <p>除了绝对回归，更稳健的做法是对同一前缀构造“较好动作—貌似合理但错误动作”的 counterfactual pair，训练排序：</p>
+                <div class="formula">
+                    $$\mathcal L_{\mathrm{rank}}(\psi)=
+                    -\log\sigma\!\left(
+                    q_\psi(h_t,a_t^+)-q_\psi(h_t,a_t^-)
+                    \right)$$
+                    <p class="formula-note">当前 task 0 天然提供正负对：付款 <code>250+5</code> 对 <code>250+55</code>、根据搜索结果选择 HAT136+HAT039 对选择更贵或不满足时间的行程。排序标签可由工具执行与最终 verifier 构造，不必全部依赖 LLM 打标。</p>
+                </div>
+
+                <h3>当前 PRM-Lite 的代码链路：做对了什么，没做到什么</h3>
+                <div class="table-wrap">
+                    <table>
+                        <thead><tr><th>链路</th><th>当前事实</th><th>准确评价</th><th>下一步</th></tr></thead>
+                        <tbody>
+                            <tr><td>事件抽取</td><td>从 <code>action_history</code> 识别 read/write、重复、placeholder、recovery、data chain、think 等</td><td><span class="good-text">适合作为可解释弱监督与诊断特征</span></td><td>保留原始事件、动作结果与 Turn id，不要只保留均值</td></tr>
+                            <tr><td>过程评分</td><td>逐动作规则项累加后取均值，并裁剪至 $[-0.5,0.5]$</td><td>是手工 proxy；规则未理解业务参数的语义正确性</td><td>将规则作为 label features/guardrails，而非 learned PRM 的真值</td></tr>
+                            <tr><td>奖励融合</td><td><code>outcome + 0.3 * process_score</code></td><td>能在全 0/全 1 rollout group 中制造连续排序，但也可能改变目标</td><td>分别记录 outcome/process；限制辅助权重，并做 reward-hacking 集</td></tr>
+                            <tr><td>张量对齐</td><td>融合后的 score 放到最终 response token，GRPO 再求轨迹和并广播</td><td><span class="bad-text">局部事件位置丢失，不是 Turn-level advantage</span></td><td>输出 <code>turn_scores[T]</code> 与 <code>turn_ids</code>，在 advantage estimator 中显式消费</td></tr>
+                            <tr><td>LATA 接线</td><td>仍先得到一个组归一化标量，再按 $\alpha^{L-1-t}/\sqrt L$ 做位置重权</td><td>是位置先验，不知道某个 Turn 的具体事件和语义</td><td>与真实 PRM score 做独立消融；不能把位置权重表述为 TRACE/精确 credit</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+                <p class="caption">静态实现入口：<a href="../agentic-grpo-longhorizon/src/envs/tau_bench_interaction.py">PRM-Lite 环境评分</a>、<a href="../verl/verl/trainer/ppo/core_algos.py">GRPO/LATA advantage</a>、<a href="../agentic-grpo-longhorizon/docs/ablation/ablation_diagnosis_report.md">现有消融诊断</a>。</p>
+
+                <h3>task 0 暴露的规则盲点：data chain 不等于语义正确</h3>
+                <p>历史轨迹先从工具结果取得 certificate/card id，随后错误调用 <code>book_reservation(payment=250+55)</code>。当前规则只要写动作引用了先前 observation 中的实体，就可能获得 <code>data-chain +0.08</code> 分量；该错误动作本身没有通用的 tool-error 负项。工具返回 “payment amount does not add up” 后，模型改成 <code>250+5</code>，下一动作还可能同时获得“换策略恢复”与 data-chain 正项。</p>
+                <div class="table-wrap">
+                    <table>
+                        <thead><tr><th>动作</th><th>规则可能看到的表面特征</th><th>业务真值</th><th>理想过程监督</th></tr></thead>
+                        <tbody>
+                            <tr><td><code>book(250+55)</code></td><td>引用了真实 payment ids，存在数据链</td><td>总额错误，写操作失败</td><td>当轮负 progress；错误类型=算术/参数约束</td></tr>
+                            <tr><td>工具返回金额不匹配</td><td>当前实现主要影响下一次动作的 recovery 判断</td><td>提供了可恢复的新证据</td><td>observation 本身不训练 actor；应改变下一状态的 promise</td></tr>
+                            <tr><td><code>book(250+5)</code></td><td>不同动作 + data chain，形成正向恢复</td><td>正确写入数据库并满足终局约束</td><td>强正 progress，同时保留 outcome=1</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+                <div class="callout warn">
+                    <p><strong>结论不是“删掉 recovery 奖励”：</strong>恢复确实是长程 Agent 的重要能力。问题在于规则特征必须与工具执行结果、业务 schema 和后续终态联合解释。最稳妥的分工是：Verifier/工具给可执行真值，规则给可解释先验，learned PRM 学组合与泛化，终局 outcome 防止过程模型把表面技巧当成功。</p>
+                </div>
+
+                <h3>现有消融应该怎样解读</h3>
+                <div class="table-wrap">
+                    <table>
+                        <thead><tr><th>项目记录的实验</th><th>Overall</th><th>Generalization</th><th>Error</th><th>能说明什么</th></tr></thead>
+                        <tbody>
+                            <tr><td>Vanilla · step 200</td><td>0.175</td><td>0.071</td><td>0.200</td><td>当前预算下的 outcome baseline</td></tr>
+                            <tr><td>PRM-Lite · step 250</td><td>0.140</td><td>0.059</td><td>0.365</td><td>规则 shaping 单独使用没有带来提升，且错误率更高</td></tr>
+                            <tr><td>LATA · step 250</td><td>0.185</td><td>0.088</td><td>0.290</td><td>位置重权在该配置下略有收益，但错误率仍高</td></tr>
+                            <tr><td>PRM-Lite + LATA · step 250</td><td>0.240</td><td>0.110</td><td>0.140</td><td>两者在当前配置下存在有利交互，是值得复现实验的工程信号</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+                <p><strong>严谨表述：</strong>这组记录不能证明“PRM 已实现精确 Turn credit”，也不能证明普遍的算法因果结论：步数不同、需要多随机种子与置信区间，而且当前 PRM 最终仍是轨迹标量。它能支持的结论是：在当时固定配置下，规则式轨迹排序与位置权重的组合表现最好，值得在统一步数、统一 simulator、统一评测上复现并做组件日志。</p>
+
+                <h3>把 PRM 做成真正可用的工程系统</h3>
+                <ol>
+                    <li><strong>数据：</strong>在每个 assistant 决策边界保存完整历史、候选动作、工具结果、DB delta、终局 outcome、policy version；对关键错误生成可执行 counterfactual。</li>
+                    <li><strong>标签：</strong>硬事实优先用 verifier/工具；非唯一动作使用多 continuation 的 success rate；沟通质量才交给人工或独立 Judge，并保存不确定性。</li>
+                    <li><strong>模型：</strong>至少区分 promise head 与 progress/ranking head；输入需包含工具 metadata 和 error，而不是只看 assistant 文本。训练集要覆盖失败、恢复、近似正确和 OOD schema。</li>
+                    <li><strong>校准：</strong>除了 pairwise accuracy，还看 Brier/ECE、与 continuation success 的 rank correlation、最早错误定位、跨 policy/version 稳定性。</li>
+                    <li><strong>使用：</strong>先离线 rerank/best-of-N 与风险拦截；通过校准后再小权重进入 RL。搜索收益和训练收益要分开报告。</li>
+                    <li><strong>迭代：</strong>冻结 PRM 版本生成一阶段 policy 数据，加入新 policy 的 hard negatives 后再更新 PRM；避免 actor 与 PRM 同步追逐导致非平稳闭环。</li>
+                </ol>
+                <pre><code># 目标接线示意：这是下一阶段接口，不是当前 PRM-Lite 的现状
+turns = align_assistant_turns(trajectory.messages, trajectory.action_history)
+q = frozen_prm.score(
+    histories=turns.prefixes,
+    actions=turns.actions,
+    tool_results=turns.tool_results,
+)                                      # [T], calibrated promise
+progress = clip(q - shift_right(q), -c, c)
+turn_reward = beta * progress
+turn_reward[-1] += outcome              # 终局 verifier 保持主锚点
+
+advantages = turn_credit_estimator(
+    turn_reward=turn_reward,
+    turn_ids=trajectory.turn_ids,
+    response_mask=trajectory.assistant_mask,
+)                                      # [response_tokens], Turn 间可不同
+
+# 单独记录，禁止提前糊成一个不可诊断 scalar
+metrics = {
+    "reward/outcome": outcome,
+    "reward/prm_progress_mean": progress.mean(),
+    "reward/prm_disagreement": prm_uncertainty,
+}</code></pre>
+            </section>
+
+            <section id="simulator">
+                <p class="section-kicker">06 · User simulator</p>
+                <h2>用户模拟器不是数据生成器，而是训练环境的转移核</h2>
+                <p class="lead">在多轮 Agentic RL 中，Simulator 决定用户何时透露信息、如何表达歧义、是否纠正错误、会不会不耐烦以及何时结束。策略优化的不是抽象的“真实用户回报”，而是模拟分布下的回报；因此一个更强、更会完成任务的 LLM，并不自动是更忠实的用户模型。</p>
+
+                <div class="formula">
+                    $$u_{t+1}\sim
+                    P_{\mathrm{sim}}(\,\cdot\mid g,z,h_t,a_t\,),\qquad
+                    J_{\mathrm{sim}}(\pi)=
+                    \mathbb E_{\tau\sim P_{\mathrm{sim}},\pi}
+                    [R_{\mathrm{verify}}(\tau)]$$
+                    <p class="formula-note">$g$ 是隐藏业务目标，$z$ 是行为风格/耐心/主动性等潜变量。即使 verifier 完全正确，最大化 $J_{\mathrm{sim}}$ 也只保证对 $P_{\mathrm{sim}}$ 最优；当真实用户的 disclosure、纠正和终止行为不同，state occupancy 会变化，policy 可能失去已学捷径的支持。</p>
+                </div>
+
+                <h3>当前代码中的 Simulator 事实</h3>
+                <div class="table-wrap">
+                    <table>
+                        <thead><tr><th>维度</th><th>当前实现</th><th>影响</th><th>建议</th></tr></thead>
+                        <tbody>
+                            <tr><td>隐藏目标</td><td>完整 task instruction 放进 Simulator system prompt；Actor 不直接看到</td><td>符合部分可观测设定，但 prompt 稍有泄露就会让任务虚假变易</td><td>记录 slot reveal 时刻，自动检查未被询问的信息是否提前泄露</td></tr>
+                            <tr><td>交互策略</td><td>要求“一次一行、只给当前步骤必要信息、不幻觉、自然改写”</td><td>task 0 的 DOB/payment 等需要 Agent 主动询问，能训练澄清能力</td><td>把 disclosure policy 从纯 prompt 约束升级为显式状态机</td></tr>
+                            <tr><td>可见信息</td><td>Simulator 主要看到 Actor 的自然语言消息，不直接读取工具 observation</td><td>Actor 必须把关键结果解释给用户；工具事实不会自动被用户知道</td><td>继续保持信息边界，并检查 Actor 是否在话术中捏造工具结果</td></tr>
+                            <tr><td>终止</td><td>Simulator 以 <code>###STOP###</code> 结束；环境 done 后统一验证</td><td>过早 STOP 会截断可完成任务，过晚则产生冗余回合</td><td>把 goal-satisfied、user-abandon、max-turn、format-stop 分开记录</td></tr>
+                            <tr><td>采样可复现性</td><td>本地调用没有在该层显式固定 temperature 等 decoding 参数</td><td>结果可能继承服务端默认值，算法对比混入环境随机性</td><td>显式版本化 model、prompt、temperature、seed、server revision</td></tr>
+                            <tr><td>跨分支配置</td><td>现有实验既有 Qwen2.5-72B simulator，也有 Qwen3-14B 配置</td><td><span class="bad-text">不同 simulator 等于不同环境，不能直接归因给算法</span></td><td>主表固定一个 simulator；另做 cross-play 矩阵</td></tr>
+                            <tr><td>可选策略</td><td>llm/react/verify/reflection；当前主配置走 llm</td><td>verify/reflection 可降格式错误，但同模型会带来相关盲点与额外成本</td><td>按策略分别评估；可选 React parser 还需覆盖格式分支的单测</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+                <p class="caption">静态实现入口：<a href="../tau-bench/tau_bench/envs/user.py">用户模拟器与 stop/verify/reflection 策略</a>、<a href="../tau-bench/tau_bench/envs/base.py">环境 reset 与终局 verifier</a>、<a href="../tau-bench/tau_bench/envs/airline/tasks_test.py">task 0 隐藏指令</a>。</p>
+
+                <h3>task 0：同一目标，三种用户会训练出三种 Agent</h3>
+                <div class="table-wrap">
+                    <table>
+                        <thead><tr><th>模拟用户</th><th>可能的第一轮表达</th><th>Actor 学到的行为</th><th>上线风险</th></tr></thead>
+                        <tbody>
+                            <tr><td>过度合作</td><td>一次性给出 DOB、3 bags、no insurance、certificate/card id 与精确拆分</td><td>直接搜索并写入，不必澄清，也不必管理对话状态</td><td>遇到真实用户分步透露或含糊表达时失败</td></tr>
+                            <tr><td>当前 reactive 目标</td><td>先给 JFK→SEA、日期、11 点后、经济舱、最低价；只在被问时补充</td><td>学会识别缺失 slot、解释候选、主动询问支付/行李等</td><td>比一次性泄露更合理，但风格、耐心和歧义仍较单一</td></tr>
+                            <tr><td>真实噪声/困难用户</td><td>“用那张券，剩下刷尾号 7447 的卡；行李应该三件吧”，之后可能纠正或不耐烦</td><td>确认指代、复述关键约束、遇到矛盾不贸然写库</td><td>若训练从未覆盖这种行为，PRM/Actor 都可能把追问误判为低效</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+
+                <div class="callout warn">
+                    <p><strong>强模型悖论：</strong>一个能力更强的 simulator 往往更擅长理解 Agent 的不完整问题、主动补全缺失信息并配合任务成功，但真实用户未必如此。近期 <a href="https://arxiv.org/abs/2603.11245">451 名真人、165 个 τ-bench 任务和 31 个模拟器的对照研究</a>也指出，模拟用户常表现得过度合作、风格过于均一、较少困惑与挫败；因此 simulator 选择要以行为保真度和下游真人效用为准，而不是以“它自己能不能顺利完成任务”为准。</p>
+                </div>
+
+                <h3>推荐架构：行为控制与语言表面实现分层</h3>
+                <div class="mermaid-wrap" aria-label="分层用户模拟器">
+                    <pre class="mermaid">
+flowchart TB
+    G["Hidden goal<br/>slots · constraints · policy"] --> B["Behavior Controller<br/>agenda / state machine"]
+    Z["Latent behavior z<br/>patience · initiative · ambiguity"] --> B
+    H["Conversation history"] --> B
+    B --> D{"Decide next behavior"}
+    D -->|"reveal"| R["Allowed slots"]
+    D -->|"clarify/correct"| C["Correction target"]
+    D -->|"refuse/abandon"| X["Stop reason"]
+    R --> L["LLM Surface Realizer"]
+    C --> L
+    X --> L
+    L --> U["Natural user utterance"]
+    U --> Q["Consistency Guard<br/>no leak · no drift · valid stop"]
+    Q -->|"pass"| A["Actor"]
+    Q -->|"repair / resample"| L
+
+    classDef ctrl fill:#e3f6f2,stroke:#087f73,color:#132238;
+    classDef model fill:#e5f3f8,stroke:#1976a3,color:#132238;
+    classDef guard fill:#fff0e4,stroke:#c86419,color:#132238;
+    class B,D,R,C,X ctrl;
+    class L model;
+    class Q guard;
+                    </pre>
+                </div>
+                <p class="caption">状态机负责“允许说什么、何时纠正、为什么停止”，LLM 只负责“怎么自然地说”。这会牺牲少量生成自由度，但显著提升目标一致性、可调难度和可复现性。</p>
+
+                <h3>Simulator 评估要从“像不像”升级到“是否产生正确下游能力”</h3>
+                <div class="grid-3">
+                    <article class="mini-card">
+                        <h4>语义忠实度</h4>
+                        <p>slot retention、未问先泄露率、goal drift、虚构信息率、矛盾率、stop correctness。硬约束可自动校验。</p>
+                    </article>
+                    <article class="mini-card">
+                        <h4>行为分布</h4>
+                        <p>主动性、合作度、耐心、表达长度、歧义、纠正、情绪和 abandon 分布，与真实会话或人工设定的目标分布比较。</p>
+                    </article>
+                    <article class="mini-card">
+                        <h4>下游效用</h4>
+                        <p>在 sim-A 训练后，分别到 sim-B、holdout prompts 和真人上测 pass@1/满意度；用 cross-play gap 检查 co-adaptation。</p>
+                    </article>
+                </div>
+                <ol>
+                    <li><strong>训练池：</strong>固定任务目标，随机化行为潜变量和表达器；easy→ambiguous→noisy→adversarial 做 curriculum，但不能篡改业务真值。</li>
+                    <li><strong>留出池：</strong>使用从未参与训练的 simulator model、prompt family 与真人片段，作为 sim-to-real 决策门。</li>
+                    <li><strong>版本控制：</strong>算法主实验固定 simulator 版本；升级 simulator 必须重新跑 outcome baseline，而不是把环境变化算作算法收益。</li>
+                    <li><strong>真人小样本：</strong>优先用于发现未建模行为与校准分布，不必一开始就大规模真人 RL。每个 simulator 版本都维护失败类型回放集。</li>
+                </ol>
+            </section>
+
+            <section id="case">
+                <p class="section-kicker">07 · Business case</p>
+                <h2>同一个 τ-bench task 0，算法、PRM 与模拟器到底看见了什么</h2>
+                <p class="lead">用户 Mia 要从 JFK 飞 SEA：2024-05-20、11 点后、经济舱、最低价优先、三件行李、不买保险，并使用 $250 certificate 与信用卡补差。规则 verifier 期望最终数据库状态等价于一个参数完整的预订动作。</p>
+
+                <div class="grid-2">
+                    <article class="mini-card">
+                        <h4>用户表述与隐藏约束</h4>
+                        <ul>
+                            <li>JFK → SEA，May 20，11:00 后，economy。</li>
+                            <li>候选中选择最低价、允许中转。</li>
+                            <li>乘客 Mia Li，DOB 1990-04-05。</li>
+                            <li>3 bags、no insurance、certificate + card。</li>
+                        </ul>
+                    </article>
+                    <article class="mini-card">
+                        <h4>Canonical 业务目标</h4>
+                        <ul>
+                            <li>HAT136（JFK→ATL）+ HAT039（ATL→SEA）。</li>
+                            <li><code>certificate_7504069: 250</code>。</li>
+                            <li><code>credit_card_4421486: 5</code>。</li>
+                            <li>总付款 $255，行李与保险字段准确。</li>
+                        </ul>
+                    </article>
+                </div>
+
+                <div class="mermaid-wrap" aria-label="task 0 多轮交互时序">
+                    <pre class="mermaid">
+sequenceDiagram
+    participant U as User Simulator
+    participant A as Actor
+    participant T as Tools / DB
+    participant V as Verifier
+
+    U->>A: JFK→SEA, May 20, after 11, economy, cheapest
+    A->>T: search_direct_flight(...)
+    T-->>A: no suitable direct option
+    A->>T: search_onestop_flight(...)
+    T-->>A: HAT136 + HAT039, total $255
+    A->>U: confirm itinerary and collect missing constraints
+    U-->>A: 3 bags, no insurance, payment preference
+    A->>T: get_user_details(...)
+    T-->>A: DOB + certificate/card ids
+    A->>T: book_reservation(payment=250+55)
+    T-->>A: Error: payment amount does not add up
+    A->>T: book_reservation(payment=250+5)
+    T-->>A: reservation created
+    A->>U: summarize confirmation
+    V->>T: compare final database state with gold constraints
+    V-->>A: terminal outcome = 1
+                    </pre>
+                </div>
+
+                <h3>三种 credit 解释</h3>
+                <div class="table-wrap">
+                    <table>
+                        <thead>
+                            <tr><th>轨迹片段</th><th>Turn-PPO 看法</th><th>UserRL 看法</th><th>TRACE 看法</th></tr>
+                        </thead>
+                        <tbody>
+                            <tr>
+                                <td>直飞搜索无合适结果</td>
+                                <td>是否有价值由 critic 从后续成功统计学习；不能因为“没找到”就静态判负。</td>
+                                <td>只有规则能证明排除无效候选是进展时，才应给增量 reward。</td>
+                                <td>若 observation 排除错误路线并提高正确 target 概率，$\delta_t$ 可为正。</td>
+                            </tr>
+                            <tr>
+                                <td>找到 HAT136 + HAT039</td>
+                                <td>下一边界状态更接近成功，理论上 value 上升、该 Turn 优势更高。</td>
+                                <td>候选航班命中规则约束，可给可靠正向 event。</td>
+                                <td>gold target 含这两个航班，prefix likelihood 应显著提高。</td>
+                            </tr>
+                            <tr>
+                                <td>收集 DOB 与 payment ids</td>
+                                <td>补齐预订所需信息，critic 应学习其长期价值。</td>
+                                <td>若 schema 明确“必填字段已获得”，可以规则化验证进展。</td>
+                                <td>canonical target 的乘客与支付字段变得可预测，local credit 应为正。</td>
+                            </tr>
+                            <tr>
+                                <td>错误付款 $250+$55</td>
+                                <td>错误 observation 改变下一状态；critic/GAE 决定负面程度。</td>
+                                <td>可给当轮负 event，但不能把整个可恢复轨迹永久判死。</td>
+                                <td>target gap 可能变大，$\delta_t&lt;0$；后续修正再获得正 credit。</td>
+                            </tr>
+                            <tr>
+                                <td>修正为 $250+$5 并成功</td>
+                                <td>终局 reward=1 通过 GAE 传回各 Turn，修正 Turn 得到强正向信号。</td>
+                                <td>规则写操作成功 + 终局状态正确；trajectory score 应保留成功锚点。</td>
+                                <td>正确 target 完全被 observation 支持，同时 outcome advantage 保证最终正确性。</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+
+                <div class="callout warn">
+                    <p><strong>为什么不能硬编码“任何 tool error = 整轨迹负奖励”：</strong>真实 Agent 会探索、遇到业务约束并恢复。上面的支付错误恰好暴露了正确补差金额，随后成功修正。理想 credit 应惩罚错误动作、奖励恢复动作，同时保留终局成功；把中间 error 直接升级为不可逆 outcome 会教模型逃避工具，而不是学会恢复。</p>
+                </div>
+
+                <h3>从业务案例到训练张量</h3>
+                <pre><code># 只训练 assistant 决策；用户消息、工具 observation 和 padding 均 mask
+turn_ids      = [0,0, 1,1,1, 0,0, 2,2, 0, 3,3,3, 0,0, 4,4, 0, 5,5,5, 0, 6,6]
+response_mask = [0,0, 1,1,1, 0,0, 1,1, 0, 1,1,1, 0,0, 1,1, 0, 1,1,1, 0, 1,1]
+
+# outcome-only GRPO: 每个 response token 都拿 A_out
+# Turn-PPO: Turn t 内拿 A_t，Turn 之间不同
+# UserRL: Turn t 内拿规则映射后的 local signal，再结合 trajectory ranking
+# TRACE: Turn t 内拿 alpha_out*A_out + alpha_turn*trace_credit_t</code></pre>
+
+                <h3>把 Simulator、PRM 和 optimizer 放回同一条轨迹</h3>
+                <div class="table-wrap">
+                    <table>
+                        <thead><tr><th>Turn</th><th>Simulator 改变了什么</th><th>业务/Verifier 事实</th><th>PRM 应学什么</th><th>Optimizer 怎样消费</th></tr></thead>
+                        <tbody>
+                            <tr><td>用户只给初始航线条件</td><td>隐藏 DOB、行李、保险、支付细节</td><td>尚不可安全预订</td><td>直接写库是低 promise；合理搜索/澄清是正候选</td><td>只更新 assistant action token，不更新 user utterance</td></tr>
+                            <tr><td>找到正确中转</td><td>用户仍未自动知道工具结果</td><td>候选满足日期/时间/价格约束</td><td>搜索动作与结果使成功概率上升</td><td>局部 advantage 对齐该 assistant Turn</td></tr>
+                            <tr><td>付款填成 250+55</td><td>Simulator 不应替 Agent 修正工具参数</td><td>工具拒绝，DB 未写入</td><td>错误动作负 progress；错误 observation 提高下一状态的可恢复性</td><td>错误 Turn 与恢复 Turn 不能共享完全相同优势</td></tr>
+                            <tr><td>修正为 250+5</td><td>用户目标没有改变</td><td>写入正确，终局 verifier=1</td><td>恢复动作强正，且不能把之前错误从日志抹掉</td><td>终局回报传回全局，PRM/GAE 提供局部分化</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </section>
+
+            <section id="joint">
+                <p class="section-kicker">08 · Joint learning system</p>
+                <h2>Policy × Simulator × PRM：三个会共同漂移的学习系统</h2>
+                <p class="lead">Agentic RL 最危险的工程误区，是把 Actor 当唯一学习对象。实际上 Actor 会适应 Simulator 的行为漏洞，会主动搜索 PRM 的高分区域；而 PRM 又通常使用当前 Actor 产生的数据更新。如果三者同时变化，训练 reward 上升可能只是共适应，而不是业务能力提升。</p>
+
+                <div class="mermaid-wrap" aria-label="Policy、Simulator、PRM 联合迭代闭环">
+                    <pre class="mermaid">
+flowchart TB
+    T["τ-bench task<br/>hidden goal + gold constraints"] --> SP["Frozen simulator pool v_s<br/>behavior latents + prompts"]
+    SP --> RO["Actor rollout π_v"]
+    RO --> ENV["Tools + isolated DB"]
+    ENV --> RO
+    RO --> LOG["Turn-aligned trajectory log<br/>actions · observations · DB deltas"]
+    ENV --> VER["Rule Verifier<br/>terminal truth"]
+    LOG --> LAB["Process label builder"]
+    VER --> LAB
+    LAB -->|"MC continuations"| MC["Promise targets"]
+    LAB -->|"executable pairs"| CF["Counterfactual ranking"]
+    LAB -->|"human / judge only when needed"| HJ["Soft interaction labels"]
+    MC --> PT["Train + calibrate PRM v_p"]
+    CF --> PT
+    HJ --> PT
+    PT --> GATE{"Offline quality gate"}
+    GATE -->|"pass"| FPRM["Freeze PRM v_p"]
+    FPRM --> USE["Rerank / risk gate / RL credit"]
+    USE --> UP["Update Actor π_v+1"]
+    UP --> HP["Held-out simulator cross-play<br/>+ human audit + strict verifier"]
+    HP -->|"new failures"| REPLAY["Replay + hard negatives"]
+    REPLAY --> LAB
+
+    classDef truth fill:#fff0e4,stroke:#c86419,color:#132238;
+    classDef model fill:#e5f3f8,stroke:#1976a3,color:#132238;
+    classDef env fill:#e3f6f2,stroke:#087f73,color:#132238;
+    class VER,GATE,HP truth;
+    class RO,PT,FPRM,UP model;
+    class SP,ENV env;
+                    </pre>
+                </div>
+
+                <h3>三种闭环坍缩与对应防线</h3>
+                <div class="grid-3">
+                    <article class="mini-card">
+                        <h4>Actor ↔ PRM reward hacking</h4>
+                        <p>Actor 找到“反复读工具、写长解释、调用 think”之类的表面高分模式。防线是终局 verifier、对抗负例、PRM 版本冻结、OOD/不确定性门控和 component 日志。</p>
+                    </article>
+                    <article class="mini-card">
+                        <h4>Actor ↔ Simulator co-adaptation</h4>
+                        <p>Actor 学会触发特定 simulator prompt 的过度披露或固定措辞，训练 pass@1 升高但换模拟器即失效。防线是 simulator pool、行为随机化、holdout cross-play 与真人小样本。</p>
+                    </article>
+                    <article class="mini-card">
+                        <h4>PRM ↔ 数据选择偏差</h4>
+                        <p>PRM 只看旧 policy 的常见错误，新 policy 进入新区域后评分失真。防线是 replay、active sampling、当前 policy hard negatives、版本标记与跨 policy 校准。</p>
+                    </article>
+                </div>
+
+                <h3>工程上不要 joint-train，先做分阶段版本冻结</h3>
+                <ol>
+                    <li><strong>Phase 0 · 环境锁定：</strong>固定 task split、Simulator v1、prompt/decoding、工具/DB 和 verifier，复现 outcome-only GRPO。</li>
+                    <li><strong>Phase 1 · 过程数据：</strong>冻结 Actor checkpoint，收集多样轨迹、continuations 与 counterfactual；规则 PRM-Lite 仅作为弱标签/诊断。</li>
+                    <li><strong>Phase 2 · PRM gate：</strong>训练 PRM 并在未见 task、未见错误和不同 policy 轨迹上校准；先做 best-of-N，确认排序确实提升 verifier outcome。</li>
+                    <li><strong>Phase 3 · 单因素 RL：</strong>冻结 Simulator 与 PRM，只改变 credit/optimizer。PRM 先小权重，保留 Turn-PPO、TRACE、UserRL-style 独立基线。</li>
+                    <li><strong>Phase 4 · Cross-play：</strong>冻结新 Actor，换 holdout simulator/prompt/model；若收益消失，优先修环境泛化而不是继续调 RL 超参。</li>
+                    <li><strong>Phase 5 · 迭代：</strong>把新失败加入 PRM 与 simulator 行为覆盖，但每次只升级一个版本，并重新运行基准矩阵。</li>
+                </ol>
+
+                <h3>最小联合消融：每一行只能改一个因素</h3>
+                <div class="table-wrap">
+                    <table>
+                        <thead><tr><th>实验</th><th>Policy credit</th><th>Simulator</th><th>PRM 使用方式</th><th>回答的问题</th></tr></thead>
+                        <tbody>
+                            <tr><td>J0</td><td>Outcome GRPO</td><td>固定 S1</td><td>无</td><td>严格业务基线</td></tr>
+                            <tr><td>J1</td><td>Outcome GRPO</td><td>固定 S1</td><td>规则 PRM-Lite trajectory shaping</td><td>规则排序是否单独有益</td></tr>
+                            <tr><td>J2</td><td>Outcome GRPO</td><td>固定 S1</td><td>Learned PRM 只做 best-of-N</td><td>PRM 本身是否会正确排序，不混入优化器</td></tr>
+                            <tr><td>J3</td><td>Turn-PPO / PRM-turn credit</td><td>固定 S1</td><td>冻结 learned PRM</td><td>逐 Turn 接线是否优于纯轨迹排序</td></tr>
+                            <tr><td>J4</td><td>选定最佳 credit</td><td>训练 S1，评测 S2/S3</td><td>固定</td><td>是否过拟合用户模拟器</td></tr>
+                            <tr><td>J5</td><td>选定最佳 credit</td><td>S1/S2/S3 训练池</td><td>固定</td><td>行为随机化是否改善 cross-play 与真人效用</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+                <div class="callout good">
+                    <p><strong>项目当前最优先的不是立刻再训练一个大 PRM：</strong>先把已有规则事件从“终局均值”升级为可审计的 Turn-aligned 数据契约；固定 simulator 做公平复现；用历史轨迹构造 task 0 这类可执行正负对。只要这三件事没锁住，增加模型参数只会让错误监督更难诊断。</p>
+                </div>
+            </section>
+
+            <section id="systems">
+                <p class="section-kicker">09 · Systems thinking</p>
+                <h2>Agentic RL 的算法是否成立，取决于系统有没有守住数据语义</h2>
+                <p class="lead">大模型 RL 的公式通常只占系统的一小部分。多轮 Agent 还需要 rollout engine、工具沙箱、用户模拟器、状态存储、Verifier、Reference/Critic、训练 worker 与版本同步。任何一个边界错位，都可能让“能跑”与“算法正确”完全分离。</p>
+
+                <div class="grid-3">
+                    <article class="mini-card">
+                        <h4>Actor / Rollout Policy</h4>
+                        <p>采样 assistant response 与工具调用。必须记录生成时的 log-prob 和 policy version；训练期重新计算的是 current log-prob。</p>
+                    </article>
+                    <article class="mini-card">
+                        <h4>User + Tools + State</h4>
+                        <p>用户模拟器维护隐藏意图与 disclosure policy；工具执行可验证读写；数据库按 rollout 隔离。Simulator model/prompt/decoding 是环境版本的一部分。</p>
+                    </article>
+                    <article class="mini-card">
+                        <h4>Verifier / Reward</h4>
+                        <p>比较最终状态、要求动作与输出。工具“调用成功”不等于业务“完成正确”；应记录 component reward 与失败原因。</p>
+                    </article>
+                    <article class="mini-card">
+                        <h4>Reference Policy</h4>
+                        <p>在 PPO 中可用于 KL 锚定；在 TRACE 中用于 gold-prefix scoring。这是两个不同计算路径，不能复用名称后混淆语义。</p>
+                    </article>
+                    <article class="mini-card">
+                        <h4>Critic</h4>
+                        <p>Turn-PPO 中与 actor 对齐到 Turn 边界，预测未来回报。value mask 与 actor mask 不同，且需要独立监控校准。</p>
+                    </article>
+                    <article class="mini-card">
+                        <h4>Process Reward Model</h4>
+                        <p>读取 Turn prefix、动作和工具结果，输出 promise/progress 与不确定性。必须独立版本化，并区分离线 rerank、在线 reward 和风险 gate 三种用途。</p>
+                    </article>
+                    <article class="mini-card">
+                        <h4>Trainer</h4>
+                        <p>组 batch、算 advantage、ratio、clip/KL 和梯度。需要控制长度归一化、组退化、过期数据以及异常轨迹。</p>
+                    </article>
+                </div>
+
+                <h3>On-policy、PPO 复用与异步 staleness</h3>
+                <p>PPO 通常被称为 on-policy 方法，但实践中会对同一批由 $\pi_{\mathrm{old}}$ 生成的数据做多个 mini-batch epoch，并依靠重要性比率和 clipping 限制更新。当 rollout 与训练异步时，实际生成策略可能比 current policy 落后多个版本，此时问题不再只是“多训练几轮”，而是 policy lag。</p>
+                <div class="formula">
+                    $$\rho=\exp(\log\pi_\theta(a\mid s)-\log\pi_{\mathrm{behavior}}(a\mid s))$$
+                    <p class="formula-note">必须使用真正生成该轨迹的 behavior log-prob。只拿一个固定 reference policy 替代 behavior policy 不能修正 rollout staleness；reference KL 与 importance correction 是不同问题。</p>
+                </div>
+
+                <div class="table-wrap">
+                    <table>
+                        <thead><tr><th>风险</th><th>症状</th><th>应对</th></tr></thead>
+                        <tbody>
+                            <tr><td>Policy lag</td><td>ratio 长尾、clip fraction 激增、旧轨迹与 current policy 差异大</td><td>记录 policy version；限制最大 lag；拒绝或降权过旧轨迹；缩短生成—更新流水线。</td></tr>
+                            <tr><td>长 response ratio</td><td>整轮 log-ratio 绝对值随长度放大</td><td>严格基线先监控；再对几何平均、长度归一化或不同 clip 粒度做显式消融。</td></tr>
+                            <tr><td>组退化</td><td>同 prompt 的 $G$ 条 rollout reward 全相同</td><td>提高探索、任务难度分层、增加 group size，记录有效组比例；不要用伪随机 shaping 掩盖问题。</td></tr>
+                            <tr><td>变长偏置</td><td>长轨迹仅因 token/Turn 更多贡献更大梯度</td><td>定义清晰的 per-token、per-turn、per-trajectory 归一化，并与论文目标保持一致。</td></tr>
+                            <tr><td>环境泄漏</td><td>gold、隐藏约束或 verifier 结果进入 actor prompt</td><td>gold target 只给 reward/reference scorer；对非 tensor metadata 与 actor input 做字段白名单。</td></tr>
+                            <tr><td>Simulator 漂移</td><td>换模型/prompt 后任务难度与用户披露分布变化</td><td>环境配置指纹进入每条轨迹；算法主实验固定版本；升级环境必须重跑基线。</td></tr>
+                            <tr><td>PRM 漂移</td><td>同一动作随 PRM checkpoint 得分变化，actor 追逐评分漏洞</td><td>阶段内冻结 PRM；记录 version/uncertainty；保留 hard-negative 与 outcome safety gate。</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+
+                <h3>Reward hacking 的五道防线</h3>
+                <ol>
+                    <li><strong>结果锚定：</strong>最终数据库状态与任务规则决定 outcome，不用模型自评分替代。</li>
+                    <li><strong>信号解耦：</strong>Judge、progress proxy、格式奖励分别记录，不能提前相加后失去可诊断性。</li>
+                    <li><strong>对抗评测：</strong>测试重复检索、无意义澄清、绕过写操作、格式投机、错误后放弃等策略。</li>
+                    <li><strong>分布外验证：</strong>按 task/user/constraint 组合做未见切分，并验证 retail 等跨域迁移，防止记忆固定动作模板。</li>
+                    <li><strong>交互防线：</strong>测试能否诱导 Simulator 提前泄露、替 Agent 计算或无条件同意；训练与评测使用不同 simulator family 做 cross-play。</li>
+                </ol>
+            </section>
+
+            <section id="evaluation">
+                <p class="section-kicker">10 · Evaluation</p>
+                <h2>实验不能只看 reward 曲线，要同时证明算法健康与业务有效</h2>
+                <p class="lead">面试中最有说服力的回答不是“我预计提升多少”，而是给出可归因的实验矩阵、失败判据和决策门。当前三种方案都没有理由直接承诺未经实测的 pass@1 增幅。</p>
+
+                <div class="grid-3">
+                    <article class="mini-card">
+                        <h4>业务层</h4>
+                        <p><span class="tag green">核心</span> unseen pass@1 / pass@k、规则 compliance、正确写操作率、错误恢复率、超时/循环、平均 Turn 与工具成本。</p>
+                    </article>
+                    <article class="mini-card">
+                        <h4>算法层</h4>
+                        <p>有效 reward group 比例、advantage std、KL、entropy、clip fraction、ratio quantiles、gradient norm、response length。</p>
+                    </article>
+                    <article class="mini-card">
+                        <h4>Credit / PRM 层</h4>
+                        <p>Turn critic 的 value calibration；TRACE 与真实进展相关性；PRM pairwise accuracy、Brier/ECE、continuation-success 相关性、最早错误定位与 OOD 不确定性。</p>
+                    </article>
+                    <article class="mini-card">
+                        <h4>Simulator 层</h4>
+                        <p>slot 泄露/漂移/幻觉、stop correctness、行为覆盖度；训练 simulator→holdout simulator→真人的 cross-play gap。</p>
+                    </article>
+                    <article class="mini-card">
+                        <h4>系统层</h4>
+                        <p>rollout/PRM/Judge 延迟与成本、tool error 类型、环境 reset 失败、policy/simulator/PRM version 分布、长轨迹截断。</p>
+                    </article>
+                </div>
+
+                <h3>最小可归因实验矩阵</h3>
+                <div class="table-wrap">
+                    <table>
+                        <thead><tr><th>实验</th><th>只改变什么</th><th>要回答的问题</th><th>Go / No-Go 依据</th></tr></thead>
+                        <tbody>
+                            <tr><td>A0 · Outcome GRPO</td><td>无局部 credit</td><td>建立计算预算与业务基线</td><td>训练稳定；seen/unseen 口径固定；失败分类可复现。</td></tr>
+                            <tr><td>A1 · Turn-PPO</td><td>turn_gae + turn_ppo + critic</td><td>learned Turn value 是否改善长程归因</td><td>优势在 Turn 间分化、critic 有校准、unseen 指标改善且成本可接受。</td></tr>
+                            <tr><td>A2 · Judge auxiliary</td><td>小权重、可关闭 Judge signal</td><td>软交互质量是否有独立增益</td><td>先通过离线一致性；不能降低规则 outcome 或诱发同源偏差。</td></tr>
+                            <tr><td>A3 · UserRL-style</td><td>规则 dense events + grpo_multiturn</td><td>可验证中间进展是否比 outcome-only 更有效</td><td>规则覆盖率高、反作弊通过、消融能分清 mapping 与 scoring。</td></tr>
+                            <tr><td>A4 · TRACE</td><td>reference gold-prefix credit</td><td>canonical target likelihood 是否是有效进展代理</td><td>离线排序命中真实关键 Turn；错误/修正方向正确；训练收益超过评分成本。</td></tr>
+                            <tr><td>A5 · Learned PRM rerank</td><td>只在生成后 best-of-N</td><td>PRM 是否真的能排序，不混入 policy gradient</td><td>held-out task 的 verifier pass@1 提升；ECE/OOD/错误定位达门槛。</td></tr>
+                            <tr><td>A6 · Learned PRM credit</td><td>冻结 PRM 的 Turn-aligned 辅助信号</td><td>局部接线是否有额外训练收益</td><td>胜过 A5 的纯推理收益；无 reward hacking；不同 simulator 上保留收益。</td></tr>
+                            <tr><td>A7 · Simulator cross-play</td><td>不改 policy，仅切换 S1/S2/真人</td><td>Actor 是否共适应训练用户</td><td>泄露与行为分布受控；cross-play gap 在业务容忍范围内。</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+
+                <div class="callout good">
+                    <p><strong>推荐验证顺序：</strong>先做无 GPU 或轻量离线 sanity check（固定轨迹、手算边界、检查 mask 与 score 方向），再做小规模在线消融，最后才扩大模型和 rollout 预算。先证实 signal 的语义，再验证 optimizer 是否能利用它。</p>
+                </div>
+
+                <h3>训练前必须锁住的不变量</h3>
+                <ul>
+                    <li>环境 observation、user token、tool token 和 padding 的 actor mask 必须为 0。</li>
+                    <li>每个 assistant token 只能属于一个连续 Turn；Turn id 不允许跳号或覆盖 observation。</li>
+                    <li>gold/verifier metadata 不得进入 actor prompt；TRACE target 仅被 reference scorer 消费。</li>
+                    <li>同一 reward 不能同时进入 terminal score 和 local credit 后再无记录地重复加权。</li>
+                    <li>所有异常必须区分：模型格式错、工具参数错、业务约束拒绝、基础设施超时、环境 bug。</li>
+                    <li>每条轨迹必须携带 actor、simulator、PRM、prompt、tools 与 dataset 的不可变版本指纹。</li>
+                    <li>PRM 标签生成使用的 continuation policy、采样数 $K$ 和 verifier 版本必须可追溯；禁止 gold 字段进入评分模型可见的非授权输入。</li>
+                </ul>
+            </section>
+
+            <section id="selection">
+                <p class="section-kicker">11 · Decision framework</p>
+                <h2>怎么选：先看你拥有什么监督，不是先看哪个算法更新</h2>
+                <div class="decision" role="table" aria-label="算法选型矩阵">
+                    <div class="head">条件</div>
+                    <div class="head">Turn-PPO</div>
+                    <div class="head">UserRL</div>
+                    <div class="head">TRACE</div>
+
+                    <div class="label">终局 verifier 强</div>
+                    <div><span class="good-text">适合</span>，直接训练 critic</div>
+                    <div>可作为 outcome 锚点</div>
+                    <div>必须保留为 outcome</div>
+
+                    <div class="label">中间进展可规则验证</div>
+                    <div>可帮助 critic，但非必需</div>
+                    <div><span class="good-text">最适合</span></div>
+                    <div>可以作为 proxy 校验</div>
+
+                    <div class="label">有 canonical target</div>
+                    <div>非必需</div>
+                    <div>非必需</div>
+                    <div><span class="good-text">必要条件</span></div>
+
+                    <div class="label">不想训练 critic</div>
+                    <div><span class="bad-text">不适合</span></div>
+                    <div>适合</div>
+                    <div>适合，但有 scoring 成本</div>
+
+                    <div class="label">主要风险</div>
+                    <div>value bias / ratio variance</div>
+                    <div>规则漏洞 / reward hacking</div>
+                    <div>target/reference proxy 失配</div>
+                </div>
+
+                <div class="one-liner">
+                    <strong>当前项目建议：</strong>以严格 Turn-PPO 作为主要算法基线；把 UserRL 拆成“真正规则 dense reward”与“LLM Judge 辅助诊断”两条线；把 TRACE 作为 critic-free 研究线；把当前 PRM-Lite 定位为可解释的弱监督 baseline，并行建设 learned Agent PRM。所有主实验先固定同一个用户模拟器，再用 holdout simulator 做 cross-play。
+                </div>
+
+                <h3>什么时候值得上 Learned PRM</h3>
+                <div class="grid-3">
+                    <article class="mini-card">
+                        <h4>值得</h4>
+                        <p>终局 verifier 强但极稀疏；轨迹长、失败中有大量正确步骤；能低成本执行 continuation 或构造可验证 action pairs；推理阶段也需要 rerank/risk gate。</p>
+                    </article>
+                    <article class="mini-card">
+                        <h4>暂缓</h4>
+                        <p>Turn 边界和工具结果尚未结构化；Simulator/Verifier 还在频繁变化；现有规则事件没有离线相关性；数据只覆盖单一 policy 的少量成功轨迹。</p>
+                    </article>
+                    <article class="mini-card">
+                        <h4>使用顺序</h4>
+                        <p>先离线错误定位与 pairwise 排序，再 best-of-N，随后小权重 Turn credit，最后才考虑与 policy 交替迭代。每一步都保留 outcome-only 对照。</p>
+                    </article>
+                </div>
+
+                <h3>三者可以组合吗</h3>
+                <p>理论上可以，例如终局 outcome + Turn critic，或 outcome + TRACE/PRM local credit。但组合不是越多越好：critic、PRM、TRACE 与规则事件可能重复解释同一证据、改变奖励尺度并破坏实验可归因性。正确顺序是先建立单独强基线，验证每个 local signal 与真实业务进展的相关性，再用固定权重或有安全约束的门控做组合消融。</p>
+                <div class="callout warn">
+                    <p><strong>Potential-based shaping 的边界：</strong>若希望保持最优策略不变，经典形式要求 shaping 仅由状态势函数差构成，例如 $F(s,a,s')=\gamma\Phi(s')-\Phi(s)$，且 $\Phi$ 不能偷看当前状态不可得的终局结果。把 <code>total_reward &gt;= 1</code> 放入中间 potential 会造成 terminal outcome 泄漏，不再具备该不变性保证。</p>
+                </div>
+            </section>
+
+            <section id="qa">
+                <p class="section-kicker">12 · Interview questions</p>
+                <h2>高频追问：回答要同时覆盖理论、实现和业务</h2>
+                <div class="qa">
+                    <details open>
+                        <summary>为什么标准 GRPO 不适合直接解决多轮 credit assignment？</summary>
+                        <div class="details-body">
+                            <p><span class="answer-lead">核心不是 GRPO “不能训练”，而是它默认用整轨迹的组相对优势。</span>同一条成功轨迹中所有策略 token 拿同一个 $A_g$，无法区分有效搜索、错误参数和错误恢复；全成或全败的组还会退化。它是强 outcome baseline，但不是局部归因算法。</p>
+                        </div>
+                    </details>
+                    <details>
+                        <summary>Reward shaping 和 credit assignment 有什么区别？</summary>
+                        <div class="details-body">
+                            <p>Reward shaping 改变环境给出的监督；credit assignment 决定已有结果怎样归因到动作。添加中间分数后，如果训练器仍把它们求和为一个轨迹 scalar，再广播同一优势，局部 credit 依然不存在。反过来，Turn-PPO 不需要手工中间 reward，也能靠 critic/GAE 做局部归因。</p>
+                        </div>
+                    </details>
+                    <details>
+                        <summary>当前 PRM-Lite 算不算真正的 PRM？</summary>
+                        <div class="details-body">
+                            <p><span class="answer-lead">严格说不算 learned PRM，更准确是规则式 trajectory shaping。</span>它先对 action history 中的重复、data chain、recovery 等事件打分，再取整条轨迹均值，与 outcome 按 <code>outcome + 0.3 * process</code> 融合；标准 GRPO 随后广播一个组优势。它能改善轨迹排序、提供可解释诊断，但没有过程标签训练、泛化校准和逐 Turn advantage 接线。</p>
+                        </div>
+                    </details>
+                    <details>
+                        <summary>PRM 和 Turn-PPO critic 有什么区别？</summary>
+                        <div class="details-body">
+                            <p>Turn critic 估计当前 policy 下的 $V^\pi(s_t)$，目标来自 RL return/TD，随 policy 变化而变化；Agent PRM 通常评价状态—动作前缀的质量、promise 或 progress，可由 continuation outcome、可执行 action pair 和过程标签训练，也能独立用于 best-of-N。二者都可能长得像“成功概率”，但训练数据、条件变量、policy dependence 和使用路径不同，不能因为输出一个 scalar 就互换。</p>
+                        </div>
+                    </details>
+                    <details>
+                        <summary>没有人工逐步标签，怎样训练 Agent PRM？</summary>
+                        <div class="details-body">
+                            <p>在每个真实 Turn 前缀采样多个 continuation，用规则 verifier 的成功率近似 promise；对工具参数、候选航班和恢复动作构造可执行 counterfactual pair；DB delta 与 policy compliance 提供硬标签；只有礼貌、解释和自然交互等不可执行维度才交给人工/独立 Judge。要保存 continuation policy 与 $K$，并用不确定性处理二值 Monte Carlo 的高方差。</p>
+                        </div>
+                    </details>
+                    <details>
+                        <summary>PRM 应直接加到环境 reward 吗？</summary>
+                        <div class="details-body">
+                            <p>不应一开始就直接加。先验证它在 holdout 轨迹上能正确排序、定位最早错误，并用 best-of-N 证明对 verifier outcome 有正向作用；随后冻结版本、限制权重、逐 Turn 对齐进入 RL，终局 verifier 保持主锚点。直接相加会同时改变奖励目标、尺度和方差，一旦结果变好或变坏都很难归因。</p>
+                        </div>
+                    </details>
+                    <details>
+                        <summary>User Simulator 为什么不能直接等同于 Judge？</summary>
+                        <div class="details-body">
+                            <p>Simulator 的任务是根据隐藏意图和历史产生下一个用户 observation；Judge 的任务是评估质量。二者目标不同。UserRL 原方法由规则 Gym 产生 reward，而不是让 simulator 自评。同一个模型兼任两者还可能偏好自己的表达风格、忽略工具真值，因此只能作为经校准的辅助信号。</p>
+                        </div>
+                    </details>
+                    <details>
+                        <summary>为什么更强的 LLM 不一定是更好的用户模拟器？</summary>
+                        <div class="details-body">
+                            <p>更强模型往往更能猜懂 Agent、不经询问就补全信息、容忍含糊问题并推动任务成功，这会把环境变成 easy mode。用户模拟器的评价目标应是 goal consistency、披露策略、歧义/纠正/耐心等行为分布，以及用它训练的 policy 在 holdout simulator 与真人上的效用，而不是 simulator 自身语言能力或会话成功率。</p>
+                        </div>
+                    </details>
+                    <details>
+                        <summary>如何防止 Actor 过拟合用户模拟器？</summary>
+                        <div class="details-body">
+                            <p>主消融固定 simulator 版本保证可归因；训练时使用有明确行为潜变量的 simulator pool；评测切换未见 prompt/model 与真人小样本；记录 slot 泄露、goal drift 和 stop 原因；检查 Actor 是否使用固定措辞诱导额外信息。训练 S1→评测 S1 很高但 S2/S3 骤降，就是 co-adaptation，不是算法泛化。</p>
+                        </div>
+                    </details>
+                    <details>
+                        <summary>用户模拟器和 Judge 可以用同一个基座模型吗？</summary>
+                        <div class="details-body">
+                            <p>工程上能用，但不能把它当成独立证据。同一模型可能偏好自己的表达方式、共享相同知识盲点，并让“被自己模拟出来的会话被自己评高”形成相关偏差。若因资源必须复用，应使用不同 prompt/context、隐藏角色、独立规则 verifier，并通过异构模型与人工样本校准；算法主结论仍以可执行业务真值为准。</p>
+                        </div>
+                    </details>
+                    <details>
+                        <summary>Simulator、PRM 和 Actor 都要迭代，为什么不端到端一起训？</summary>
+                        <div class="details-body">
+                            <p>因为三方同时变化会让环境转移、奖励函数和策略分布一起非平稳，训练 reward 无法解释。工程上按版本冻结：固定 simulator 收数据，训练并校准 PRM，冻结 PRM 更新 Actor，再用 holdout simulator/真人审计；新失败进入下一版本 replay。分阶段慢一些，但能定位是环境、监督还是优化器造成变化。</p>
+                        </div>
+                    </details>
+                    <details>
+                        <summary>为什么不直接对 tool error 给负奖励？</summary>
+                        <div class="details-body">
+                            <p>工具错误有多类：格式错误、参数错误、业务拒绝、暂时不可用和能够暴露约束的可恢复错误。统一判负会鼓励模型少用工具或遇错放弃。应结合错误类型、后续恢复和终局状态；局部惩罚也不能覆盖最终 verifier。</p>
+                        </div>
+                    </details>
+                    <details>
+                        <summary>Turn-PPO 的 critic 和 TRACE 的 reference probe 有什么本质区别？</summary>
+                        <div class="details-body">
+                            <p>critic 通过 RL 数据学习期望未来回报 $V^\pi(s)$，随 policy 和任务分布更新，可能有 bootstrapping bias。TRACE 的 reference 冻结，不预测回报，只测 gold target 在当前前缀下是否更可预测；它更像稳定的 task-progress proxy，偏差来自 target 与 reference 的语义能力。</p>
+                        </div>
+                    </details>
+                    <details>
+                        <summary>为什么整轮 response ratio 可能不稳定？</summary>
+                        <div class="details-body">
+                            <p>整轮概率比是 token ratio 的乘积，即 log-ratio 的求和。响应越长，方差与极端值越容易积累，导致更多 clipping 或数值溢出风险。实现应在 log space 计算并监控长度分桶；任何几何平均或长度归一化都应作为明确消融，而非静默改写基线。</p>
+                        </div>
+                    </details>
+                    <details>
+                        <summary>如何处理一组 rollout 全是 0 或全是 1？</summary>
+                        <div class="details-body">
+                            <p>先记录 effective group ratio，因为这是任务难度、探索与 group size 的诊断信号。可调整采样温度、课程难度、group size 或任务分层。不要随意加噪声奖励伪造组内差异；Turn-PPO 的 critic 或外部局部监督能缓解局部信号缺失，但终局组退化仍需单独监控。</p>
+                        </div>
+                    </details>
+                    <details>
+                        <summary>如何防止 Agent 学会刷中间进展而不完成任务？</summary>
+                        <div class="details-body">
+                            <p>终局规则 verifier 始终作为锚点；local credit 只做辅助并有界；对重复检索、无效澄清和写操作回避做对抗测试；分别记录 outcome/local components；在 unseen 任务上检查是否真正完成，而不是只提高 Judge 或 prefix score。</p>
+                        </div>
+                    </details>
+                    <details>
+                        <summary>SFT cold start 为什么仍然重要？</summary>
+                        <div class="details-body">
+                            <p>如果初始 policy 不会稳定地产生合法工具格式、遵守基本业务流程，绝大多数 rollout 都失败，组内 reward 退化，critic/TRACE 也只能在低质量前缀上学习。SFT 先建立可探索的行为支持，RL 再优化决策与恢复策略；但 SFT 数据与评测 task 必须防止污染。</p>
+                        </div>
+                    </details>
+                    <details>
+                        <summary>如何证明方法不是只记住 task 模板？</summary>
+                        <div class="details-body">
+                            <p>按用户、约束组合和任务 ID 做严格 seen/unseen；检查训练数据污染；做参数扰动与 counterfactual tasks；再测 airline→retail 或新工具 schema 的迁移。除了 pass@1，还看策略 compliance、错误恢复和工具使用效率是否同时改善。</p>
+                        </div>
+                    </details>
+                    <details>
+                        <summary>如果线上 rollout 是异步的，怎么控制 off-policy 偏差？</summary>
+                        <div class="details-body">
+                            <p>给每条轨迹记录 behavior policy version 和生成时 log-prob；计算 current/behavior ratio；限制最大 policy lag；拒绝或降权过期样本；监控 ratio、KL 与 clip fraction。KL reference 只负责策略锚定，不等于 behavior correction。</p>
+                        </div>
+                    </details>
+                    <details>
+                        <summary>你会如何把三种方案排优先级？</summary>
+                        <div class="details-body">
+                            <p>先跑 outcome-only GRPO 作为预算等价基线；当前 τ-bench 有强终局 verifier，因此优先 Turn-PPO。只有能把业务中间状态可靠规则化时才做完整 UserRL；LLM Judge 先做离线诊断。TRACE 先验证 canonical target score 是否能正确排序关键 Turn 与错误恢复，再进入在线训练。</p>
+                        </div>
+                    </details>
+                </div>
+            </section>
+
+            <section id="speech">
+                <p class="section-kicker">13 · Ready-to-use answer</p>
+                <h2>两分钟面试回答模板</h2>
+                <div class="speech">
+                    我理解的 Agentic RL，核心不是对长回答做 RLHF，而是把模型放进一个真实的序列决策闭环。模型每一轮基于完整历史决定要回复、澄清还是调用工具，环境返回用户或工具 observation，并可能改变数据库状态，所以更适合用 Turn-MDP 或 POMDP 来建模。<br><br>
+                    我会把五层分开。第一层是用户模拟器、工具和数据库，它们定义训练分布；第二层是规则 verifier，判断最终业务是否真的完成；第三层是 PRM/credit estimator，判断中间哪个动作提升了成功概率；第四层是 PPO/GRPO 的 ratio、clipping、KL 与 mask，把信号变成梯度；第五层是跨 simulator、跨任务和真人评测，验证没有共适应。标准 GRPO 是很好的 outcome baseline，但它把同一个组相对优势广播给整条轨迹，不能区分正确搜索、错误付款和后续恢复。<br><br>
+                    局部 credit 有四条代表路线。Turn-PPO 在 Turn 边界训练 critic，用终局 0/1 做 GAE；UserRL 要求 Gym 提供规则化逐 Turn 进展；TRACE 用冻结 reference 测量 canonical target 在不同前缀下是否更容易预测；learned Agent PRM 则可用 continuation 成功率和可执行 counterfactual pair 学习动作 promise/progress，并用于 rerank 或训练。PRM 不能只看 assistant 文本，还要看到工具结果和 DB delta；终局 verifier 始终是防 reward hacking 的锚点。当前仓库的 PRM-Lite 是规则式 trajectory shaping，不是完整 learned PRM，因为事件取均值后仍以终局 scalar 进入 GRPO；LATA 也只是位置权重，不能直接宣称精确 Turn credit。<br><br>
+                    用户模拟器同样决定上限。模型越强不一定越像真人：它可能过度理解、主动补全和配合，使任务变成 easy mode。主消融必须固定 simulator model/prompt/decoding；训练后再换 holdout simulator 和真人小样本做 cross-play，并监控 slot 泄露、goal drift、歧义、纠正和停止行为。对当前项目，我会先锁定环境与 verifier，复现 outcome-only GRPO；以严格 Turn-PPO 为主线，把 UserRL 与 TRACE 做独立监督消融；把 PRM-Lite 当弱监督基线，再构建可校准的 learned PRM，先做 best-of-N、再小权重接入 Turn credit。评价最终看 unseen verifier pass@1、错误恢复、政策合规、PRM 校准和 simulator cross-play gap，而不是只看训练 reward。
+                </div>
+
+                <h3>如果只剩 30 秒</h3>
+                <div class="one-liner">
+                    Agentic RL 是在交互环境中优化长程决策。用户模拟器决定训练分布，规则 verifier 锁定最终业务真值，PRM/critic/TRACE 决定中间信用，PPO/GRPO 决定信号如何进入梯度。当前 τ-bench 应固定 simulator 做 outcome GRPO 基线，以 Turn-PPO 为主线；PRM-Lite 只算规则 shaping，learned PRM 要先用可执行标签校准并做 rerank，再接入 Turn credit；最终必须用 holdout simulator 和真人样本检验是否真正泛化。
+                </div>
+            </section>
+
+            <section id="sources">
+                <p class="section-kicker">14 · Source map</p>
+                <h2>材料与实现入口</h2>
+                <p class="lead">原始方案保留探索脉络；三个技术报告负责校正论文语义、当前分支实现和 τ-bench 适配；PRM 与用户模拟器部分则同时依据当前源码和一手论文。论文提供方法边界，当前仓库代码决定“项目现在实际上做了什么”。</p>
+                <ul class="source-list">
+                    <li><a href="scheme-analysis.html">原始三方案深度解析</a>：早期方案地图与数据集背景。</li>
+                    <li><a href="tech-report-turnppo.html">Turn-PPO × τ-bench 技术报告</a>：严格 Turn-MDP、critic、GAE 与代码闭环。</li>
+                    <li><a href="tech-report-userrl.html">UserRL × τ-bench 技术报告</a>：官方方法、Judge 扩展与奖励语义审计。</li>
+                    <li><a href="tech-report-trace.html">TRACE × τ-bench 技术报告</a>：gold-prefix scoring、log-ratio TD 与 canonical target。</li>
+                    <li><a href="https://github.com/iOPEN-Xing/agentic-rl/blob/codex/turn-level-reward/agentic-grpo-longhorizon/examples/turn_ppo_reference.py">Turn-PPO 可读参考实现</a>。</li>
+                    <li><a href="https://github.com/iOPEN-Xing/agentic-rl/blob/codex/user-simulator-judge/agentic-grpo-longhorizon/src/envs/user_simulator_judge.py">当前 User Simulator / Judge 扩展</a>。</li>
+                    <li><a href="https://github.com/iOPEN-Xing/agentic-rl/blob/codex/hybrid-advantage/verl/verl/trainer/ppo/hybrid_advantage.py">当前 TRACE / Hybrid Advantage 实现</a>。</li>
+                    <li><a href="https://github.com/iOPEN-Xing/agentic-rl/blob/codex/hybrid-advantage/agentic-grpo-longhorizon/scripts/train/grpo/build_grpo_parquet.py">TRACE canonical target 构造</a>。</li>
+                    <li><a href="../agentic-grpo-longhorizon/src/envs/tau_bench_interaction.py">当前 PRM-Lite 规则与奖励融合</a>。</li>
+                    <li><a href="../verl/verl/trainer/ppo/core_algos.py">当前标准 GRPO / LATA advantage 接线</a>。</li>
+                    <li><a href="../tau-bench/tau_bench/envs/user.py">当前用户模拟器实现</a>。</li>
+                    <li><a href="../tau-bench/tau_bench/envs/base.py">当前环境终局 Verifier</a>。</li>
+                    <li><a href="https://arxiv.org/html/2512.17008v2">Turn-PPO 原论文</a>。</li>
+                    <li><a href="https://arxiv.org/html/2509.19736">UserRL 原论文</a>。</li>
+                    <li><a href="https://arxiv.org/html/2607.13988v1">TRACE 原论文</a>。</li>
+                    <li><a href="https://arxiv.org/abs/2402.03300">DeepSeekMath / GRPO 原论文</a>。</li>
+                    <li><a href="https://arxiv.org/abs/2406.12045">τ-bench 原论文</a>：动态模拟用户、工具/数据库环境、终局状态验证与 pass^k。</li>
+                    <li><a href="https://github.com/sierra-research/tau-bench">τ-bench 官方仓库</a>：环境与 simulator 策略；当前上游已提示 legacy tasks，应将本地版本固定为实验事实源。</li>
+                    <li><a href="https://arxiv.org/abs/2305.20050">Let’s Verify Step by Step</a>：过程监督与结果监督的经典比较，主要证据来自数学推理场景。</li>
+                    <li><a href="https://arxiv.org/abs/2312.08935">Math-Shepherd</a>：自动过程标签、步骤验证与 step-level PPO。</li>
+                    <li><a href="https://arxiv.org/abs/2502.10325">Process Reward Models for LLM Agents</a>：面向 Agent 的 continuation/Monte-Carlo 过程目标与策略迭代。</li>
+                    <li><a href="https://github.com/sanjibanc/agent_prm">AgentPRM 官方代码</a>：rollout/target、PRM training、policy RL 三阶段循环。</li>
+                    <li><a href="https://arxiv.org/abs/2511.08325">AgentPRM via Step-Wise Promise and Progress</a>：Agent 步骤无唯一正确标签时的 promise/progress 视角。</li>
+                    <li><a href="https://arxiv.org/abs/2601.12294">ToolPRMBench</a>：工具调用 PRM 的合理错误动作、离线错误与在线失败评测。</li>
+                    <li><a href="https://arxiv.org/abs/2603.11245">Mind the Sim2Real Gap</a>：真人与多种 τ-bench 用户模拟器的行为差异研究。</li>
+                    <li><a href="https://arxiv.org/abs/2605.09808">Quantifying the Utility of User Simulators</a>：以训练后真人效用衡量模拟器质量与 cross-simulator 泛化。</li>
+                    <li><a href="https://arxiv.org/abs/2605.20204">RealUserSim</a>：真实行为 grounding、directive amplification 与隐藏失败。</li>
+                </ul>
+                <div class="callout">
+                    <p><strong>版本说明：</strong>本文是面试与技术总览，不替代三个逐代码技术报告。原始 <code>scheme-analysis.html</code> 中“User Simulator as Judge”和旧 Hybrid Advantage 描述属于早期方案假设；当前本地 τ-bench 版本是项目实验的 source of truth，但上游已经把 legacy tasks 标为过时并推荐后续基准，因此现阶段不要改数据集破坏可比性，完成主线后再增加新版环境的外部有效性验证。</p>
+                </div>
+            </section>
+        </main>
+
+        <footer>
+            Agentic RL / Multi-turn Reinforcement Learning · Interview Edition<br>
+            基于当前项目静态实现、τ-bench 案例、PRM / Simulator 一手研究与三份技术报告整理 · 2026-07-31
+        </footer>
+    </div>
+
+    <script type="module">
+        import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs";
+        mermaid.initialize({
+            startOnLoad: true,
+            securityLevel: "loose",
+            theme: "base",
+            themeVariables: {
+                primaryColor: "#e5f3f8",
+                primaryTextColor: "#132238",
+                primaryBorderColor: "#1976a3",
+                lineColor: "#587181",
+                secondaryColor: "#e3f6f2",
+                tertiaryColor: "#fff0e4",
+                fontFamily: "Inter, PingFang SC, Microsoft YaHei, sans-serif"
+            }
+        });
+    </script>
+</body>
+</html>

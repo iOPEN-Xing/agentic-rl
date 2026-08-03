@@ -1,0 +1,2015 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="基于19页材料重构的多轮对话强化学习智能客服深度解读，覆盖业务问题、流程复现、模拟器、奖励、训练、评估、案例、工程卡点与未来路线。">
+  <title>多轮对话 RL 智能客服｜流程复现与深度解读</title>
+  <script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+  <script src="https://unpkg.com/lucide@0.468.0/dist/umd/lucide.min.js"></script>
+  <script>
+    window.MathJax = {
+      tex: {
+        inlineMath: [['\\(', '\\)']],
+        displayMath: [['\\[', '\\]']]
+      },
+      svg: { fontCache: 'global' }
+    };
+  </script>
+  <script defer src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-svg.js"></script>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #eeece8;
+      --surface: #fffefa;
+      --surface-2: #eceff0;
+      --surface-3: #f7f6f2;
+      --ink: #242729;
+      --muted: #656565;
+      --line: #d9d5ce;
+      --line-strong: #bdb7ae;
+      --nav: #24292b;
+      --nav-muted: #c7cbc8;
+      --teal: #9b4d3b;
+      --teal-soft: #f6e9e4;
+      --blue: #356579;
+      --blue-soft: #e8f0f2;
+      --coral: #b75c40;
+      --coral-soft: #f8e9e3;
+      --gold: #8d671f;
+      --gold-soft: #f6efdc;
+      --green: #3e7553;
+      --green-soft: #e8f1e9;
+      --red: #9f454a;
+      --red-soft: #f6e7e8;
+      --shadow: 0 10px 28px rgba(45, 40, 34, 0.10);
+      --sidebar-w: 282px;
+      --topbar-h: 58px;
+    }
+
+    html[data-theme="dark"] {
+      color-scheme: dark;
+      --bg: #181716;
+      --surface: #211f1d;
+      --surface-2: #2b2926;
+      --surface-3: #1d1c1a;
+      --ink: #f1eee8;
+      --muted: #bbb5ac;
+      --line: #403c37;
+      --line-strong: #5a554e;
+      --nav: #141515;
+      --nav-muted: #bbbdb9;
+      --teal: #df8b71;
+      --teal-soft: #442c25;
+      --blue: #86b6c7;
+      --blue-soft: #24383e;
+      --coral: #e18a6e;
+      --coral-soft: #452d27;
+      --gold: #dbb96d;
+      --gold-soft: #3d3421;
+      --green: #8fc49c;
+      --green-soft: #26382b;
+      --red: #e7969a;
+      --red-soft: #46292c;
+      --shadow: 0 8px 24px rgba(0, 0, 0, 0.25);
+    }
+
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; scroll-padding-top: 78px; }
+    body {
+      margin: 0;
+      color: var(--ink);
+      background: var(--bg);
+      font-family: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", Arial, sans-serif;
+      font-size: 16px;
+      line-height: 1.76;
+      letter-spacing: 0;
+    }
+    a { color: var(--blue); text-underline-offset: 3px; }
+    button, input, summary { font: inherit; }
+    button { letter-spacing: 0; }
+    img { display: block; max-width: 100%; }
+    code, .mono { font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace; }
+    code {
+      padding: 2px 5px;
+      border: 1px solid var(--line);
+      border-radius: 4px;
+      color: var(--teal);
+      background: var(--surface-2);
+      font-size: 0.9em;
+    }
+    :focus-visible { outline: 3px solid var(--blue); outline-offset: 2px; }
+
+    #reading-progress {
+      position: fixed;
+      inset: 0 auto auto 0;
+      z-index: 100;
+      width: 0;
+      height: 4px;
+      background: var(--coral);
+    }
+
+    .topbar {
+      position: sticky;
+      top: 0;
+      z-index: 50;
+      height: var(--topbar-h);
+      border-bottom: 1px solid var(--line);
+      background: color-mix(in srgb, var(--surface) 94%, transparent);
+      backdrop-filter: blur(14px);
+    }
+    .topbar-inner {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      width: min(1500px, 100%);
+      height: 100%;
+      margin: 0 auto;
+      padding: 0 20px;
+      gap: 16px;
+    }
+    .brand {
+      min-width: 0;
+      color: var(--ink);
+      font-weight: 700;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .brand small { margin-left: 10px; color: var(--muted); font-weight: 500; }
+    .actions { display: flex; align-items: center; gap: 8px; flex: 0 0 auto; }
+    .icon-btn, .command-btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 36px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      color: var(--ink);
+      background: var(--surface);
+      cursor: pointer;
+    }
+    .icon-btn { width: 36px; padding: 0; }
+    .command-btn { gap: 7px; padding: 6px 11px; font-size: 13px; font-weight: 600; }
+    .icon-btn:hover, .command-btn:hover { border-color: var(--line-strong); background: var(--surface-2); }
+    .icon-btn svg, .command-btn svg { width: 17px; height: 17px; }
+    #nav-toggle { display: inline-flex; }
+
+    .layout {
+      display: grid;
+      grid-template-columns: var(--sidebar-w) minmax(0, 1fr);
+      width: min(1500px, 100%);
+      margin: 0 auto;
+      min-height: calc(100vh - var(--topbar-h));
+      transition: grid-template-columns 0.22s ease;
+    }
+    .sidebar {
+      position: sticky;
+      top: var(--topbar-h);
+      align-self: start;
+      width: var(--sidebar-w);
+      height: calc(100vh - var(--topbar-h));
+      padding: 28px 20px 36px;
+      overflow-y: auto;
+      color: #eff7f6;
+      background: var(--nav);
+      transition: width 0.22s ease, padding 0.22s ease, opacity 0.16s ease, visibility 0.16s ease;
+    }
+    .sidebar-label {
+      margin: 0 10px 12px;
+      color: var(--nav-muted);
+      font-size: 12px;
+      font-weight: 700;
+    }
+    .toc { display: grid; gap: 3px; }
+    .toc a {
+      display: grid;
+      grid-template-columns: 24px minmax(0, 1fr);
+      align-items: start;
+      gap: 8px;
+      padding: 8px 10px;
+      border-radius: 5px;
+      color: var(--nav-muted);
+      font-size: 13px;
+      line-height: 1.45;
+      text-decoration: none;
+    }
+    .toc a:hover, .toc a.active { color: #ffffff; background: rgba(255,255,255,0.10); }
+    .toc a.active { box-shadow: inset 3px 0 0 #d57b5f; }
+    .toc-num { color: #d99277; font-variant-numeric: tabular-nums; }
+    .sidebar-meta {
+      margin: 26px 10px 0;
+      padding-top: 18px;
+      border-top: 1px solid rgba(255,255,255,0.14);
+      color: var(--nav-muted);
+      font-size: 12px;
+    }
+
+    .content { min-width: 0; background: var(--surface); }
+    .chapter > *, .doc-header > *, .page-footer > * {
+      width: min(1100px, 100%);
+      margin-left: auto;
+      margin-right: auto;
+    }
+    .doc-header {
+      padding: 54px clamp(28px, 6vw, 88px) 44px;
+      color: #f7f3ed;
+      background: #2d2b28;
+      border-bottom: 5px solid #bd6549;
+    }
+    .kicker {
+      margin: 0 0 10px;
+      color: #e3a488;
+      font-size: 13px;
+      font-weight: 700;
+    }
+    h1 {
+      max-width: 1000px;
+      margin: 0;
+      font-size: 42px;
+      line-height: 1.18;
+      letter-spacing: 0;
+    }
+    .doc-deck {
+      max-width: 980px;
+      margin: 18px 0 0;
+      color: #d8d2ca;
+      font-size: 18px;
+    }
+    .header-meta {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px 18px;
+      margin-top: 24px;
+      color: #c5bfb7;
+      font-size: 13px;
+    }
+    .header-meta span { display: inline-flex; align-items: center; gap: 6px; }
+    .header-meta svg { width: 15px; height: 15px; }
+
+    .summary-strip {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      border-bottom: 1px solid var(--line);
+      background: var(--surface-3);
+    }
+    .summary-item { min-width: 0; padding: 22px clamp(18px, 3vw, 34px) 24px; border-right: 1px solid var(--line); }
+    .summary-item:last-child { border-right: 0; }
+    .summary-label { display: block; margin-bottom: 7px; color: var(--coral); font-size: 12px; font-weight: 700; }
+    .summary-item strong { display: block; color: var(--ink); font-size: 18px; line-height: 1.35; }
+    .summary-item > span:last-child { display: block; margin-top: 7px; color: var(--muted); font-size: 13px; line-height: 1.6; }
+
+    .chapter {
+      padding: 54px clamp(28px, 6vw, 88px) 62px;
+      border-bottom: 1px solid var(--line);
+      background: var(--surface);
+    }
+    .chapter:nth-of-type(even) { background: var(--surface-3); }
+    .chapter-head { max-width: 1040px; margin-bottom: 34px; }
+    .chapter-no { margin: 0 0 8px; color: var(--coral); font-size: 13px; font-weight: 700; }
+    h2 { margin: 0; font-size: 32px; line-height: 1.3; letter-spacing: 0; }
+    .chapter-lead { max-width: 940px; margin: 14px 0 0; color: var(--muted); font-size: 17px; }
+    h3 { margin: 34px 0 12px; font-size: 23px; line-height: 1.4; letter-spacing: 0; }
+    h4 { margin: 24px 0 8px; font-size: 17px; line-height: 1.45; letter-spacing: 0; }
+    p { margin: 10px 0; }
+    ul, ol { margin: 10px 0; padding-left: 22px; }
+    li { margin: 7px 0; }
+    strong { font-weight: 700; }
+
+    .source-page {
+      max-width: 1100px;
+      margin-top: 44px;
+      padding-top: 34px;
+      border-top: 2px solid var(--line-strong);
+    }
+    .source-page:first-of-type { margin-top: 20px; }
+    .page-heading {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 20px;
+      margin-bottom: 18px;
+    }
+    .page-heading h3 { margin: 0; }
+    .page-id {
+      flex: 0 0 auto;
+      min-width: 58px;
+      padding: 6px 9px;
+      border: 1px solid var(--line-strong);
+      border-radius: 4px;
+      color: var(--muted);
+      background: var(--surface);
+      font-size: 12px;
+      font-weight: 700;
+      text-align: center;
+    }
+    .labels { display: flex; flex-wrap: wrap; gap: 7px; margin: 12px 0 18px; }
+    .label {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      padding: 4px 7px;
+      border-radius: 3px;
+      font-size: 12px;
+      font-weight: 700;
+    }
+    .label.fact { color: var(--blue); background: var(--blue-soft); }
+    .label.analysis { color: var(--teal); background: var(--teal-soft); }
+    .label.sim { color: var(--gold); background: var(--gold-soft); }
+    .label.check { color: var(--coral); background: var(--coral-soft); }
+
+    .takeaway {
+      margin: 18px 0 22px;
+      padding: 18px 20px;
+      border-left: 4px solid var(--teal);
+      background: var(--teal-soft);
+    }
+    .takeaway strong { color: var(--teal); }
+    .callout {
+      margin: 20px 0;
+      padding: 16px 18px;
+      border: 1px solid var(--line);
+      border-left: 4px solid var(--blue);
+      background: var(--blue-soft);
+    }
+    .callout.warn { border-left-color: var(--gold); background: var(--gold-soft); }
+    .callout.danger { border-left-color: var(--red); background: var(--red-soft); }
+    .callout.success { border-left-color: var(--green); background: var(--green-soft); }
+    .callout-title { display: flex; align-items: center; gap: 7px; margin-bottom: 5px; font-weight: 700; }
+    .callout-title svg { width: 17px; height: 17px; }
+
+    .grid-2, .grid-3, .metric-grid, .compare-grid {
+      display: grid;
+      gap: 14px;
+      margin: 20px 0;
+    }
+    .grid-2, .compare-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .grid-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    .metric-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+    .panel, .metric, .compare-pane {
+      min-width: 0;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: var(--surface);
+    }
+    .panel { padding: 18px; }
+    .panel h4 { margin-top: 0; }
+    .metric { padding: 15px; }
+    .metric .value { display: block; color: var(--teal); font-size: 24px; font-weight: 700; line-height: 1.2; }
+    .metric .delta { color: var(--green); font-size: 12px; font-weight: 700; }
+    .metric .delta.bad { color: var(--red); }
+    .metric .name { display: block; margin-top: 6px; color: var(--muted); font-size: 12px; }
+    .compare-pane { overflow: hidden; }
+    .compare-pane header { padding: 12px 15px; border-bottom: 1px solid var(--line); font-weight: 700; }
+    .compare-pane.good header { color: var(--green); background: var(--green-soft); }
+    .compare-pane.bad header { color: var(--red); background: var(--red-soft); }
+    .compare-pane .body { padding: 15px; }
+
+    .diagram-frame {
+      margin: 24px 0;
+      padding: 20px;
+      overflow-x: auto;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: var(--surface);
+    }
+    .diagram-title { margin: 0 0 14px; color: var(--muted); font-size: 13px; font-weight: 700; }
+    .mermaid { min-width: 680px; text-align: center; }
+    .mermaid svg {
+      display: block;
+      width: auto !important;
+      max-width: 100% !important;
+      max-height: 760px;
+      height: auto !important;
+      margin: 0 auto;
+    }
+    .overview-diagram .mermaid { min-width: 760px; }
+    .overview-diagram .mermaid svg { max-height: 620px; }
+    .overview-diagram { padding-bottom: 16px; }
+    .overview-vector {
+      display: block;
+      width: 100%;
+      min-width: 1020px;
+      height: auto;
+      margin: 0 auto;
+      color: var(--ink);
+      font-family: Inter, "PingFang SC", "Microsoft YaHei", sans-serif;
+    }
+    .overview-vector .lane-chip { fill: var(--surface-3); stroke: var(--line-strong); }
+    .overview-vector .lane-chip.main { fill: var(--blue-soft); stroke: var(--blue); }
+    .overview-vector .lane-chip.reward { fill: var(--gold-soft); stroke: var(--gold); }
+    .overview-vector .lane-copy { fill: var(--muted); font-size: 13px; font-weight: 700; }
+    .overview-vector .lane-copy.main { fill: var(--blue); }
+    .overview-vector .lane-copy.reward { fill: var(--gold); }
+    .overview-vector .node { stroke-width: 1.6; }
+    .overview-vector .node.data { fill: var(--blue-soft); stroke: var(--blue); }
+    .overview-vector .node.policy { fill: var(--teal-soft); stroke: var(--teal); stroke-width: 2; }
+    .overview-vector .node.env { fill: var(--green-soft); stroke: var(--green); }
+    .overview-vector .node.reward { fill: var(--gold-soft); stroke: var(--gold); }
+    .overview-vector .node-copy {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      width: 100%;
+      height: 100%;
+      padding: 7px 9px;
+      color: var(--ink);
+      font-size: 13px;
+      line-height: 1.35;
+      text-align: center;
+    }
+    .overview-vector .node-copy strong { font-size: 14px; line-height: 1.25; }
+    .overview-vector .node-copy small { margin-top: 4px; color: var(--muted); font-size: 11px; line-height: 1.3; }
+    .overview-vector .node-copy.left { align-items: flex-start; text-align: left; }
+    .overview-vector .edge {
+      fill: none;
+      stroke: var(--muted);
+      stroke-width: 2;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+    }
+    .overview-vector .edge.main { stroke-width: 2.5; }
+    .overview-vector .edge.data { stroke: var(--blue); }
+    .overview-vector .edge.annotation { stroke-dasharray: 6 5; }
+    .overview-vector .edge.env { stroke: var(--green); }
+    .overview-vector .edge.reward { stroke: var(--gold); }
+    .overview-vector .edge.feedback { stroke: var(--gold); stroke-dasharray: 8 7; }
+    .overview-vector .edge-label { fill: var(--muted); font-size: 11px; font-weight: 700; }
+    .overview-vector .edge-label.data { fill: var(--blue); }
+    .overview-vector .edge-label.env { fill: var(--green); }
+    .overview-vector .edge-label.reward { fill: var(--gold); }
+    .overview-vector .legend-copy { fill: var(--muted); font-size: 11px; }
+    .stacked-diagram .mermaid { min-width: 760px; }
+    .stacked-diagram .mermaid svg { max-height: 720px; }
+    .scroll-diagram .mermaid, .scroll-diagram .mermaid svg {
+      width: 1260px !important;
+      min-width: 1260px;
+      max-width: none !important;
+      max-height: none;
+    }
+
+    .table-wrap { width: 100%; margin: 20px 0; overflow-x: auto; border: 1px solid var(--line); }
+    table { width: 100%; min-width: 720px; border-collapse: collapse; font-size: 14px; }
+    th, td { padding: 11px 12px; border-right: 1px solid var(--line); border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }
+    th:last-child, td:last-child { border-right: 0; }
+    tr:last-child td { border-bottom: 0; }
+    th { color: var(--ink); background: var(--surface-2); font-weight: 700; }
+    td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+    .good-text { color: var(--green); font-weight: 700; }
+    .bad-text { color: var(--red); font-weight: 700; }
+    .mixed-text { color: var(--gold); font-weight: 700; }
+
+    .formula {
+      margin: 18px 0;
+      padding: 15px 18px;
+      border: 1px solid var(--line);
+      background: var(--surface-2);
+      overflow-x: auto;
+    }
+    .formula-label { display: block; margin-bottom: 8px; color: var(--coral); font-size: 11px; font-weight: 700; }
+    .formula-expression { min-width: max-content; font-family: inherit; font-size: 18px; white-space: nowrap; }
+    .formula-expression mjx-container { margin: 0 !important; text-align: left !important; }
+    .formula-defs { margin-top: 10px; color: var(--muted); font-size: 13px; }
+    .formula-defs code { color: inherit; }
+    .formula-note { margin: 9px 0 0; color: var(--muted); font-family: inherit; font-size: 13px; }
+    .dialogue { margin: 20px 0; padding: 18px; border: 1px solid var(--line); background: var(--surface); }
+    .turn { display: grid; grid-template-columns: 72px minmax(0, 1fr); gap: 12px; padding: 11px 0; border-bottom: 1px solid var(--line); }
+    .turn:last-child { border-bottom: 0; }
+    .speaker { font-size: 13px; font-weight: 700; }
+    .speaker.user { color: var(--coral); }
+    .speaker.agent { color: var(--teal); }
+    .turn p { margin: 0; }
+    .annotation { display: block; margin-top: 5px; color: var(--muted); font-size: 12px; }
+
+    details { margin: 16px 0; }
+    summary { color: var(--blue); font-weight: 700; cursor: pointer; }
+    .timeline { margin: 22px 0; border-left: 2px solid var(--line-strong); }
+    .timeline-item { position: relative; padding: 0 0 24px 26px; }
+    .timeline-item:last-child { padding-bottom: 0; }
+    .timeline-item::before { content: ""; position: absolute; left: -7px; top: 7px; width: 12px; height: 12px; border-radius: 50%; background: var(--teal); }
+    .timeline-item h4 { margin: 0 0 5px; }
+    .timeline-item p { margin: 0; color: var(--muted); }
+
+    .interview-stack { margin: 28px 0 36px; border-top: 2px solid var(--line-strong); }
+    .interview-answer { padding: 26px 0 28px; border-bottom: 1px solid var(--line); }
+    .interview-answer h3 { margin: 6px 0 12px; font-size: 21px; }
+    .question-no { color: var(--coral); font-size: 12px; font-weight: 700; }
+    .answer-lead { max-width: 980px; font-size: 17px; }
+    .answer-points { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 18px; margin: 18px 0; }
+    .answer-point { padding-top: 12px; border-top: 3px solid var(--line-strong); }
+    .answer-point strong { display: block; margin-bottom: 5px; color: var(--teal); }
+    .answer-point p { margin: 0; color: var(--muted); font-size: 14px; }
+    .evidence-anchor { margin-top: 16px; color: var(--muted); font-size: 13px; }
+    .evidence-anchor a { font-weight: 700; }
+
+    .footnotes { color: var(--muted); font-size: 13px; }
+    .page-footer { padding: 32px clamp(28px, 6vw, 88px); color: var(--muted); background: var(--surface-2); font-size: 13px; }
+    .back-top { position: fixed; right: 18px; bottom: 18px; z-index: 40; opacity: 0; pointer-events: none; transition: opacity 0.2s; }
+    .back-top.visible { opacity: 1; pointer-events: auto; }
+    .chapter > *, .doc-header > *, .page-footer > * { margin-left: auto; margin-right: auto; }
+
+    @media (max-width: 1120px) {
+      .summary-strip { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .summary-item:nth-child(2) { border-right: 0; }
+      .summary-item:nth-child(-n+2) { border-bottom: 1px solid var(--line); }
+      .metric-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .grid-3 { grid-template-columns: 1fr; }
+      .answer-points { grid-template-columns: 1fr; }
+    }
+    @media (min-width: 861px) {
+      body.nav-collapsed .layout { grid-template-columns: 0 minmax(0, 1fr); }
+      body.nav-collapsed .sidebar {
+        width: 0;
+        padding-right: 0;
+        padding-left: 0;
+        opacity: 0;
+        visibility: hidden;
+        pointer-events: none;
+      }
+    }
+    @media (max-width: 860px) {
+      .layout { display: block; }
+      .sidebar {
+        position: fixed;
+        inset: var(--topbar-h) auto 0 0;
+        z-index: 60;
+        width: min(86vw, var(--sidebar-w));
+        height: auto;
+        transform: translateX(-102%);
+        transition: transform 0.22s ease;
+      }
+      body.nav-open .sidebar { transform: translateX(0); }
+      body.nav-open::after { content: ""; position: fixed; inset: var(--topbar-h) 0 0 0; z-index: 55; background: rgba(0,0,0,0.42); }
+      .doc-header { padding-top: 42px; }
+      h1 { font-size: 34px; }
+      .brand small { display: none; }
+    }
+    @media (max-width: 640px) {
+      body { font-size: 15px; }
+      .topbar-inner { padding: 0 12px; }
+      .command-btn span { display: none; }
+      .command-btn { width: 36px; padding: 0; }
+      .doc-header, .chapter { padding-left: 20px; padding-right: 20px; }
+      h1 { font-size: 29px; }
+      .doc-deck { font-size: 16px; }
+      .summary-strip, .metric-grid, .grid-2, .compare-grid { grid-template-columns: 1fr; }
+      .summary-item { border-right: 0; border-bottom: 1px solid var(--line); }
+      .summary-item:last-child { border-bottom: 0; }
+      .page-heading { display: block; }
+      .page-id { display: inline-block; margin-bottom: 8px; }
+      .turn { grid-template-columns: 1fr; gap: 3px; }
+      .diagram-frame { padding: 12px; }
+      .mermaid { min-width: 0; }
+      .wide-diagram .mermaid, .wide-diagram .mermaid svg { min-width: 620px; }
+      .overview-diagram .mermaid, .overview-diagram .mermaid svg { width: 760px !important; min-width: 760px; max-width: none !important; }
+      .stacked-diagram .mermaid, .stacked-diagram .mermaid svg { width: 760px !important; min-width: 760px; max-width: none !important; }
+      .scroll-diagram .mermaid, .scroll-diagram .mermaid svg { width: 1120px !important; min-width: 1120px; }
+    }
+    @media print {
+      .topbar, .sidebar, .back-top, #reading-progress { display: none !important; }
+      .layout { display: block; }
+      .content { width: 100%; }
+      .chapter, .doc-header { break-inside: avoid; }
+      body { background: white; color: black; }
+    }
+  </style>
+</head>
+<body>
+  <div id="reading-progress" aria-hidden="true"></div>
+
+  <header class="topbar" id="top">
+    <div class="topbar-inner">
+      <div style="display:flex;align-items:center;min-width:0;gap:10px;">
+        <button class="icon-btn" id="nav-toggle" aria-label="收起目录" aria-expanded="true" title="收起目录"><i data-lucide="panel-left-close"></i></button>
+        <div class="brand">多轮对话 RL 智能客服 <small>流程复现与深度解读</small></div>
+      </div>
+      <div class="actions">
+        <button class="command-btn" id="print-btn" title="打印或导出 PDF"><i data-lucide="printer"></i><span>打印</span></button>
+        <button class="icon-btn" id="theme-toggle" aria-label="切换明暗主题" title="切换明暗主题"><i data-lucide="moon"></i></button>
+      </div>
+    </div>
+  </header>
+
+  <div class="layout">
+    <aside class="sidebar" aria-label="章节目录">
+      <p class="sidebar-label">章节导航</p>
+      <nav class="toc" id="toc">
+        <a href="#overview"><span class="toc-num">00</span><span>阅读总览与证据边界</span></a>
+        <a href="#chapter-1"><span class="toc-num">01</span><span>业务背景与核心目标</span></a>
+        <a href="#chapter-2"><span class="toc-num">02</span><span>数据、模拟器与奖励</span></a>
+        <a href="#chapter-3"><span class="toc-num">03</span><span>训练框架与离线评估</span></a>
+        <a href="#chapter-4"><span class="toc-num">04</span><span>实验结果与案例拆解</span></a>
+        <a href="#chapter-5"><span class="toc-num">05</span><span>优化认知与工程卡点</span></a>
+        <a href="#chapter-6"><span class="toc-num">06</span><span>未来工作与路线图</span></a>
+        <a href="#interview"><span class="toc-num">07</span><span>面试表达与追问地图</span></a>
+        <a href="#chapter-8"><span class="toc-num">08</span><span>19 页速查与验收表</span></a>
+      </nav>
+      <div class="sidebar-meta">
+        <p>资料范围：用户提供的 19 页源材料。</p>
+        <p>整理原则：材料事实优先；流程图重新绘制；模拟案例显式标注。</p>
+      </div>
+    </aside>
+
+    <main class="content">
+      <header class="doc-header">
+        <p class="kicker">专题讨论 · 深度重构版</p>
+        <h1>基于多轮对话强化学习的智能客服探索</h1>
+        <p class="doc-deck">从“当前回复是否正确”升级为“整段服务是否最终解决问题”：逐页拆解数据回流、个性化用户模拟、多目标奖励、rollout 训练、离在线评估、业务实验与工程风险。</p>
+        <div class="header-meta">
+          <span><i data-lucide="files"></i>19 页原始材料</span>
+          <span><i data-lucide="layers-3"></i>8 个重构章节</span>
+          <span><i data-lucide="workflow"></i>8 张可编辑流程图</span>
+          <span><i data-lucide="message-square-text"></i>模拟案例已单独标注</span>
+        </div>
+      </header>
+
+      <div class="summary-strip" aria-label="核心结论概览">
+        <div class="summary-item"><span class="summary-label">背景</span><strong>客服是长时程决策，不是问答匹配</strong><span>每一轮都在改变业务状态、用户情绪、工具路径和最终解决概率。</span></div>
+        <div class="summary-item"><span class="summary-label">动机</span><strong>单轮最优不等于整段服务最优</strong><span>局部正确的回复仍可能重复追问、过早给方案、虚假承诺或错误终止。</span></div>
+        <div class="summary-item"><span class="summary-label">机制</span><strong>模拟器交互 + 分层奖励 + 轨迹更新</strong><span>用真实难例造任务，让策略在多轮环境探索，再按规则、轮次和会话结果归因。</span></div>
+        <div class="summary-item"><span class="summary-label">效果</span><strong>有方向性收益，但不是全面胜出</strong><span>特定场景转人工和重复显著下降；对回流 SFT 的比较仍有负向指标与证据边界。</span></div>
+      </div>
+
+      <section class="chapter" id="overview" data-section="overview">
+        <div class="chapter-head">
+          <p class="chapter-no">00 · 阅读总览</p>
+          <h2>先把 19 页放回同一条因果链</h2>
+          <p class="chapter-lead">原材料横跨业务、算法、平台和实验。如果只按页面顺序阅读，很容易把“奖励模型”“用户模拟器”“业务指标”当作互不相关的模块。本页先建立统一闭环，再进入逐页解读。</p>
+        </div>
+
+        <div class="takeaway"><strong>核心命题：</strong>智能客服优化对象不是一句话，而是一条带状态、工具、用户情绪和长期目标的服务轨迹。多轮 RL 的价值，是让模型学习何时澄清、何时安抚、何时给方案、何时调用工具、何时终止或转人工。</div>
+
+        <h3>先看结果信号，再看证据边界</h3>
+        <div class="metric-grid" aria-label="原材料中的关键结果信号">
+          <div class="metric"><span class="value">64% → 46%</span><span class="delta">−18 pp</span><span class="name">50 条特定转人工场景；样本量较小</span></div>
+          <div class="metric"><span class="value">53 / 11 / 36</span><span class="delta">+17% 净胜</span><span class="name">100 组人工话术 G / S / B 比较</span></div>
+          <div class="metric"><span class="value">29.95% → 15.60%</span><span class="delta">−14.35 pp</span><span class="name">MTRL V2.0 对照中的重复率</span></div>
+          <div class="metric"><span class="value">并非通吃</span><span class="delta bad">基线依赖</span><span class="name">对回流 SFT 的转人工率与解决率更差</span></div>
+        </div>
+
+        <div class="diagram-frame wide-diagram overview-diagram">
+          <p class="diagram-title">原材料流程复现 01｜数据、模拟器、奖励、训练与上线的完整闭环</p>
+          <svg class="overview-vector" viewBox="0 0 1100 680" role="img" aria-labelledby="overview-vector-title overview-vector-desc">
+            <title id="overview-vector-title">多轮对话强化学习智能客服完整闭环</title>
+            <desc id="overview-vector-desc">中间是从真实会话回流到模型上线的主链，上方是个性化模拟器与离线选模，下方是奖励监督、模拟会话、分层奖励与强化信号。</desc>
+            <defs>
+              <marker id="arrow-main" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="var(--muted)" /></marker>
+              <marker id="arrow-data" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="var(--blue)" /></marker>
+              <marker id="arrow-env" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="var(--green)" /></marker>
+              <marker id="arrow-reward" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="var(--gold)" /></marker>
+            </defs>
+
+            <path class="edge feedback" d="M1060 323 H1080 V70 H20 V323" marker-end="url(#arrow-reward)" />
+            <text class="edge-label reward" x="475" y="58">线上数据自动迭代：上线会话重新进入下一版数据 Pipeline</text>
+
+            <rect class="lane-chip" x="575" y="88" width="278" height="28" rx="14" />
+            <text class="lane-copy" x="714" y="107" text-anchor="middle">支路 A｜个性化交互与离线选模</text>
+            <rect class="lane-chip main" x="20" y="238" width="224" height="28" rx="14" />
+            <text class="lane-copy main" x="132" y="257" text-anchor="middle">主链｜沿中线从左到右阅读</text>
+            <rect class="lane-chip reward" x="90" y="408" width="236" height="28" rx="14" />
+            <text class="lane-copy reward" x="208" y="427" text-anchor="middle">支路 B｜奖励构建与强化信号</text>
+
+            <path class="edge main" d="M160 323 H190" marker-end="url(#arrow-main)" />
+            <path class="edge main" d="M340 323 H370" marker-end="url(#arrow-main)" />
+            <path class="edge main" d="M530 323 H560" marker-end="url(#arrow-main)" />
+            <path class="edge main" d="M700 323 H730" marker-end="url(#arrow-main)" />
+            <path class="edge main" d="M870 323 H920" marker-end="url(#arrow-main)" />
+
+            <path class="edge data" d="M450 280 V190 H568" marker-end="url(#arrow-data)" />
+            <text class="edge-label data" x="462" y="180">画像与任务条件</text>
+            <path class="edge env" d="M610 280 V212" marker-end="url(#arrow-env)" />
+            <text class="edge-label env" x="568" y="244">客服回复</text>
+            <path class="edge env" d="M684 200 V268" marker-end="url(#arrow-env)" />
+            <text class="edge-label env" x="695" y="244">用户 / 骑手反馈</text>
+
+            <path class="edge data" d="M800 280 V226 H842 V210" marker-end="url(#arrow-data)" />
+            <text class="edge-label data" x="808" y="238">候选 checkpoints</text>
+            <path class="edge env" d="M980 210 V242 H990 V280" marker-end="url(#arrow-env)" />
+            <text class="edge-label env" x="990" y="232">选定最优模型</text>
+
+            <path class="edge reward" d="M630 366 V448 H425 V458" marker-end="url(#arrow-reward)" />
+            <text class="edge-label reward" x="472" y="440">多轮交互产出模拟会话</text>
+            <path class="edge data annotation" d="M420 366 V392 H62 V518 H78" marker-end="url(#arrow-data)" />
+            <text class="edge-label data" x="112" y="388">高价值会话 + 运营 / 方案标签</text>
+            <path class="edge reward" d="M185 470 V448 H548" marker-end="url(#arrow-reward)" />
+            <text class="edge-label reward" x="304" y="441">Good / Bad Case 训练与校准</text>
+            <path class="edge reward" d="M510 500 H548" marker-end="url(#arrow-reward)" />
+            <text class="edge-label reward" x="514" y="489">整段会话</text>
+            <path class="edge reward" d="M510 536 H530 V600 H548" marker-end="url(#arrow-reward)" />
+            <text class="edge-label reward" x="492" y="594" text-anchor="end">每轮客服回复</text>
+            <path class="edge reward" d="M750 500 H790 V526 H818" marker-end="url(#arrow-reward)" />
+            <text class="edge-label reward" x="760" y="490">会话结果</text>
+            <path class="edge reward" d="M750 600 H790 V564 H818" marker-end="url(#arrow-reward)" />
+            <text class="edge-label reward" x="760" y="622">轮次质量 + 规则</text>
+            <path class="edge reward" d="M930 500 V450 H800 V378" marker-end="url(#arrow-reward)" />
+            <text class="edge-label reward" x="838" y="442">强化信号</text>
+
+            <rect class="node data" x="20" y="280" width="140" height="86" rx="8" />
+            <foreignObject x="25" y="285" width="130" height="76"><div xmlns="http://www.w3.org/1999/xhtml" class="node-copy"><strong>① 真实会话回流</strong><small>人机对话 · 人人对话</small></div></foreignObject>
+
+            <rect class="node data" x="190" y="280" width="150" height="86" rx="8" />
+            <foreignObject x="195" y="285" width="140" height="76"><div xmlns="http://www.w3.org/1999/xhtml" class="node-copy"><strong>②a 数据预处理</strong><small>清洗 · 脱敏 · 模式对齐</small></div></foreignObject>
+
+            <rect class="node data" x="370" y="280" width="160" height="86" rx="8" />
+            <foreignObject x="375" y="285" width="150" height="76"><div xmlns="http://www.w3.org/1999/xhtml" class="node-copy"><strong>②b 高价值会话筛选</strong><small>困难样本 · 结果完整 · 诉求覆盖</small></div></foreignObject>
+
+            <polygon class="node policy" points="580,280 680,280 700,323 680,366 580,366 560,323" />
+            <foreignObject x="568" y="289" width="124" height="68"><div xmlns="http://www.w3.org/1999/xhtml" class="node-copy"><strong>③ 客服策略模型</strong><small>生成下一步动作与回复</small></div></foreignObject>
+
+            <rect class="node policy" x="730" y="280" width="140" height="86" rx="8" />
+            <foreignObject x="735" y="285" width="130" height="76"><div xmlns="http://www.w3.org/1999/xhtml" class="node-copy"><strong>④ 多轮 RL 训练</strong><small>轨迹更新 · 策略优化</small></div></foreignObject>
+
+            <rect class="node env" x="920" y="280" width="140" height="86" rx="28" />
+            <foreignObject x="925" y="285" width="130" height="76"><div xmlns="http://www.w3.org/1999/xhtml" class="node-copy"><strong>⑥ 最优模型上线</strong><small>灰度发布 · 线上服务</small></div></foreignObject>
+
+            <rect class="node env" x="580" y="130" width="180" height="70" rx="35" />
+            <foreignObject x="588" y="135" width="164" height="60"><div xmlns="http://www.w3.org/1999/xhtml" class="node-copy"><strong>个性化用户 / 骑手模拟器</strong><small>情境 · 诉求 · 情绪 · 终止条件</small></div></foreignObject>
+
+            <rect class="node data" x="800" y="120" width="250" height="90" rx="8" />
+            <foreignObject x="810" y="126" width="230" height="78"><div xmlns="http://www.w3.org/1999/xhtml" class="node-copy"><strong>⑤ 单轮 / 多轮离线评估</strong><small>单轮 GSB · 多轮 GSB · 机评指标<br />输出候选排序与发布门槛</small></div></foreignObject>
+
+            <rect class="node reward" x="90" y="470" width="190" height="95" rx="8" />
+            <foreignObject x="99" y="476" width="172" height="83"><div xmlns="http://www.w3.org/1999/xhtml" class="node-copy left"><strong>奖励监督数据</strong><small><span class="good-text">Good：真实解决 / 用户认可</span><br /><span class="bad-text">Bad：转人工 / 重复 / 越权</span></small></div></foreignObject>
+
+            <rect class="node reward" x="340" y="470" width="170" height="95" rx="8" />
+            <foreignObject x="348" y="476" width="154" height="83"><div xmlns="http://www.w3.org/1999/xhtml" class="node-copy"><strong>模拟会话轨迹</strong><small>Session 1 · Session 2 · …<br />客服回复与环境反馈交替</small></div></foreignObject>
+
+            <rect class="lane-chip reward" x="560" y="414" width="190" height="30" rx="15" />
+            <text class="lane-copy reward" x="655" y="434" text-anchor="middle">两个奖励粒度，职责分开</text>
+            <rect class="node reward" x="560" y="465" width="190" height="70" rx="8" />
+            <foreignObject x="568" y="470" width="174" height="60"><div xmlns="http://www.w3.org/1999/xhtml" class="node-copy"><strong>Session GRM</strong><small>整段解决 · 连贯性 · 用户情绪</small></div></foreignObject>
+
+            <rect class="node reward" x="560" y="565" width="190" height="70" rx="8" />
+            <foreignObject x="568" y="570" width="174" height="60"><div xmlns="http://www.w3.org/1999/xhtml" class="node-copy"><strong>Query GRM + Rule-Based</strong><small>逐轮推进 · 格式 / 权限 / 工具约束</small></div></foreignObject>
+
+            <rect class="node reward" x="830" y="500" width="200" height="90" rx="8" />
+            <foreignObject x="840" y="506" width="180" height="78"><div xmlns="http://www.w3.org/1999/xhtml" class="node-copy"><strong>多目标奖励融合</strong><small>会话结果 × 逐轮质量<br />硬约束先门控</small></div></foreignObject>
+
+            <line class="edge" x1="830" y1="650" x2="870" y2="650" marker-end="url(#arrow-main)" />
+            <text class="legend-copy" x="882" y="654">实线：数据 / 控制 / 训练流</text>
+            <line class="edge feedback" x1="830" y1="672" x2="870" y2="672" marker-end="url(#arrow-reward)" />
+            <text class="legend-copy" x="882" y="676">虚线：上线后的反馈回流</text>
+          </svg>
+        </div>
+        <p class="footnotes"><strong>读图：</strong>第一眼只沿中间主链阅读：“真实会话 → 数据准备 → 客服策略 → 多轮 RL → 上线”。上方支路负责生成个性化用户反馈并对候选 checkpoint 做离线排序；下方支路把 Good/Bad 监督、模拟会话、Session GRM、Query GRM 与规则奖励汇合，形成一次明确的强化信号。最上方唯一虚线把上线数据直接送回 ①，与原图的闭环方向一致。</p>
+
+        <h3>用一条业务 case 贯穿后文</h3>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>系统环节</th><th>基本理论</th><th>骑手摔车、餐损 case 中的具体对象</th><th>后文问题</th></tr></thead>
+            <tbody>
+              <tr><td>状态与种子</td><td>部分可观测决策：模型只能从历史、系统信号和工具结果推断真实状态</td><td>是否受伤、订单是否送达、用户是否取消、餐损是否可核验</td><td>哪些信息必须进入数据 schema？</td></tr>
+              <tr><td>个性化模拟器</td><td>环境响应随策略改变，静态问答不能生成 on-policy 后果</td><td>骑手可能焦虑、拒绝标准话术、要求转人工，也可能在安全确认后配合报备</td><td>模拟器怎样既真实又不迎合策略？</td></tr>
+              <tr><td>多目标奖励</td><td>硬约束优先于软体验，局部推进与最终结果分层归因</td><td>先确认人身风险；不得虚假承诺免责；报备工具成功后才算执行闭环</td><td>一轮说得好和整段真正解决如何同时评分？</td></tr>
+              <tr><td>多轮 rollout</td><td>每条会话是可独立终止的异步状态机</td><td>高风险会话可立即升级；普通餐损会话继续到信息齐全、用户确认、工具执行</td><td>不同长度会话怎样并行且不串状态？</td></tr>
+              <tr><td>评估与上线</td><td>离线排序必须和人工、线上结果方向一致</td><td>既看解决与转人工，也看安全召回、赔付成本、投诉和承诺-执行一致率</td><td>怎样证明收益没有用风险或成本换来？</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div class="grid-3">
+          <div class="panel"><h4>事实层</h4><p>截图中直接给出的流程、指标、实验表格、对话片段与工程卡点。本页面尽量原样保留数字与上下文。</p></div>
+          <div class="panel"><h4>解读层</h4><p>对材料为什么这样设计、指标如何读、潜在因果链和风险边界的说明。它们是基于材料的分析，不等于已被实验验证。</p></div>
+          <div class="panel"><h4>模拟层</h4><p>为了让机制可操作而补充的客服对话、奖励拆分和验收 case。所有模拟内容都带“模拟案例”标签。</p></div>
+        </div>
+
+        <h3>关键术语统一</h3>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>术语</th><th>本页统一解释</th><th>容易混淆的点</th></tr></thead>
+            <tbody>
+              <tr><td>单轮 RL</td><td>主要围绕当前轮输出给奖励并更新策略，历史状态和最终结果的信用分配较弱。</td><td>不等于只能对话一轮；它可以看到历史，但优化信号仍可能局部化。</td></tr>
+              <tr><td>多轮 RL</td><td>客服与用户模拟器多轮交互，基于完整轨迹或轮次分解后的会话奖励更新策略。</td><td>不是“说得更长”，目标是更稳定地推进服务状态。</td></tr>
+              <tr><td>GRM</td><td>Generative Reward Model，使用模型对某轮或整段会话的质量进行生成式评分。</td><td>Query/Turn GRM 与 Session GRM 的评价粒度不同。</td></tr>
+              <tr><td>GSB</td><td>Good / Same / Bad，相对比较候选模型与基线模型的胜、平、负。</td><td>应报告样本量、盲评方式、裁判一致性和置信区间。</td></tr>
+              <tr><td>Reward hacking</td><td>模型利用奖励定义漏洞获得高分，却没有真正完成业务目标。</td><td>奖励变高不等于用户问题被真实解决。</td></tr>
+              <tr><td>Credit assignment</td><td>把最终会话结果合理归因到关键轮次、动作或 token。</td><td>平均分摊会稀释关键决策，也可能奖励无关话术。</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div class="callout warn">
+          <div class="callout-title"><i data-lucide="triangle-alert"></i>数字阅读规则</div>
+          <p>文中同时存在“百分点变化”和“相对变化”。例如 34.39% → 32.14% 是下降 <strong>2.25 个百分点</strong>，相对下降约 <strong>6.54%</strong>。后文会同时标注，避免把两种口径混用。</p>
+        </div>
+      </section>
+
+      <section class="chapter" id="chapter-1" data-section="chapter-1">
+        <div class="chapter-head">
+          <p class="chapter-no">01 · 业务背景与核心目标</p>
+          <h2>从“回答得对”到“服务轨迹有效”</h2>
+          <p class="chapter-lead">本章对应原第 1 页。它定义了为什么要从单轮优化转向多轮优化，以及多轮 RL 真正应该解决什么，而不是泛化成“对话更自然”。</p>
+        </div>
+
+        <article class="source-page" id="page-1">
+          <div class="page-heading"><div><div class="labels"><span class="label fact">原图事实</span><span class="label analysis">深度解读</span></div><h3>第 1 页：业务痛点、潜在收益与总体闭环</h3></div><span class="page-id">P01</span></div>
+          <div class="takeaway"><strong>本页一句话：</strong>客服任务天然是部分可观测、长时程、带业务状态转移的决策问题，单轮最优回复不一定组成整段最优服务。</div>
+
+          <h4>原页提出的三类核心不足</h4>
+          <div class="grid-3">
+            <div class="panel"><h4>1. 对话连贯性不足</h4><p>当前轮只追求“像一个好回复”，可能重复询问已经提供的信息，或在用户情绪升级时仍照搬模板。</p></div>
+            <div class="panel"><h4>2. 长期目标关联不足</h4><p>模型知道每句话都合理，却不知道本轮动作是否让“退款成功、申诉完成、联系到责任方”等最终目标更近。</p></div>
+            <div class="panel"><h4>3. 流程适应性不足</h4><p>业务流程常有分支、失败重试和权限边界。静态脚本无法覆盖用户拒绝方案、工具返回异常或中途新增诉求。</p></div>
+          </div>
+
+          <h4>多轮 RL 的潜在收益，不只是“更会聊天”</h4>
+          <ul>
+            <li><strong>On-policy 数据回流：</strong>让当前策略在用户模拟器中暴露真实失败模式，再把这些轨迹用于更新，而不是只学习历史人工答案。</li>
+            <li><strong>长程策略学习：</strong>模型可以牺牲某一轮的“立即讨好”，换取后续信息完整、方案可执行和会话正常结束。</li>
+            <li><strong>低风险线上替代：</strong>个性化模拟器可承担部分 A/B 测试功能，先发现重复、虚假承诺、过早转人工等问题。</li>
+            <li><strong>业务结果对齐：</strong>在转人工率、智能解决率、申诉通过、退赔正确、用户情绪之间做受约束的多目标优化。</li>
+          </ul>
+
+          <div class="callout danger">
+            <div class="callout-title"><i data-lucide="shield-alert"></i>边界：低转人工不是唯一目标</div>
+            <p>转人工率下降只有在<strong>方案正确、合规、工具真实执行、用户风险可控</strong>时才是收益。涉及人身安全、资金争议、法律投诉或权限外事项时，正确的策略可能就是及时升级人工。</p>
+          </div>
+
+          <h4>原页两个高价值场景</h4>
+          <div class="compare-grid">
+            <div class="compare-pane good"><header>骑手不信任智能客服</header><div class="body"><p>即使模型给出正确方案，骑手仍反复要求转人工。多轮策略要先识别不信任来源，再解释可验证动作、提供选择和承诺边界，而不是机械拒绝转人工。</p><p><strong>目标：</strong>在没有更优人工方案时，通过安抚与证据降低不必要转人工。</p></div></div>
+            <div class="compare-pane good"><header>用户处于投诉情绪</header><div class="body"><p>用户需要先被理解，再愿意补充事实和接受方案。多轮策略应动态排序“倾听 → 澄清 → 协商 → 执行”，而不是上来直接给补偿。</p><p><strong>目标：</strong>不仅给对答案，还要在合适时机给答案。</p></div></div>
+          </div>
+
+        </article>
+      </section>
+
+      <section class="chapter" id="chapter-2" data-section="chapter-2">
+        <div class="chapter-head">
+          <p class="chapter-no">02 · 数据、模拟器与奖励</p>
+          <h2>训练前先造一个可信、可控、够难的世界</h2>
+          <p class="chapter-lead">本章对应原第 2–4 页。多轮 RL 的上限往往不由优化算法决定，而由模拟用户是否真实、困难样本是否覆盖、奖励是否可归因决定。</p>
+        </div>
+
+        <article class="source-page" id="page-2">
+          <div class="page-heading"><div><div class="labels"><span class="label fact">原图事实</span><span class="label analysis">系统解读</span></div><h3>第 2 页：整体 Pipeline 与个性化模拟器</h3></div><span class="page-id">P02</span></div>
+          <div class="takeaway"><strong>本页一句话：</strong>系统包含两条耦合流水线：数据 Pipeline 负责把真实服务变成高价值任务，训练 Pipeline 负责让客服模型在模拟环境中探索并更新。</div>
+
+          <p>总览图已经还原了两条耦合流水线：数据 Pipeline 负责把真实服务变成高价值任务，训练 Pipeline 负责让客服策略在模拟环境中探索并更新。P02–P03 进一步给出模拟器本身的构建过程：</p>
+
+          <div class="diagram-frame wide-diagram stacked-diagram simulator-diagram">
+            <p class="diagram-title">原材料流程复现 02｜个性化用户 / 骑手模拟器构建</p>
+            <pre class="mermaid">
+%%{init: {"flowchart": {"curve": "stepAfter", "nodeSpacing": 28, "rankSpacing": 42}}}%%
+flowchart TB
+  subgraph PREP["A · 从真实会话抽取个性化条件"]
+    direction LR
+    A[("回流人人对话数据")] -->|高质量筛选| Q["完整会话"]
+    Q --> B["系统信号<br/>+ 对话历史"]
+    B -->|LLM 抽取| X["关键信息"]
+    X --> PROFILE["交互规则 / 个性化画像<br/>当前情境 · 核心诉求<br/>话术风格 · 输出要求"]
+  end
+
+  subgraph BUILD["B · 从轮次级样本训练可交互模拟器"]
+    direction LR
+    T["拆分成轮次级数据"] --> D[("模拟器训练数据")]
+    D -->|SFT / RL| E(["用户 / 骑手模拟器"])
+  end
+
+  PROFILE --> T
+
+  classDef data fill:#e8f0f2,stroke:#356579,color:#242729,stroke-width:1.4px
+  classDef transform fill:#f6e9e4,stroke:#9b4d3b,color:#242729,stroke-width:1.4px
+  classDef env fill:#e8f1e9,stroke:#3e7553,color:#242729,stroke-width:1.4px
+  class A,Q,B,D data
+  class X,PROFILE,T transform
+  class E env
+            </pre>
+          </div>
+          <p class="footnotes"><strong>读图：</strong>从回流会话中同时保留系统信号和对话历史，再抽取当前情境、核心诉求、话术风格、输出要求四类条件；这些条件被拆成轮次级训练数据，经 SFT/RL 得到可交互模拟器。节点、四字段分组、箭头方向和训练顺序来自 P02–P03；隐私脱敏、终止原因和反事实校验属于下文的工程补充。</p>
+
+          <div class="callout"><div class="callout-title"><i data-lucide="route"></i>落到贯穿 case</div><p>“骑手摔车并造成餐损”不能只保存一句抱怨。模拟器条件至少要包含：当前是否安全、订单与餐损状态、核心诉求是免责还是报备、情绪与信任水平、可接受的方案边界，以及何时应该继续追问或正常结束。</p></div>
+
+          <h4>为什么不能只用静态真实会话</h4>
+          <p>静态日志只展示历史策略已经走过的路径。策略一旦改变，用户的下一句、情绪和行为也会改变；如果训练仍把历史回复当作固定环境，模型无法探索“换一种问法会发生什么”。个性化模拟器的作用是提供一个可交互近似环境，让当前策略产生自己的 on-policy 轨迹。</p>
+
+          <h4>原页给出的模拟器构建步骤，补成可执行版本</h4>
+          <ol>
+            <li><strong>回流数据准入：</strong>仅保留有明确订单上下文、服务状态、用户反馈和正常结束标记的会话。</li>
+            <li><strong>质量筛选：</strong>去掉断流、缺轮、工具日志不完整、敏感信息未脱敏和明显脚本污染数据。</li>
+            <li><strong>关键信息抽取：</strong>抽取当前情境、核心诉求、对话历史、话术风格、情绪强度和可接受方案边界。</li>
+            <li><strong>轮次化重构：</strong>把长会话拆成状态可恢复的训练样本，并保留终止原因，而不是只截取单轮问答。</li>
+            <li><strong>SFT/RL 训练：</strong>先训练基本角色与状态一致性，再用终止质量、真实性和困难行为覆盖做强化优化。</li>
+          </ol>
+
+          <div class="grid-3">
+            <div class="panel"><h4>基本能力</h4><p>遵守角色、读取状态、按轮回复、在正确条件终止，不泄露模拟器提示。</p></div>
+            <div class="panel"><h4>真实用户模拟能力</h4><p>诉求、情绪、耐心、信任、语言风格与历史一致；会对客服动作产生合理反应。</p></div>
+            <div class="panel"><h4>指标参考性</h4><p>候选策略在模拟环境的排序，应与人工盲评或线上 A/B 的排序方向一致。</p></div>
+          </div>
+
+          <div class="callout warn"><div class="callout-title"><i data-lucide="scan-search"></i>关键风险：模拟器迎合策略</div><p>如果模拟器被客服的礼貌话术轻易“说服”，策略会学会讨好模拟器，而不是解决真实用户。需要用反事实测试、真实/模拟混合盲测、拒绝率分布和行为转移矩阵校验模拟器。</p></div>
+        </article>
+
+        <article class="source-page" id="page-3">
+          <div class="page-heading"><div><div class="labels"><span class="label fact">原图事实</span><span class="label analysis">奖励拆解</span></div><h3>第 3 页：多目标奖励融合</h3></div><span class="page-id">P03</span></div>
+          <div class="takeaway"><strong>本页一句话：</strong>奖励必须同时回答三件事：这一轮是否合法、这一轮是否推进、整段会话是否真正完成服务。</div>
+
+          <div class="diagram-frame wide-diagram stacked-diagram reward-diagram">
+            <p class="diagram-title">原材料流程复现 03｜Session、Query 与 Rule-Based 奖励融合后按客服轮注入</p>
+            <pre class="mermaid">
+%%{init: {"flowchart": {"curve": "stepAfter", "nodeSpacing": 30, "rankSpacing": 44}}}%%
+flowchart TB
+  S[("模拟会话<br/>Session 1 · Session 2 · …")]
+  SG["Session GRM<br/>整段连贯 · 最终解决 · 用户情绪"]
+  QG["Query / Turn GRM<br/>当前轮推进 · 历史衔接 · 方案一致"]
+  RB["Rule-Based<br/>格式 · 合法方案 · 工具证据 · 不重复"]
+  S --> SG
+  S --> QG
+  S --> RB
+  SG --> F{{"奖励融合<br/>会话结果 × 逐轮质量"}}
+  QG --> F
+  RB --> F
+  F --> TARGET["强化信号只分配给客服模型回复轮"]
+
+  subgraph ROUNDS["一条多轮轨迹：客服输出与环境反馈交替"]
+    direction LR
+    A1["客服回复 t1"] --> U1["用户 / 骑手反馈 t1"]
+    U1 --> A2["客服回复 t2"] --> U2["用户 / 骑手反馈 t2"]
+    U2 -.继续交互.-> AN["客服回复 tn / 正常结束"]
+  end
+
+  TARGET -.-> A1
+  TARGET -.-> A2
+  TARGET -.-> AN
+
+  classDef data fill:#e8f0f2,stroke:#356579,color:#242729,stroke-width:1.4px
+  classDef reward fill:#f6efdc,stroke:#8d671f,color:#242729,stroke-width:1.4px
+  classDef policy fill:#f6e9e4,stroke:#9b4d3b,color:#242729,stroke-width:1.5px
+  classDef env fill:#e8f1e9,stroke:#3e7553,color:#242729,stroke-width:1.4px
+  class S data
+  class SG,QG,RB,F,TARGET reward
+  class A1,A2,AN policy
+  class U1,U2 env
+            </pre>
+          </div>
+          <p class="footnotes"><strong>读图：</strong>同一批模拟会话一边得到会话级 Session GRM，一边对每个客服回复计算 Query GRM 与规则奖励；融合结果只回到黄色的“模型回复”轮，用户/骑手发言是环境反馈，不作为客服策略输出训练。P03–P04 原图用乘号表达 Session 与逐轮奖励的结合；后文公式把硬约束门控单独展开。</p>
+
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>奖励层</th><th>主要职责</th><th>典型信号</th><th>不应单独承担</th></tr></thead>
+              <tbody>
+                <tr><td>Rule-Based</td><td>硬约束和可确定事实</td><td>格式、字段、方案合法性、工具调用、回复不重复、禁止虚假承诺</td><td>共情质量、复杂策略优劣</td></tr>
+                <tr><td>Query / Turn GRM</td><td>当前轮局部质量与推进价值</td><td>是否回应用户、是否需要澄清、思考与回复一致、方案与状态匹配</td><td>最终问题是否解决</td></tr>
+                <tr><td>Session GRM</td><td>整段轨迹的长期结果</td><td>连贯性、目标完成、用户情绪、重复、终止是否自然</td><td>精确工具执行事实</td></tr>
+              </tbody>
+            </table>
+          </div>
+
+          <div class="formula">
+            <span class="formula-label">解读用组合式，不是原图给出的固定实现</span>
+            <div class="formula-expression">\[R_t = g_t^{\mathrm{hard}}\!\left[R_{\mathrm{session}}\!\left(w_qR_{\mathrm{query},t}+w_rR_{\mathrm{rule},t}\right)+w_sR_{\mathrm{style},t}\right]-P_{\mathrm{risk},t}\]</div>
+            <p class="formula-defs"><code>g_hard ∈ {0,1}</code> 是不可妥协的正确性门控；<code>R_session</code> 评价整段结果；<code>R_query,t</code>、<code>R_rule,t</code> 和 <code>R_style,t</code> 分别评价第 <var>t</var> 轮的推进、规则与表达；<code>P_risk,t ≥ 0</code> 是风险惩罚。</p>
+            <p class="formula-note"><strong>读法：</strong>先过硬门槛，再用 Session 分约束逐轮质量；风险惩罚在门控之外单独扣除，不能被共情或文风分抵消。</p>
+          </div>
+          <p>更稳妥的组合方式是先用硬约束做门控：一旦越权退款、未调用工具却宣称完成、泄露隐私等，整体奖励应被截断或重罚；只有满足底线，软奖励才用于比较话术、策略和体验。</p>
+
+          <div class="callout danger"><div class="callout-title"><i data-lucide="bug-off"></i>避免“平均分掩盖致命错误”</div><p>若工具正确性得 0，但共情、流畅度和风格得分很高，加权平均仍可能给出正奖励。对资金、权限、合规等不可妥协项，应采用门控、约束优化或 lexicographic ordering，而不是普通加权求和。</p></div>
+
+          <h4>轮次与会话奖励的正确分工</h4>
+          <ul>
+            <li>第一轮识别核心诉求并收集必要信息：Turn reward 应较高，但如果后续反复追问，Session reward 应扣分。</li>
+            <li>某轮礼貌道歉但没有推进：风格分可以高，推进分应低，不能把“好听”当成“有效”。</li>
+            <li>最后成功调用退款工具：结果分高；但如果此前越权承诺或给出错误解释，风险惩罚仍需保留。</li>
+          </ul>
+          <div class="callout"><div class="callout-title"><i data-lucide="route"></i>落到贯穿 case</div><p>在摔车餐损 case 中，“先问是否受伤”可获得风险识别与局部推进分；“未核验就承诺免责”触发规则重罚；只有后续报备成功、说明与工具结果一致且会话正常结束，Session GRM 才应给出正向结果。</p></div>
+        </article>
+
+        <article class="source-page" id="page-4">
+          <div class="page-heading"><div><div class="labels"><span class="label fact">原图事实</span><span class="label analysis">数据方法</span></div><h3>第 4 页：高价值对话数据筛选</h3></div><span class="page-id">P04</span></div>
+          <div class="takeaway"><strong>本页一句话：</strong>自然分布保证覆盖，困难样本决定上限；二者必须分层采样并在评测集隔离。</div>
+
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>流程</th><th>目的</th><th>具体做法</th><th>新增质量门禁</th></tr></thead>
+              <tbody>
+                <tr><td>自然分布收集</td><td>覆盖大盘真实样本</td><td>线上人机/人人日志回流；大模型结合历史过滤不完整会话</td><td>按场景、用户群、工具路径、终止原因分层，防止头部场景挤占</td></tr>
+                <tr><td>困难样本挖掘</td><td>强化高难问题服务质量</td><td>从激动情绪、无视客服、连续提问、多问题、长轮次五个维度打 0–5 分；保留 3 分以上</td><td>增加工具失败、权限冲突、诉求中途变化、恶意诱导、需要转人工等类型</td></tr>
+                <tr><td>数据净化</td><td>保证训练信号可靠</td><td>过滤缺轮、断流、重复和异常日志</td><td>隐私脱敏、近重复聚类、模板污染检测、错误方案标注</td></tr>
+                <tr><td>切分与采样</td><td>防止评测泄漏</td><td>按难度和场景构造训练集</td><td>按订单/用户/话术簇切分，而不是随机按句切分</td></tr>
+              </tbody>
+            </table>
+          </div>
+
+          <h4>建议的数据配比，而不是固定答案</h4>
+          <div class="grid-3">
+            <div class="panel"><h4>50% 自然分布</h4><p>维持主流程能力与线上分布稳定性，避免模型只会处理冲突场景。</p></div>
+            <div class="panel"><h4>30% 困难样本</h4><p>集中覆盖连续拒绝、情绪升级、工具失败和多诉求等决策密集轨迹。</p></div>
+            <div class="panel"><h4>20% 安全反例</h4><p>越权、虚假承诺、错误退款、身份泄露、危险安抚等必须稳定拒绝或升级。</p></div>
+          </div>
+          <p class="footnotes">以上 50/30/20 是解释用的建议起点，属于补充方案，不是原图实验配置。实际比例应由线上流量、失败桶和离在线一致性回测决定。</p>
+
+          <div class="callout success"><div class="callout-title"><i data-lucide="check-check"></i>数据验收最小集合</div><p>每条会话至少应具备：任务 ID、初始状态、可用工具、用户画像、每轮角色与时间、工具请求/返回、终止原因、最终结果、人工或规则质量标签、脱敏状态与来源版本。</p></div>
+        </article>
+      </section>
+
+      <section class="chapter" id="chapter-3" data-section="chapter-3">
+        <div class="chapter-head">
+          <p class="chapter-no">03 · 训练框架与离线评估</p>
+          <h2>让并行 rollout 保持状态正确，让离线分数能预测线上</h2>
+          <p class="chapter-lead">本章对应原第 5–7 页。重点不只是“如何跑多轮”，而是不同长度会话如何并行、何时终止、奖励如何落到各轮，以及离线评价是否足以支持模型选择。</p>
+        </div>
+
+        <article class="source-page" id="page-5">
+          <div class="page-heading"><div><div class="labels"><span class="label fact">原图事实</span><span class="label analysis">训练时序</span></div><h3>第 5 页：vLLM / SGLang 多轮 RL 训练框架</h3></div><span class="page-id">P05</span></div>
+          <div class="takeaway"><strong>本页一句话：</strong>多轮 rollout 是一个异步状态机，不是把单轮生成简单循环 N 次；每条会话都可能在不同轮终止、调用不同工具并获得不同粒度奖励。</div>
+
+          <p>原页基于开源 VeRL 框架做适配，支持 LongCat 模型、客服训练数据、vLLM/SGLang 多轮交互、个性化模拟器、轮次级/会话级规则与 GRM 奖励，以及惩罚后的反思机制。两类执行方式的核心差异如下：</p>
+
+          <div class="compare-grid">
+            <div class="compare-pane good"><header>vLLM-Based：阶段式批处理</header><div class="body"><p>先让一批客服样本完成第 1 轮生成，再批量交给用户模拟器生成第 1 轮反馈，然后进入第 2 轮。适合对同阶段请求做高吞吐批推理。</p><p><strong>挑战：</strong>短会话提前结束后会产生空槽，长短会话不齐导致尾部等待。</p></div></div>
+            <div class="compare-pane good"><header>SGLang-Based：请求内交错推进</header><div class="body"><p>每个 request 独立在“客服 → 用户 → 客服”之间推进，遇到 <code>is_over</code> 即终止，更自然地支持不同会话长度。</p><p><strong>挑战：</strong>状态、缓存、工具上下文与奖励日志必须按会话严格隔离。</p></div></div>
+          </div>
+
+          <div class="diagram-frame wide-diagram stacked-diagram vllm-diagram">
+            <p class="diagram-title">原材料流程复现 04A｜vLLM-Based：按角色阶段推进整批活跃轨迹</p>
+            <pre class="mermaid">
+%%{init: {"flowchart": {"curve": "stepAfter", "nodeSpacing": 28, "rankSpacing": 40}}}%%
+flowchart TB
+  subgraph STAGE1["阶段 1 · 全部活跃轨迹按角色批处理"]
+    direction LR
+    SEED["对话历史初始化<br/>会话 1：轨迹 1_1 · 1_2<br/>会话 2：轨迹 2_1 · 2_2<br/>会话 3：轨迹 3_1 · 3_2"]
+    A1["第 1 轮 vLLM 推理<br/>assistant 1_1_1 · 1_2_1<br/>assistant 2_1_1 · 2_2_1<br/>assistant 3_1_1 · 3_2_1"]
+    U1["第 1 轮用户模拟<br/>会话 1：两条继续<br/>会话 2：一条 end<br/>会话 3：一条 end"]
+    SEED -->|Agent 批推理| A1 -->|User 批模拟| U1
+  end
+
+  FILTER["过滤已结束轨迹<br/>只保留 active session"]
+
+  subgraph STAGE2["阶段 2 · 下一角色阶段继续批处理"]
+    direction LR
+    A2["第 2 轮 vLLM 推理<br/>仅生成仍活跃的客服轮"]
+    U2["第 2 轮用户模拟<br/>各轨迹独立反馈并标记 end"]
+    COLLECT["收集每个 Agent 阶段的客服输出"]
+    A2 -->|User 批模拟| U2 --> COLLECT
+  end
+
+  RESULT[("Rollout results")]
+  U1 --> FILTER -->|进入下一 Agent 阶段| A2
+  A1 -.客服输出.-> COLLECT
+  COLLECT --> RESULT
+
+  classDef data fill:#e8f0f2,stroke:#356579,color:#242729,stroke-width:1.4px
+  classDef policy fill:#f6e9e4,stroke:#9b4d3b,color:#242729,stroke-width:1.5px
+  classDef env fill:#e8f1e9,stroke:#3e7553,color:#242729,stroke-width:1.4px
+  class SEED,FILTER,COLLECT,RESULT data
+  class A1,A2 policy
+  class U1,U2 env
+            </pre>
+          </div>
+          <p class="footnotes"><strong>读图：</strong>vLLM 方案先批量生成所有活跃轨迹的客服轮，再批量生成用户轮；已经出现 <code>end</code> 的轨迹退出，其他轨迹进入下一角色阶段。原图中的三组种子、每组多条轨迹、两轮 Agent/User 交替和结果汇聚均保留。</p>
+
+          <div class="diagram-frame wide-diagram stacked-diagram sglang-diagram">
+            <p class="diagram-title">原材料流程复现 04B｜SGLang-Based：每个 Request 独立交错并在 is_over 时结束</p>
+            <pre class="mermaid">
+%%{init: {"flowchart": {"curve": "stepAfter", "nodeSpacing": 26, "rankSpacing": 38}}}%%
+flowchart TB
+  FILTER["高价值对话数据筛选<br/>当前情境 · 核心诉求 · 诉求覆盖 · …"] --> POLICY{{"客服模型"}}
+  SIM(["个性化模拟器"]) -->|用户反馈| POLICY
+  POLICY -->|客服回复| SIM
+  POLICY --> DISPATCH["SGLang 交互请求<br/>每个 Request 持有独立状态"]
+
+  R1["Request 1｜短<br/>模型 1_1 → 骑手 1_1<br/>模型 1_2 → is_over"]
+  R2["Request 2｜中<br/>模型 2_1 → 骑手 2_1<br/>模型 2_2 → 骑手 2_2<br/>模型 2_3 → is_over"]
+  R3["Request 3｜长<br/>模型 3_1 ↔ 骑手 3_1<br/>模型 3_2 ↔ 骑手 3_2<br/>模型 3_3 → 3_4 → …"]
+  RN["Request 4 … N<br/>各自交错推进<br/>各自 is_over"]
+
+  DISPATCH --> R1
+  DISPATCH --> R2
+  DISPATCH --> R3
+  DISPATCH --> RN
+  R1 --> RESULT[("Rollout results")]
+  R2 --> RESULT
+  R3 --> RESULT
+  RN --> RESULT
+
+  classDef data fill:#e8f0f2,stroke:#356579,color:#242729,stroke-width:1.4px
+  classDef policy fill:#f6e9e4,stroke:#9b4d3b,color:#242729,stroke-width:1.5px
+  classDef env fill:#e8f1e9,stroke:#3e7553,color:#242729,stroke-width:1.4px
+  class FILTER,DISPATCH,RESULT data
+  class POLICY,R1,R2,R3,RN policy
+  class SIM env
+            </pre>
+          </div>
+          <p class="footnotes"><strong>读图：</strong>每个 SGLang Request 内部自行交错“模型回复 → 骑手发言”，短会话可在第二轮结束，长会话继续推进；不同 Request 不需要等待相同轮次。原图的 1–6 号请求被压缩为三条代表性长度与一条 N 路，避免重复节点挤压文字，但独立终止、异步长度和角色顺序完整保留。</p>
+
+          <div class="callout"><div class="callout-title"><i data-lucide="route"></i>落到贯穿 case</div><p>摔车高风险轨迹可能在安全检查后立即转人工并结束；普通餐损轨迹可能继续到信息核验、方案确认和工具执行。vLLM 会在阶段边界过滤已结束轨迹，SGLang 则让两条轨迹按各自节奏终止；两者都必须按 session 隔离业务状态、缓存与奖励日志。</p></div>
+
+          <h4>训练状态必须显式持有</h4>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>状态</th><th>示例</th><th>缺失后果</th></tr></thead>
+              <tbody>
+                <tr><td>业务状态</td><td>订单是否送达、申诉是否已提交、退款工具是否执行</td><td>重复操作、虚假承诺、越权调用</td></tr>
+                <tr><td>对话状态</td><td>已收集槽位、用户已拒绝方案、当前情绪与信任</td><td>重复询问、跳流程、模板化回复</td></tr>
+                <tr><td>终止状态</td><td>解决、用户离开、转人工、达到最大轮次、工具失败</td><td>死循环、把失败当成功、异常长轨迹</td></tr>
+                <tr><td>奖励状态</td><td>每轮规则分、GRM 分、惩罚原因、会话总分</td><td>无法定位训练退化，也无法做反思重采样</td></tr>
+              </tbody>
+            </table>
+          </div>
+
+          <div class="callout warn"><div class="callout-title"><i data-lucide="gauge"></i>吞吐之外还要监控的训练指标</div><p>除 tokens/s 和 GPU 利用率外，至少监控会话长度分布、提前终止率、最大轮次触顶率、模拟器异常率、工具失败率、各奖励分量分布、KL/熵、重复轨迹比例和有效 token 占比。</p></div>
+        </article>
+
+        <article class="source-page" id="page-6">
+          <div class="page-heading"><div><div class="labels"><span class="label fact">原图事实</span><span class="label analysis">评估体系</span></div><h3>第 6 页：单轮 / 多轮离线评估</h3></div><span class="page-id">P06</span></div>
+          <div class="takeaway"><strong>本页一句话：</strong>单轮检查“这一句有没有问题”，会话级检查“整个服务有没有把事情办成”；两者缺一不可。</div>
+
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>层级</th><th>目的</th><th>原页指标</th><th>建议补充</th></tr></thead>
+              <tbody>
+                <tr><td>轮次级机评</td><td>话术与内容正确</td><td>平均回复长度、格式未遵循、不合法方案、重复话术、中英混用、暴露 AI、方案输出占比</td><td>槽位引用准确率、工具参数正确率、承诺-执行一致率、知识命中率</td></tr>
+                <tr><td>单轮 GSB</td><td>与线上/基线模型相对比较</td><td>参考五档评分标准进行 GSB</td><td>盲评、随机顺序、裁判校准、置信区间与分桶结果</td></tr>
+                <tr><td>会话级规则</td><td>整段流程质量</td><td>轮次间话术重复率、申诉结果句重复率、判责准确率</td><td>无效轮次率、工具路径长度、正确终止率、风险升级召回率</td></tr>
+                <tr><td>多轮 GSB</td><td>选择完整轨迹更优的模型</td><td>模型与模拟器交互，多裁判多数投票</td><td>按用户类型、难度、工具路径、会话长度分桶；校验模拟器偏差</td></tr>
+              </tbody>
+            </table>
+          </div>
+
+          <h4>一个可复用的多裁判 GSB 流程</h4>
+          <ol>
+            <li>同一个种子任务分别让候选模型 A、基线 B 与同版本模拟器交互。</li>
+            <li>隐藏模型名、随机展示顺序；裁判只能看到必要状态、工具日志和完整轨迹。</li>
+            <li>每个裁判分别给出 G/S/B、原因码和风险标记；不能只输出一个总分。</li>
+            <li>多数投票产生主结论；裁判分歧大的样本进入人工复核和裁判校准集。</li>
+            <li>同时报告总体胜率和困难分桶，不让大盘简单场景掩盖关键失败。</li>
+          </ol>
+
+          <div class="formula">
+            <span class="formula-label">相对评价口径</span>
+            <div class="formula-expression">\[\operatorname{NWR}=\frac{G-B}{N}\times100\%,\qquad N=G+S+B\]</div>
+            <p class="formula-defs"><code>G</code>、<code>S</code>、<code>B</code> 分别表示 Good、Same、Bad 的组数；<code>N</code> 是全部有效比较组数。</p>
+            <p class="formula-note"><strong>读法：</strong>净胜率只反映胜负差，还必须同时报告 Same、样本量、95% 置信区间和困难分桶，才能判断结果是否稳定。</p>
+          </div>
+
+          <div class="callout danger"><div class="callout-title"><i data-lucide="split"></i>离线好，不等于线上一定好</div><p>离线评估依赖模拟器和裁判的共同偏好。必须用一小批真实线上或历史人工集做锚点，持续测量“离线排序与线上排序的一致率”，否则模型可能只适应模拟器。</p></div>
+        </article>
+
+        <article class="source-page" id="page-7">
+          <div class="page-heading"><div><div class="labels"><span class="label fact">原图实测</span><span class="label analysis">指标口径</span></div><h3>第 7 页：业务指标、对照实验与初步结论</h3></div><span class="page-id">P07</span></div>
+          <div class="takeaway"><strong>本页一句话：</strong>多轮 RL 的主要收益来自更连贯、更有温度的策略，但效果高度依赖场景和基线；对回流 SFT 并非全面胜出。</div>
+
+          <h4>电话骑手：MTRL V2.0 相对 0910 单轮 RL</h4>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>指标</th><th class="num">基线</th><th class="num">MTRL V2.0</th><th class="num">百分点变化</th><th class="num">相对变化</th><th>方向</th></tr></thead>
+              <tbody>
+                <tr><td>转人工率</td><td class="num">34.39%</td><td class="num">32.14%</td><td class="num good-text">−2.25 pp</td><td class="num good-text">−6.54%</td><td>正向</td></tr>
+                <tr><td>智能解决率</td><td class="num">30.13%</td><td class="num">35.00%</td><td class="num good-text">+4.87 pp</td><td class="num good-text">+16.16%</td><td>正向</td></tr>
+                <tr><td>综合解决率</td><td class="num">43.76%</td><td class="num">48.04%</td><td class="num good-text">+4.28 pp</td><td class="num good-text">+9.78%</td><td>正向</td></tr>
+                <tr><td>重复率</td><td class="num">29.95%</td><td class="num">15.60%</td><td class="num good-text">−14.35 pp</td><td class="num good-text">−47.91%</td><td>正向</td></tr>
+              </tbody>
+            </table>
+          </div>
+
+          <p>原页还记录 MTRL V3.0 相比 V2.0：转人工率从 31.81% 降到 30.08%，相对下降约 5.44%；智能解决率、综合解决率和重复率基本持平。这里提示一个重要判断：<strong>版本迭代的增益可能集中在少数指标，不应把“整体持平”写成“全面提升”。</strong></p>
+
+          <h4>电话外客：不同基线下的方向并不一致</h4>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>比较</th><th>正向变化</th><th>负向或持平</th><th>应得结论</th></tr></thead>
+              <tbody>
+                <tr><td>多轮 RL vs 正向知识驱动单轮 RL</td><td>转人工率 26.16%→22.44%；解决率 50.00%→57.53%</td><td>退赔率 35.10%→52.18% 上升</td><td>体验/解决改善，但成本显著增加，需看退赔正确性与净收益</td></tr>
+                <tr><td>多轮 RL vs DeepSeek-PE</td><td>重复来电率 24.16%→16.87%；解决率 29.79%→57.53%</td><td>退赔率持平</td><td>相对通用 PE 基线，流程能力提升明显</td></tr>
+                <tr><td>多轮 RL vs 回流 SFT</td><td>无明显成本收益</td><td>转人工率 20.53%→22.44%；解决率 64.47%→57.53%</td><td>回流 SFT 在该对比上更强，多轮 RL 不是无条件替代</td></tr>
+              </tbody>
+            </table>
+          </div>
+
+          <div class="callout warn"><div class="callout-title"><i data-lucide="calculator"></i>原图数据需回查</div><p>原页文字把 64.47% → 57.53% 写为“−6.73PP”，但端点直接相减是 <strong>−6.94PP</strong>。本页保留端点，并把该差异标记为口径或录入待核对项。</p></div>
+
+          <p>原页报告用户模拟器图灵测试误识率为 52.5%，并据此认为真假难辨。该数字只有在测试定义、样本平衡和“误识”方向明确时才可解释；建议同时报告真人判成模拟、模拟判成真人的混淆矩阵。</p>
+        </article>
+      </section>
+
+      <section class="chapter" id="chapter-4" data-section="chapter-4">
+        <div class="chapter-head">
+          <p class="chapter-no">04 · 实验结果与案例拆解</p>
+          <h2>数字告诉我们“变了什么”，轨迹告诉我们“为什么变”</h2>
+          <p class="chapter-lead">本章对应原第 8–12 页。先还原方案分布与人工评价，再用好坏对话解释多轮模型的收益来源和残余问题。</p>
+        </div>
+
+        <article class="source-page" id="page-8">
+          <div class="page-heading"><div><div class="labels"><span class="label fact">原图实测</span><span class="label analysis">分布解读</span></div><h3>第 8 页：方案分布与转人工场景实验</h3></div><span class="page-id">P08</span></div>
+          <div class="takeaway"><strong>本页一句话：</strong>多轮模型不仅改变“是否转人工”，还重分配了后续动作；看动作分布比只看一个总转化指标更容易发现策略偏移。</div>
+
+          <h4>多轮强化模型方案分布（原页前九项）</h4>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>动作</th><th class="num">次数</th><th class="num">占比</th><th>业务含义</th></tr></thead>
+              <tbody>
+                <tr><td>跟进二次申诉结果</td><td class="num">547</td><td class="num">2.75%</td><td>偏向持续闭环，而非立即结束</td></tr>
+                <tr><td>外呼商家</td><td class="num">296</td><td class="num">1.49%</td><td>主动补充第三方事实</td></tr>
+                <tr><td>创建表单</td><td class="num">120</td><td class="num">0.60%</td><td>较少依赖标准表单流</td></tr>
+                <tr><td>申诉通过</td><td class="num">163</td><td class="num">0.82%</td><td>直接完成高价值结果</td></tr>
+                <tr><td>外呼用户</td><td class="num">174</td><td class="num">0.88%</td><td>主动确认用户侧事实</td></tr>
+                <tr><td>执行补款</td><td class="num">54</td><td class="num">0.27%</td><td>涉及成本，需校验正确性</td></tr>
+                <tr><td>跟进返餐</td><td class="num">41</td><td class="num">0.21%</td><td>追踪后续履约动作</td></tr>
+                <tr><td>人机协同</td><td class="num">37</td><td class="num">0.19%</td><td>保留必要升级渠道</td></tr>
+                <tr><td>外呼下单人</td><td class="num">9</td><td class="num">0.05%</td><td>低频补充核验</td></tr>
+              </tbody>
+            </table>
+          </div>
+
+          <h4>非多轮强化模型方案分布（原页前九项）</h4>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>动作</th><th class="num">次数</th><th class="num">占比</th><th>相对观察</th></tr></thead>
+              <tbody>
+                <tr><td>创建表单</td><td class="num">484</td><td class="num">4.82%</td><td>更依赖标准化路径</td></tr>
+                <tr><td>跟进二次申诉结果</td><td class="num">368</td><td class="num">3.67%</td><td>占比仍高，但样本分母不同</td></tr>
+                <tr><td>外呼商家</td><td class="num">302</td><td class="num">3.01%</td><td>外呼依赖更高</td></tr>
+                <tr><td>外呼用户</td><td class="num">274</td><td class="num">2.73%</td><td>外呼依赖更高</td></tr>
+                <tr><td>跟进返餐</td><td class="num">142</td><td class="num">1.42%</td><td>后续跟进较多</td></tr>
+                <tr><td>申诉通过</td><td class="num">111</td><td class="num">1.11%</td><td>不能仅凭占比判断正确率</td></tr>
+                <tr><td>终止调度</td><td class="num">65</td><td class="num">0.65%</td><td>属于流程终止动作</td></tr>
+                <tr><td>人机协同</td><td class="num">63</td><td class="num">0.63%</td><td>比例高于多轮模型</td></tr>
+                <tr><td>跟进无违规补款</td><td class="num">45</td><td class="num">0.45%</td><td>需结合业务规则解读</td></tr>
+              </tbody>
+            </table>
+          </div>
+
+          <div class="callout warn"><div class="callout-title"><i data-lucide="scale"></i>不能直接比较原始次数</div><p>两组数据的分母显然不同，应优先比较比例，并进一步用同一任务集做配对实验。方案占比下降也不一定是好事：可能是更精准，也可能是漏执行，需要同时看方案正确率、解决率和成本。</p></div>
+
+          <p>原页在“骑手多次说转人工且无法申诉通过”的 50 条样本上，记录单轮模型 32/50 转人工（64%），多轮模型 23/50（46%），下降 <strong>18 个百分点</strong>，相对下降约 <strong>28.13%</strong>。这个结果直接支持“多轮安抚策略减少非必要转人工”，但样本量较小，建议给出二项置信区间并扩大复测。</p>
+        </article>
+
+        <article class="source-page" id="page-9">
+          <div class="page-heading"><div><div class="labels"><span class="label fact">原图实测</span><span class="label analysis">人工评估</span></div><h3>第 9 页：话术 GSB、服务力和高质量话术指标</h3></div><span class="page-id">P09</span></div>
+          <div class="takeaway"><strong>本页一句话：</strong>多轮模型在 100 组对比中净胜，但服务力维度并非全线领先，尤其“到我为止”下降，说明更强的互动性可能伴随结束控制不足。</div>
+
+          <div class="metric-grid">
+            <div class="metric"><span class="value">53</span><span class="delta">Good</span><span class="name">多轮模型更好</span></div>
+            <div class="metric"><span class="value">11</span><span class="delta">Same</span><span class="name">两者持平</span></div>
+            <div class="metric"><span class="value">36</span><span class="delta bad">Bad</span><span class="name">多轮模型更差</span></div>
+            <div class="metric"><span class="value">+17%</span><span class="delta">净胜率</span><span class="name">(53−36)/100</span></div>
+          </div>
+
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>小美服务力维度</th><th class="num">多轮强化</th><th class="num">非多轮强化</th><th>观察</th></tr></thead>
+              <tbody>
+                <tr><td>责任担当</td><td class="num">1.98</td><td class="num">1.89</td><td class="good-text">提升</td></tr>
+                <tr><td>快速厘清</td><td class="num">2.47</td><td class="num">2.41</td><td class="good-text">提升</td></tr>
+                <tr><td>同理表达</td><td class="num">2.02</td><td class="num">2.05</td><td class="bad-text">轻微下降</td></tr>
+                <tr><td>耐心倾听</td><td class="num">2.64</td><td class="num">2.57</td><td class="good-text">提升</td></tr>
+                <tr><td>尊重平等</td><td class="num">2.47</td><td class="num">2.39</td><td class="good-text">提升</td></tr>
+                <tr><td>热情积极</td><td class="num">2.92</td><td class="num">2.83</td><td class="good-text">提升</td></tr>
+                <tr><td>到我为止</td><td class="num">2.23</td><td class="num">2.83</td><td class="bad-text">明显下降</td></tr>
+              </tbody>
+            </table>
+          </div>
+
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>高质量话术指标</th><th class="num">多轮强化</th><th class="num">非多轮强化</th><th>解释</th></tr></thead>
+              <tbody>
+                <tr><td>情景 × 情绪得分</td><td class="num">0.056</td><td class="num">0.039</td><td>多轮模型更能按情景切入情绪</td></tr>
+                <tr><td>信息收集</td><td class="num">0.14</td><td class="num">0.17</td><td>多轮模型略低，可能更快进入方案，也可能漏问</td></tr>
+                <tr><td>方案协商</td><td class="num">1.15</td><td class="num">1.05</td><td>多轮模型更强</td></tr>
+                <tr><td>结束语</td><td class="num">0.22</td><td class="num">0.16</td><td>表面结束语更好，但与“到我为止”下降并存，需核对定义</td></tr>
+              </tbody>
+            </table>
+          </div>
+
+          <div class="callout warn"><div class="callout-title"><i data-lucide="circle-help"></i>评估口径仍不完整</div><p>原图没有给出服务力和高质量话术各分数的量表范围、打分者数量和统计显著性，因此这些数值适合做方向性观察，不适合宣称稳定提升。最好补充均值、标准差/置信区间与评分指南。</p></div>
+        </article>
+
+        <article class="source-page" id="page-10">
+          <div class="page-heading"><div><div class="labels"><span class="label fact">原图案例</span><span class="label analysis">策略拆解</span></div><h3>第 10 页：跨页坏例与好案例——从“站用户”走向可验证安抚</h3></div><span class="page-id">P10</span></div>
+          <div class="takeaway"><strong>本页一句话：</strong>原图上半部延续前页实验与坏例，下半部才进入好案例；真正值得学习的安抚不是连续道歉，而是准确复述损害、承认感受、说明可执行动作，并把承诺限制在系统能力之内。</div>
+
+          <p>第 10 页上半部的坏例承接自前页，截图没有独立给出完整上下文，因此这里不对缺失片段追加推断。下半部好案例中，用户投诉骑手未敲门、未电话联系，并把餐品放在常放垃圾的位置。多轮模型较好的地方包括：不急于替骑手辩解；承认体验受损；记录并反馈骑手问题；在用户继续表达时保持上下文，不重复从头询问。</p>
+
+          <div class="dialogue">
+            <div class="turn"><span class="speaker user">用户</span><p>骑手根本没敲门，也没给我打电话，还把餐放在我平时放垃圾的地方。</p></div>
+            <div class="turn"><span class="speaker agent">客服</span><p>我明白您生气的不只是“没收到提醒”，而是餐品被放在不合适的位置，您还是隔了二十分钟才发现。这个体验确实很差。<span class="annotation">策略：准确复述事实 + 情绪命名，不虚构原因。</span></p></div>
+            <div class="turn"><span class="speaker agent">客服</span><p>我先帮您记录“未联系、未敲门、放置位置不当”三项问题；同时确认一下，餐品现在还能正常食用吗？如果受到污染，我再按食品问题的流程继续处理。<span class="annotation">策略：把投诉拆为结构化事实，并补问会改变方案的关键槽位。</span></p></div>
+            <div class="turn"><span class="speaker user">用户</span><p>餐没坏，但我就是觉得特别不尊重人。</p></div>
+            <div class="turn"><span class="speaker agent">客服</span><p>能理解。即使餐品没坏，配送规范也不能因此省略。我会按这三项问题提交反馈，结果以平台后续核实为准；我现在可以先把提交内容念给您确认，避免漏掉重点。<span class="annotation">策略：验证承诺边界 + 给用户控制感。</span></p></div>
+          </div>
+
+          <p class="footnotes">以上对话是基于原案例重写的“模拟优化版”，不是原图逐字转录。它用于说明可验证安抚的结构。</p>
+
+          <div class="grid-3">
+            <div class="panel"><h4>情绪层</h4><p>明确用户受损点，而不是泛化为“您消消气”。</p></div>
+            <div class="panel"><h4>事实层</h4><p>把未联系、未敲门、放置不当拆成可记录问题。</p></div>
+            <div class="panel"><h4>行动层</h4><p>只承诺可执行的记录和核实，不承诺一定处罚骑手。</p></div>
+          </div>
+        </article>
+
+        <article class="source-page" id="page-11">
+          <div class="page-heading"><div><div class="labels"><span class="label fact">原图案例</span><span class="label analysis">流程拆解</span></div><h3>第 11 页：好案例——减少重复，顺畅推动补偿流程</h3></div><span class="page-id">P11</span></div>
+          <div class="takeaway"><strong>本页一句话：</strong>多轮能力最直观的表现，是下一轮真的“利用了上一轮”，不再重复让用户描述，并能根据新增事实调整方案。</div>
+
+          <p>原图场景为配送提前完成、用户认为超时较长。客服先确认餐品状态，再说明骑手行为问题和监督动作，随后申请 5 元无门槛赔付。这个案例的长处是流程连续；不足是多处安抚过度、夸赞用户“通情达理”偏离专业边界。</p>
+
+          <div class="compare-grid">
+            <div class="compare-pane good"><header>值得保留</header><div class="body"><ul><li>先确认是否收到餐品，避免在事实不清时退款。</li><li>用户补充“提前完成”后，策略从未送达切换到履约规范问题。</li><li>给出明确补偿金额和查询路径。</li><li>在工具执行后再告知完成。</li></ul></div></div>
+            <div class="compare-pane bad"><header>需要压缩</header><div class="body"><ul><li>“您不要着急、先别着急”重复，信息密度低。</li><li>“如果换作是我”会把注意力转向客服自身。</li><li>“服务您是一种享受”过度奉承，容易显得不真诚。</li><li>结束前连续多次确认是否还有问题，会拉长会话。</li></ul></div></div>
+          </div>
+
+          <div class="callout success"><div class="callout-title"><i data-lucide="route"></i>建议的四步微策略</div><p><strong>确认事实</strong>（收到/未收到、时间差）→ <strong>界定问题</strong>（提前完成、联系不足）→ <strong>协商方案</strong>（解释可选项与限制）→ <strong>执行并闭环</strong>（工具结果、到账路径、一次性结束）。</p></div>
+
+        </article>
+
+        <article class="source-page" id="page-12">
+          <div class="page-heading"><div><div class="labels"><span class="label fact">原图案例</span><span class="label sim">模拟改写</span><span class="label analysis">失败诊断</span></div><h3>第 12 页：灵活交互与残余坏案例</h3></div><span class="page-id">P12</span></div>
+          <div class="takeaway"><strong>本页一句话：</strong>“灵活”不等于不守流程，而是在规则边界内根据用户的新信息切换诊断分支；真正的坏案例往往是重复安抚、未解释限制或为了避免风险而不再提出方案。</div>
+
+          <p>原页包含两类灵活策略：一类是用户不同意退款时，通过反问澄清优惠券来源与真实诉求；另一类是骑手说已送达、用户未找到时，先判断是否送错位置，再在退款、重新下单和平台核实之间协商。</p>
+
+          <div class="dialogue">
+            <div class="turn"><span class="speaker user">用户</span><p>你给我退款，那我的第三方优惠券怎么办？</p></div>
+            <div class="turn"><span class="speaker agent">客服</span><p>您担心的是退款后券无法退回，对吗？我先说明：平台可以处理订单退款，但第三方支付平台的券是否返还，要以它的规则为准。我可以先不执行退款，您确认券规则后再决定；也可以告诉我您更希望“补送餐品”还是“尽快退回现金”，我按可用方案继续核对。<span class="annotation">模拟策略：承认不确定性 + 暂停不可逆动作 + 给出受约束选项。</span></p></div>
+          </div>
+
+          <div class="dialogue">
+            <div class="turn"><span class="speaker user">用户</span><p>骑手说送到了，可我酒店和前台都找不到。</p></div>
+            <div class="turn"><span class="speaker agent">客服</span><p>我先联系骑手确认具体放置点；在确认前不会把订单直接判为已完成。若确认送错，我可以为您处理退款；如果您现在急着用餐，也可以先重新下单，原单责任由平台继续核实。您更希望我先处理哪一步？<span class="annotation">模拟策略：并行处理紧急需求与责任核实，避免只说“加强监督”。</span></p></div>
+          </div>
+
+          <h4>残余坏案例的五类模式</h4>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>失败模式</th><th>表面表现</th><th>根因</th><th>训练修复</th></tr></thead>
+              <tbody>
+                <tr><td>同义重复</td><td>连续道歉、连续“您消消气”</td><td>风格奖励高，推进奖励弱</td><td>重复惩罚 + 新信息/新动作增益</td></tr>
+                <tr><td>过早给方案</td><td>未确认餐品状态就退款</td><td>短程结果导向</td><td>必要槽位门控 + 方案 verifier</td></tr>
+                <tr><td>被惩罚后沉默</td><td>不再承诺，也不再提出退款</td><td>惩罚条件覆盖过宽</td><td>区分“提出可选方案”和“宣称已执行”</td></tr>
+                <tr><td>情绪话术发散</td><td>赞美用户、站队、替平台过度道歉</td><td>风格权重过高</td><td>专业风格上限 + 长度成本</td></tr>
+                <tr><td>错误闭环</td><td>只说会反馈监督，没有可查结果</td><td>Session reward 只看用户情绪</td><td>工具结果和终止状态硬校验</td></tr>
+              </tbody>
+            </table>
+          </div>
+
+        </article>
+      </section>
+
+      <section class="chapter" id="chapter-5" data-section="chapter-5">
+        <div class="chapter-head">
+          <p class="chapter-no">05 · 优化认知与工程卡点</p>
+          <h2>模型的退化通常不是“RL 不工作”，而是奖励、数据或归因教错了</h2>
+          <p class="chapter-lead">本章对应原第 13–17 页。它记录了从版本消融中得到的经验：数据多样性与难例挖掘有效，但奖励漏洞、过度惩罚、风格权重和错误的会话奖励分配会让模型找到意外捷径。</p>
+        </div>
+
+        <article class="source-page" id="page-13">
+          <div class="page-heading"><div><div class="labels"><span class="label fact">原图实测</span><span class="label analysis">消融分析</span></div><h3>第 13 页：数据迭代与 Reward Hacking 风险</h3></div><span class="page-id">P13</span></div>
+          <div class="takeaway"><strong>本页一句话：</strong>SFT 阶段要保证策略和话术多样性，RL 阶段要有针对性地挖难例；两者叠加后，转人工和重复明显下降，但综合解决率并非单调提升。</div>
+
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>实验</th><th>迭代点</th><th class="num">转人工率</th><th class="num">智能解决率</th><th class="num">综合解决率</th><th class="num">重复率</th></tr></thead>
+              <tbody>
+                <tr><td>对照组</td><td>基础配置</td><td class="num">34.39%</td><td class="num">30.13%</td><td class="num">43.76%</td><td class="num">29.95%</td></tr>
+                <tr><td>MTRL V2.0</td><td>SFT：回流数据；RL：自然分布收集</td><td class="num">32.14%</td><td class="num">35.00%</td><td class="num">48.04%</td><td class="num">15.60%</td></tr>
+                <tr><td>MTRL V2.1</td><td>SFT：回流 + 话术多样性；RL：自然分布</td><td class="num">31.03%</td><td class="num">36.12%</td><td class="num">47.93%</td><td class="num good-text">10.47%</td></tr>
+                <tr><td>MTRL V2.2</td><td>SFT：回流 + 话术多样性；RL：自然分布 + Hard Case</td><td class="num good-text">30.53%</td><td class="num good-text">36.53%</td><td class="num good-text">49.03%</td><td class="num">11.02%</td></tr>
+              </tbody>
+            </table>
+          </div>
+
+          <h4>怎样读这张消融表</h4>
+          <ul>
+            <li><strong>V2.0 的最大变化是重复率：</strong>从 29.95% 到 15.60%，说明多轮训练首先修复了局部循环和模板复用。</li>
+            <li><strong>V2.1 的话术多样性继续压低重复：</strong>10.47% 为四组最低，但综合解决率比 V2.0 略低 0.11 个百分点，不能认为所有指标共同提升。</li>
+            <li><strong>V2.2 加入 Hard Case 后综合结果最好：</strong>转人工 30.53%、智能解决 36.53%、综合解决 49.03%，但重复率回升到 11.02%，说明难例训练可能增加了策略复杂度。</li>
+            <li><strong>缺少统计不确定性：</strong>若样本量较小，0.11 或 0.44 个百分点可能只是波动；应补样本量、显著性与分桶结果。</li>
+          </ul>
+
+          <h4>Reward hacking 为什么在多轮环境更隐蔽</h4>
+          <p>多目标奖励最终常被压成一个标量。模型看到的只是“这条轨迹得分高/低”，不一定知道哪个目标出了问题；同时，多轮环境缺乏逐步人工 ground truth，策略可以通过拖长对话、迎合模拟器、虚假承诺、规避触发惩罚等方式投机。</p>
+
+          <div class="diagram-frame wide-diagram stacked-diagram hacking-diagram">
+            <p class="diagram-title">奖励漏洞的形成与修复闭环</p>
+            <pre class="mermaid">
+%%{init: {"flowchart": {"curve": "stepAfter", "nodeSpacing": 30, "rankSpacing": 40}}}%%
+flowchart TB
+  subgraph DISCOVER["A · 发现高分路径"]
+    direction LR
+    A["奖励规则 / GRM"] --> B["策略探索"] --> C{"高分来自真实完成?"}
+  end
+
+  C -->|是| D["保留并扩展<br/>进入高价值轨迹集"]
+  C -->|否：投机高分| E["Reward hacking"]
+
+  subgraph REPAIR["B · 定位证据并修复奖励漏洞"]
+    direction LR
+    E --> F["记录原因码<br/>保存违规证据"]
+    F --> G["反思提示<br/>+ 对比重采样"]
+    G --> H["规则 / 数据 / 裁判更新"]
+    H -.-> LOOP["回到奖励规则 / GRM<br/>重跑失败桶"]
+  end
+
+  classDef neutral fill:#e8f0f2,stroke:#356579,color:#242729,stroke-width:1.4px
+  classDef good fill:#e8f1e9,stroke:#3e7553,color:#242729,stroke-width:1.4px
+  classDef bad fill:#f6e7e8,stroke:#9f454a,color:#242729,stroke-width:1.4px
+  classDef repair fill:#f6efdc,stroke:#8d671f,color:#242729,stroke-width:1.4px
+  class A,B,C,LOOP neutral
+  class D good
+  class E bad
+  class F,G,H repair
+            </pre>
+          </div>
+
+        </article>
+
+        <article class="source-page" id="page-14">
+          <div class="page-heading"><div><div class="labels"><span class="label fact">原图机制</span><span class="label sim">模拟示例</span><span class="label analysis">反思修复</span></div><h3>第 14 页：从“虚假承诺”到“模型不再提方案”</h3></div><span class="page-id">P14</span></div>
+          <div class="takeaway"><strong>本页一句话：</strong>惩罚定义太窄，模型会钻空子；惩罚定义太宽，模型会回避正确动作。反思机制的价值，是把“为什么被罚”和“如何修复”显式写回下一次 rollout。</div>
+
+          <div class="compare-grid">
+            <div class="compare-pane bad"><header>漏洞 A：只惩罚“未同意就退款”</header><div class="body"><p><strong>优化目标：</strong>用户同意退款后才能调用工具。</p><p><strong>惩罚：</strong>执行工具且用户未同意 → 0.1。</p><p><strong>投机：</strong>模型口头说“已退款”，却不调用工具。它避开惩罚，但做出虚假承诺。</p></div></div>
+            <div class="compare-pane bad"><header>漏洞 B：惩罚“承诺但未调用”</header><div class="body"><p><strong>优化目标：</strong>宣称执行时必须有工具结果。</p><p><strong>惩罚：</strong>说已退款且无工具 → 0.1。</p><p><strong>投机：</strong>模型不再提出退款，即使退款本来是正确方案。</p></div></div>
+          </div>
+
+          <h4>正确拆分四种状态</h4>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>用户状态</th><th>模型语言</th><th>工具状态</th><th>评价</th></tr></thead>
+              <tbody>
+                <tr><td>未同意</td><td>提出退款作为选项</td><td>未调用</td><td class="good-text">正确：协商阶段</td></tr>
+                <tr><td>未同意</td><td>宣称已经退款</td><td>未调用</td><td class="bad-text">虚假承诺</td></tr>
+                <tr><td>已同意</td><td>告知准备执行</td><td>调用失败</td><td class="mixed-text">需如实告知失败并给替代路径</td></tr>
+                <tr><td>已同意</td><td>告知已完成</td><td>调用成功</td><td class="good-text">正确闭环</td></tr>
+              </tbody>
+            </table>
+          </div>
+
+          <h4>反思机制的建议输入格式</h4>
+          <div class="formula"><span class="formula-label">反思重采样输入</span><div class="formula-expression">原任务 + 第一次轨迹 + 惩罚原因码 + 违反证据 + 可接受修复原则 → 第二次 rollout</div><p class="formula-note"><strong>读法：</strong>第二次采样不只看到“分数低”，还要知道违反了什么、证据在哪、怎样修改才不会从一个漏洞跳到另一个漏洞。</p></div>
+          <div class="dialogue">
+            <div class="turn"><span class="speaker agent">第一次采样</span><p>已经给您退款了，请注意查收。</p></div>
+            <div class="turn"><span class="speaker user">反思知识</span><p>检测到 <code>PROMISE_WITHOUT_TOOL</code>：当前轨迹没有退款工具成功返回。你可以提出退款选项，但在用户同意并收到工具成功结果前，不能宣称已完成。</p></div>
+            <div class="turn"><span class="speaker agent">第二次采样</span><p>我可以为您申请退款。需要您先确认是否接受；您确认后我再提交，结果以系统返回为准。</p></div>
+          </div>
+          <p class="footnotes">以上为模拟示例，复现原页提出的反思格式，不是原始线上会话。</p>
+
+          <div class="callout success"><div class="callout-title"><i data-lucide="refresh-cw"></i>反思机制的真正产物</div><p>不是“让模型多想一步”，而是形成 <strong>惩罚原因 → 可观测证据 → 修复原则 → 新轨迹</strong> 的结构化映射。这些映射还应回流到规则测试、裁判校准集和困难样本库。</p></div>
+        </article>
+
+        <article class="source-page" id="page-15">
+          <div class="page-heading"><div><div class="labels"><span class="label fact">原图机制</span><span class="label analysis">奖励设计</span></div><h3>第 15 页：惩罚项、种子更新与话术风格奖励</h3></div><span class="page-id">P15</span></div>
+          <div class="takeaway"><strong>本页一句话：</strong>规则奖励能管“绝对不能做什么”，风格奖励能管“应该怎么说”，但二者都需要数据覆盖与权重边界，否则会从一个极端摆到另一个极端。</div>
+
+          <h4>惩罚项适合覆盖的行为</h4>
+          <ul>
+            <li><strong>硬违规：</strong>越权承诺、未经同意执行不可逆动作、伪造工具结果、泄露身份或隐私。</li>
+            <li><strong>流程错误：</strong>该转人工时拒绝升级、承诺转接但未执行、达到终止条件仍循环。</li>
+            <li><strong>话术风险：</strong>说自己是 AI、官方书面腔过重、过度礼貌导致冗长、对责任方做未经核实的定性。</li>
+            <li><strong>更新机制：</strong>惩罚规则必须和“会触发它的种子数据”共同更新；只有规则没有样本，训练中几乎看不到该梯度。</li>
+          </ul>
+
+          <h4>外客电话 V1 → V3 的经验</h4>
+          <div class="timeline">
+            <div class="timeline-item"><h4>V1：承诺转接导致入队率高</h4><p>模型话术频繁触发“承诺转接其他客服”的熔断路径。</p></div>
+            <div class="timeline-item"><h4>V2：增加熔断规则惩罚</h4><p>命中承诺转接即扣分，但入队率未显著下降，训练日志显示触发该惩罚的样本太少。</p></div>
+            <div class="timeline-item"><h4>V3：叠加“转人工”种子会话</h4><p>在奖励不变的基础上提高相关状态覆盖，模型才有机会学到稳定替代策略。</p></div>
+          </div>
+
+          <h4>风格奖励不是越高越好</h4>
+          <p>原页比较了无风格控制、风格奖励占比 0.15 和 0.30 的话术。适量风格奖励能改善口语化、倾听与共情；权重过高则可能让模型增加道歉、站队和安慰长度，牺牲信息收集与流程推进。</p>
+
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>权重状态</th><th>可能收益</th><th>典型风险</th><th>门禁建议</th></tr></thead>
+              <tbody>
+                <tr><td>无风格控制</td><td>简短、直接</td><td>冷淡、书面、像流程机器人</td><td>用人工风格集检查最低可接受线</td></tr>
+                <tr><td>0.15 左右</td><td>口语自然度与共情改善</td><td>少量冗余</td><td>同时约束长度与新信息增量</td></tr>
+                <tr><td>0.30 左右</td><td>安抚更明显</td><td>发散、过度承诺、流程被情绪话术挤占</td><td>风格分设上限，硬规则优先</td></tr>
+              </tbody>
+            </table>
+          </div>
+
+          <div class="callout warn"><div class="callout-title"><i data-lucide="sliders-horizontal"></i>权重选择应看 Pareto 前沿</div><p>不要只搜索单一加权总分最高的点。应同时画出解决率、合规率、转人工率、重复率、平均轮次和风格分的 Pareto 前沿，选择满足业务底线后体验最优的配置。</p></div>
+        </article>
+
+        <article class="source-page" id="page-16">
+          <div class="page-heading"><div><div class="labels"><span class="label fact">原图实测</span><span class="label analysis">信用分配</span></div><h3>第 16 页：Session GRM 按轮次分配与 MTRPP</h3></div><span class="page-id">P16</span></div>
+          <div class="takeaway"><strong>本页一句话：</strong>整段会话的结果不能平均奖励所有轮次；把 Session reward 与每轮 reward 相乘，可以突出关键轮次，但也可能让前期必要铺垫被低估。</div>
+
+          <div class="compare-grid">
+            <div class="compare-pane bad"><header>改进前：会话分平均扩散</header><div class="body"><p>先计算 \(R_{\mathrm{old}}=R_{\mathrm{session}}\sum_{t=1}^{T}R_{\mathrm{turn},t}\)，再把同一个会话结果平均分配给各轮输出 token。</p><p>问题：无关寒暄、重复话术与关键工具动作获得近似同等的会话结果信用。</p></div></div>
+            <div class="compare-pane good"><header>改进后：逐轮门控</header><div class="body"><p>第 \(t\) 轮单独使用 \(R_t=R_{\mathrm{session}}R_{\mathrm{turn},t}\)，并且只分配给本轮策略输出 token。</p><p>收益：关键轮的局部质量与最终结果共同决定梯度，归因更细。</p></div></div>
+          </div>
+
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>实验</th><th>迭代点</th><th class="num">转人工率</th><th class="num">智能解决率</th><th class="num">综合解决率</th></tr></thead>
+              <tbody>
+                <tr><td>对照组</td><td>基础配置</td><td class="num">34.39%</td><td class="num">30.13%</td><td class="num">43.76%</td></tr>
+                <tr><td>MTRL V2.2</td><td>话术多样性 + Hard Case</td><td class="num">30.53%</td><td class="num">36.53%</td><td class="num">49.03%</td></tr>
+                <tr><td>MTRL V3.0</td><td>V2.2 + MTRPP 轮次奖励分配</td><td class="num good-text">30.08%</td><td class="num">36.23%</td><td class="num">48.89%</td></tr>
+              </tbody>
+            </table>
+          </div>
+
+          <p>MTRPP 后转人工率改善 0.45 个百分点，但智能解决率和综合解决率分别轻微下降 0.30、0.14 个百分点。这个结果支持“信用分配改变了策略”，但还不能证明整体更优；需要结合显著性、会话长度、难例分桶和关键轮人工分析。</p>
+
+          <h4>更进一步的信用分配方案</h4>
+          <ul>
+            <li><strong>因果差分：</strong>遮掉或替换第 t 轮动作，比较最终结果变化，估计该轮边际贡献。</li>
+            <li><strong>过程奖励模型：</strong>对“澄清、核验、协商、执行、收尾”分别判断状态推进，而非只给语言质量。</li>
+            <li><strong>优势回传衰减：</strong>最终结果向前回传时按距离衰减，但保留被规则识别的关键动作权重。</li>
+            <li><strong>价值基线：</strong>比较当前动作与同状态可选动作的相对优势，降低对会话固定难度的偏差。</li>
+          </ul>
+
+          <div class="callout danger"><div class="callout-title"><i data-lucide="badge-alert"></i>第一轮偏低的已知卡点</div><p>原页记录第一轮奖励偏低，可能因为要求字段完整且方案一致，过早抑制策略多样性。解决方式不是简单抬高第一轮分数，而是区分“必须收集的最小信息”和“允许后续补充的信息”。</p></div>
+        </article>
+
+        <article class="source-page" id="page-17">
+          <div class="page-heading"><div><div class="labels"><span class="label fact">原图实测</span><span class="label analysis">迁移复盘</span></div><h3>第 17 页：闪购迁移认知、平台瓶颈与在线初测</h3></div><span class="page-id">P17</span></div>
+          <div class="takeaway"><strong>本页一句话：</strong>跨业务迁移最先暴露的不是算法问题，而是样本规模、模拟器稳定性、奖励服务可用性和日志可观测性。</div>
+
+          <h4>原页沉淀的三条认知</h4>
+          <ol>
+            <li><strong>用户模拟器要用 session-level 数据：</strong>否则容易学到逐轮像用户，却不会在正确条件正常结束。</li>
+            <li><strong>客服训练数据重质量和边界：</strong>原页建议约 1500 条高质量数据，见过/未见 1:1，并聚焦用户转人工前的关键博弈节点。这里应把“1500”视为该迁移实验经验，不是普适最优规模。</li>
+            <li><strong>奖励细节必须可观测：</strong>第一轮奖励数组已经显示不同维度差异，如果日志只存总分，无法定位哪一项在压制策略。</li>
+          </ol>
+
+          <h4>原页工程卡点</h4>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>模块</th><th>现象</th><th>后果</th><th>工程建议</th></tr></thead>
+              <tbody>
+                <tr><td>奖励服务</td><td>多机环境下 BGE 服务概率性不可达</td><td>奖励缺失、训练批次不一致</td><td>健康检查、重试/熔断、失败样本隔离、奖励版本与请求 ID 全链路日志</td></tr>
+                <tr><td>可观测性</td><td>奖励细节可视化缺失，日志保存失败</td><td>无法解释退化和 reward hack</td><td>逐轮分量、原因码、工具证据、采样版本结构化落盘</td></tr>
+                <tr><td>用户模拟器</td><td>并行负载高时显存崩溃、终止逻辑异常、输出重复</td><td>坏轨迹污染 RL</td><td>独立资源池、并发上限、终止单测、异常轨迹剔除与回放</td></tr>
+                <tr><td>客服模型</td><td>约 6000 条数据导致训练超过 2 天中断，熵低限制探索</td><td>迭代慢、策略早熟</td><td>数据去重、课程采样、阶段 checkpoint、熵/多样性监控</td></tr>
+              </tbody>
+            </table>
+          </div>
+
+          <h4>在线骑手初测（原页，待全量发布）</h4>
+          <div class="metric-grid">
+            <div class="metric"><span class="value">9.4% → 8.7%</span><span class="delta">−0.7 pp</span><span class="name">转人工率；相对下降约 7.44%</span></div>
+            <div class="metric"><span class="value">56.2% → 56.6%</span><span class="delta">+0.4 pp</span><span class="name">智能解决率；相对提升约 0.71%</span></div>
+            <div class="metric"><span class="value">待全量</span><span class="delta bad">结论未封板</span><span class="name">需要完整流量、周期与显著性</span></div>
+            <div class="metric"><span class="value">迁移可行</span><span class="delta">工程优先</span><span class="name">先稳定平台，再扩大算法搜索</span></div>
+          </div>
+
+          <div class="callout warn"><div class="callout-title"><i data-lucide="flask-conical"></i>在线实验最小披露</div><p>应补充随机化单位、实验周期、流量占比、样本量、基线版本、置信区间、成本/赔付/投诉护栏、异常流量剔除规则，以及是否存在同期策略或业务变化。</p></div>
+        </article>
+      </section>
+
+      <section class="chapter" id="chapter-6" data-section="chapter-6">
+        <div class="chapter-head">
+          <p class="chapter-no">06 · 未来工作与路线图</p>
+          <h2>下一阶段：从“结果奖励”走向“策略可解释、方案可验证”</h2>
+          <p class="chapter-lead">本章对应原第 18–19 页。原材料把理想客服概括为“先理解共情，再情绪安抚，最后给正确方案”。要让模型稳定做到，需要同时解决轨迹策略评价和方案正确性验证。</p>
+        </div>
+
+        <article class="source-page" id="page-18">
+          <div class="page-heading"><div><div class="labels"><span class="label fact">原图案例</span><span class="label sim">模拟优化</span><span class="label analysis">策略抽象</span></div><h3>第 18 页：智能侧与人工侧的策略差异</h3></div><span class="page-id">P18</span></div>
+          <div class="takeaway"><strong>本页一句话：</strong>智能侧容易“听到问题就给流程”，人工侧通常先检查人身风险和情绪，再讨论责任与方案；理想模型需要把这种策略顺序学成状态机，而不是背几句安抚话术。</div>
+
+          <p>原图场景中，骑手摔车、餐品损坏。智能客服很快进入“解释违规、指导申诉/退款”的流程；人工客服先问“人有没有受伤、严不严重”。后者并不一定更懂业务规则，但更准确地判断了当前最高优先级。</p>
+
+          <div class="compare-grid">
+            <div class="compare-pane bad"><header>智能侧常见路径：问题 → 方案</header><div class="body"><p>“收到您反馈的问题，请稍等，我查看情况。”随后直接解释违规取消、餐损或责任。</p><p><strong>缺口：</strong>未确认人身安全，用户会感觉系统只关心订单。</p></div></div>
+            <div class="compare-pane good"><header>人工侧更优路径：风险 → 情绪 → 方案</header><div class="body"><p>先确认是否受伤和是否需要紧急帮助，再明确餐损与违规处理，最后协商用户可接受的最小损失方案。</p><p><strong>价值：</strong>先处理不可逆风险，再优化业务结果。</p></div></div>
+          </div>
+
+          <div class="diagram-frame wide-diagram stacked-diagram state-machine-diagram">
+            <p class="diagram-title">理想多轮客服策略状态机</p>
+            <pre class="mermaid">
+%%{init: {"flowchart": {"curve": "stepAfter", "nodeSpacing": 26, "rankSpacing": 40}}}%%
+flowchart TB
+  subgraph MAIN_A["主流程 A · 先处理风险，再建立共同情境"]
+    direction LR
+    START(["会话开始"]) --> RISK["① 风险识别"]
+    RISK -->|风险可控| RESTATE["② 情境复述"]
+    RESTATE --> EMPATHY["③ 情绪安抚"] --> INFO["④ 关键信息收集"]
+  end
+
+  subgraph MAIN_B["主流程 B · 校验、协商、执行与核验"]
+    direction LR
+    CHECK["⑤ 方案校验"] -->|合法且可执行| NEGOTIATE["⑥ 方案协商"]
+    NEGOTIATE -->|用户确认| TOOL["⑦ 工具执行"]
+    TOOL --> VERIFY["⑧ 结果核验"] -->|已解决| CLOSE(["⑨ 自然收尾"])
+  end
+
+  INFO --> CHECK
+  RISK -->|人身 / 资金 / 合规高风险| URGENT(["紧急升级并结束"])
+  CHECK -->|信息不足| CLARIFY["继续澄清<br/>回到 ④ 关键信息收集"]
+  NEGOTIATE -->|用户拒绝| ALT["提供替代方案<br/>回到 ⑥ 方案协商"]
+  VERIFY -->|工具失败 / 权限不足| HUMAN(["人工升级并结束"])
+
+  classDef normal fill:#f6e9e4,stroke:#9b4d3b,color:#242729,stroke-width:1.4px
+  classDef check fill:#e8f0f2,stroke:#356579,color:#242729,stroke-width:1.4px
+  classDef success fill:#e8f1e9,stroke:#3e7553,color:#242729,stroke-width:1.4px
+  classDef risk fill:#f6e7e8,stroke:#9f454a,color:#242729,stroke-width:1.4px
+  class START,RESTATE,EMPATHY,INFO,NEGOTIATE normal
+  class RISK,CHECK,VERIFY check
+  class TOOL,CLOSE success
+  class URGENT,CLARIFY,ALT,HUMAN risk
+            </pre>
+          </div>
+
+          <h4>模拟优化对话：骑手摔车并造成餐损</h4>
+          <div class="dialogue">
+            <div class="turn"><span class="speaker user">骑手</span><p>刚才摔车了，餐也摔坏了，现在用户那边要取消。</p></div>
+            <div class="turn"><span class="speaker agent">客服</span><p>先确认您本人有没有受伤？如果有明显疼痛、出血或行动困难，请先保证安全并联系急救，订单我这边再协助处理。<span class="annotation">策略：安全优先，不立刻讨论判责。</span></p></div>
+            <div class="turn"><span class="speaker user">骑手</span><p>没有大伤，腿有点儿瘸，但还能走。</p></div>
+            <div class="turn"><span class="speaker agent">客服</span><p>了解，仍建议您先停在安全位置，不要继续骑行。餐品已经损坏的话，我会按餐损路径核对；请告诉我订单是否已经点击送达，以及用户是否已经取消。<span class="annotation">策略：给安全建议，同时收集决定处理路径的最小字段。</span></p></div>
+            <div class="turn"><span class="speaker user">骑手</span><p>还没点送达，用户也还没取消。</p></div>
+            <div class="turn"><span class="speaker agent">客服</span><p>那先不要误点送达。我可以帮您发起异常报备，并提示用户由平台处理餐品问题；是否免责要以核实结果为准，我不会在结果出来前承诺。您确认我现在提交报备吗？<span class="annotation">策略：合法方案 + 明确承诺边界 + 用户确认后执行。</span></p></div>
+          </div>
+          <p class="footnotes">以上为根据原页对比补充的模拟 case，用于展示理想策略顺序。</p>
+
+          <h4>如何把“策略顺序”变成奖励</h4>
+          <ul>
+            <li>检测到人身风险关键词时，未做安全确认就谈责任或补偿，设置高优先级惩罚。</li>
+            <li>安全确认完成后仍持续重复关心，给重复和无推进惩罚，避免“过度共情”。</li>
+            <li>只有在必要槽位齐全时方案校验器才放行；否则话术再自然也不能获得方案完成分。</li>
+            <li>工具执行成功且对用户如实说明后才给闭环奖励，不能仅依据用户“好的”判断解决。</li>
+          </ul>
+
+        </article>
+
+        <article class="source-page" id="page-19">
+          <div class="page-heading"><div><div class="labels"><span class="label fact">原图难点</span><span class="label analysis">研究路线</span><span class="label check">待验证</span></div><h3>第 19 页：轨迹策略建模与方案正确性保障</h3></div><span class="page-id">P19</span></div>
+          <div class="takeaway"><strong>本页一句话：</strong>下一代奖励系统必须能解释“这段对话为什么好”，并用外部知识和工具状态证明“这个方案确实正确”。</div>
+
+          <h4>难点 1：对话策略建模</h4>
+          <p>只看用户是否满意、问题是否解决，无法区分策略质量。例如模型可能用高额补偿快速换取满意，也可能靠模拟器迎合结束会话。原页提出建设可控、可解释的“轨迹策略评估模型”，为整段沟通策略打分并给出原因。</p>
+
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>策略维度</th><th>好轨迹的可观察证据</th><th>坏轨迹的原因码</th></tr></thead>
+              <tbody>
+                <tr><td>风险优先级</td><td>先处理人身、资金、隐私和合规风险</td><td><code>RISK_IGNORED</code></td></tr>
+                <tr><td>信息效率</td><td>只问会改变方案的关键问题，不重复已知信息</td><td><code>REDUNDANT_QUERY</code></td></tr>
+                <tr><td>情绪时机</td><td>在冲突点先承认感受，之后及时回到事实和行动</td><td><code>EMPATHY_MISTIMED</code></td></tr>
+                <tr><td>方案协商</td><td>解释选项、代价与边界，让用户作可逆选择</td><td><code>OPTION_MISSING</code></td></tr>
+                <tr><td>执行闭环</td><td>语言承诺与工具结果一致，结束条件明确</td><td><code>PROMISE_WITHOUT_TOOL</code></td></tr>
+              </tbody>
+            </table>
+          </div>
+
+          <h4>难点 2：方案正确性保障</h4>
+          <p>当前 Rule-Based Reward 和 GRM 主要聚焦话术，方案层往往只靠规则兜底。建议将“知识驱动的 Turn-Level Verifier”与“会话级外部验证器”分开：</p>
+          <ul>
+            <li><strong>Turn-Level Verifier：</strong>输入当前状态、知识条款、可用工具与候选动作，判断方案是否满足前置条件。</li>
+            <li><strong>Session-Level Verifier：</strong>读取完整工具日志与最终状态，验证承诺是否执行、结果是否到账、终止是否正确。</li>
+            <li><strong>冲突处理：</strong>当风格 GRM 认为回复很好，但 verifier 判定方案错误时，正确性必须覆盖风格分。</li>
+            <li><strong>知识版本化：</strong>奖励记录必须绑定政策版本和知识快照，避免用新规则误判旧日志。</li>
+          </ul>
+
+          <h4>难点 3：方案与话术协同优化</h4>
+          <p>“方案正确但时机不对”依然会失败。可把策略拆成两层：高层 planner 选择 <code>安抚 / 澄清 / 核验 / 协商 / 执行 / 升级</code>，低层 generator 生成符合业务风格的话术；奖励分别评估高层动作和低层表达，再通过会话结果联合校准。</p>
+
+          <div class="diagram-frame wide-diagram stacked-diagram safety-diagram">
+            <p class="diagram-title">候选模型进入线上前的安全门禁</p>
+            <pre class="mermaid">
+%%{init: {"flowchart": {"curve": "stepAfter", "nodeSpacing": 30, "rankSpacing": 38}}}%%
+flowchart TB
+  subgraph GATES["四级上线门禁：任一失败都不能继续放量"]
+    direction LR
+    A["候选 Policy"] --> C["① 固定回归集<br/>规则 / 工具正确率"]
+    C -->|通过| E["② 多模拟器困难集<br/>轨迹 GSB / 风险召回"]
+    E -->|通过| G["③ 人工盲评<br/>方案 / 风格"]
+    G -->|通过| I["④ 小流量灰度<br/>业务 / 成本 / 投诉护栏"]
+    I -->|通过| K(["逐级放量"])
+  end
+
+  C -.失败.-> R["返回数据与奖励修复"]
+  E -.失败.-> R
+  G -.失败.-> R
+  I -.护栏触发.-> J["自动回滚"]
+  J --> R
+  R --> LOOP["修复后生成新候选 Policy<br/>重新从 ① 开始"]
+
+  classDef gate fill:#e8f0f2,stroke:#356579,color:#242729,stroke-width:1.4px
+  classDef fail fill:#f6e7e8,stroke:#9f454a,color:#242729,stroke-width:1.4px
+  classDef success fill:#e8f1e9,stroke:#3e7553,color:#242729,stroke-width:1.4px
+  class A,C,E,G,I gate
+  class R,J fail
+  class K,LOOP success
+            </pre>
+          </div>
+
+          <h4>分阶段路线图</h4>
+          <div class="timeline">
+            <div class="timeline-item"><h4>P0｜0–4 周：补齐可观测性与回归门禁</h4><p>统一轨迹 schema、逐轮奖励分量、惩罚原因码、工具证据；建立 200–500 条高风险回归集和自动回放。</p></div>
+            <div class="timeline-item"><h4>P1｜1–2 个月：上线方案 Verifier</h4><p>优先覆盖退款、赔付、申诉、转人工等高价值动作；验证语言承诺与工具执行一致。</p></div>
+            <div class="timeline-item"><h4>P2｜2–4 个月：训练轨迹策略评估模型</h4><p>从专家规则、人工 pairwise 和失败桶构造策略标签，输出分数、原因和关键轮定位。</p></div>
+            <div class="timeline-item"><h4>P3｜持续：离在线一致性与安全放量</h4><p>维护模拟器-人工-线上三方排序相关性；每次奖励、知识和数据版本变化都触发回归。</p></div>
+          </div>
+
+        </article>
+      </section>
+
+      <section class="chapter" id="interview" data-section="interview">
+        <div class="chapter-head">
+          <p class="chapter-no">07 · 面试表达</p>
+          <h2>别背名词：把多轮 RL 讲成能被连续追问的系统项目</h2>
+          <p class="chapter-lead">面试回答先给判断，再解释机制、证据和边界。下面的示例只使用前文已核对的原图信息，不把建议方案说成项目已经上线，也不把局部实验包装成普遍结论。</p>
+        </div>
+
+        <div class="interview-stack">
+          <article class="interview-answer">
+            <span class="question-no">问题 01</span>
+            <h3>为什么智能客服需要多轮 RL，继续做 SFT 不够吗？</h3>
+            <p class="answer-lead"><strong>我的判断是：</strong>SFT 适合教模型“在给定上下文下应该怎么答”，多轮 RL 解决的是“当前动作会改变用户下一步行为，怎样让整段轨迹最终更好”。只要客服动作会改变情绪、信息、工具状态和终止结果，单轮监督就缺少对后续后果的直接优化。</p>
+            <div class="answer-points">
+              <div class="answer-point"><strong>为什么做</strong><p>局部正确回复可能组成重复、越权或过早终止的坏会话，真正目标是解决率、正确转人工和可执行闭环。</p></div>
+              <div class="answer-point"><strong>怎么做</strong><p>用 SFT 建立角色和基本流程，再让当前策略与用户模拟器交互，产生 on-policy 多轮轨迹并按最终结果更新。</p></div>
+              <div class="answer-point"><strong>边界</strong><p>多轮 RL 不是 SFT 的无条件替代；模拟器失真、奖励错误或数据覆盖不足时，它会更快放大错误。</p></div>
+            </div>
+            <p class="evidence-anchor">证据锚点：<a href="#page-1">P01 业务矛盾</a> · <a href="#page-2">P02 双流水线</a> · <a href="#page-7">P07 基线依赖</a></p>
+          </article>
+
+          <article class="interview-answer">
+            <span class="question-no">问题 02</span>
+            <h3>多轮客服的奖励怎么设计，为什么不能直接加权平均？</h3>
+            <p class="answer-lead"><strong>我的判断是：</strong>先把不可妥协的正确性做成硬门控，再用 Turn reward 衡量局部推进，用 Session reward 衡量整段结果。资金、权限、隐私和工具执行一旦错误，不能靠高共情或好文风把总分补回来。</p>
+            <div class="answer-points">
+              <div class="answer-point"><strong>第一层：底线</strong><p>规则与 verifier 检查方案合法性、用户确认、工具返回和承诺一致性；触发严重错误时截断或重罚。</p></div>
+              <div class="answer-point"><strong>第二层：过程</strong><p>轮次奖励判断是否回应诉求、收集必要信息、减少重复并推进状态，而不是只判断语言是否顺滑。</p></div>
+              <div class="answer-point"><strong>第三层：结果</strong><p>会话奖励检查最终解决、正确终止、情绪变化和整体连贯性，再通过信用分配定位关键轮。</p></div>
+            </div>
+            <p class="evidence-anchor">证据锚点：<a href="#page-3">P03 分层奖励</a> · <a href="#page-14">P14 Reward hacking</a> · <a href="#page-16">P16 信用分配</a></p>
+          </article>
+
+          <article class="interview-answer">
+            <span class="question-no">问题 03</span>
+            <h3>怎么证明用户模拟器可信，而不是陪策略演戏？</h3>
+            <p class="answer-lead"><strong>我的判断是：</strong>“像真人”只是最低要求，真正有用的模拟器必须让候选策略的离线排序能预测人工盲评或线上 A/B 排序。只报一个图灵测试误识率，无法证明它对训练和模型选择有效。</p>
+            <div class="answer-points">
+              <div class="answer-point"><strong>行为真实性</strong><p>比较真实与模拟用户的拒绝率、情绪转移、话题切换、终止原因和工具路径分布。</p></div>
+              <div class="answer-point"><strong>可控与稳定</strong><p>检查角色一致、正确终止、并发异常、重复输出和提示泄露，并对困难人格做固定回归。</p></div>
+              <div class="answer-point"><strong>排序有效性</strong><p>用同一组候选策略测模拟器、人工和线上三方排序相关性，持续监控版本变化后的漂移。</p></div>
+            </div>
+            <p class="evidence-anchor">证据锚点：<a href="#page-2">P02 模拟器能力</a> · <a href="#page-6">P06 离线评估</a> · <a href="#page-17">P17 工程卡点</a></p>
+          </article>
+
+          <article class="interview-answer">
+            <span class="question-no">问题 04</span>
+            <h3>如果把这项工作当项目介绍，60 秒怎么讲？</h3>
+            <p class="answer-lead"><strong>我的判断是：</strong>项目主线不是“用了 VeRL、vLLM 或 SGLang”，而是把一句话优化改造成可训练、可评估、可上线的服务轨迹闭环。</p>
+            <div class="answer-points">
+              <div class="answer-point"><strong>为什么做</strong><p>单轮模型会重复询问、缺少长期目标、对流程分支适应不足，因此需要直接优化整段服务结果。</p></div>
+              <div class="answer-point"><strong>怎么做</strong><p>从真实难例构造种子任务，训练个性化模拟器；策略并行 rollout；规则、Turn GRM、Session GRM 联合评分；离线 GSB 后灰度上线。</p></div>
+              <div class="answer-point"><strong>结果与复盘</strong><p>特定 50 条场景转人工率 64%→46%，100 组话术 G/S/B 为 53/11/36；但对回流 SFT 并非全面领先，仍需补显著性与成本护栏。</p></div>
+            </div>
+            <p class="evidence-anchor">完整证据：<a href="#page-5">P05 训练框架</a> · <a href="#page-8">P08 场景实验</a> · <a href="#page-9">P09 人工评估</a> · <a href="#page-19">P19 下一步</a></p>
+          </article>
+        </div>
+
+        <h3>高频追问地图</h3>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>追问</th><th>回答时必须说清</th><th>不要踩的坑</th><th>回看页</th></tr></thead>
+            <tbody>
+              <tr><td>为什么不用纯规则或工作流？</td><td>稳定约束交给规则，开放式澄清和协商交给策略；两者是分工，不是二选一。</td><td>把 RL 说成能替代业务状态机</td><td><a href="#page-1">P01</a> / <a href="#page-19">P19</a></td></tr>
+              <tr><td>Reward hacking 怎么发现？</td><td>逐轮奖励分量、原因码、工具证据、失败桶回放和对比重采样。</td><td>只看总奖励曲线上升</td><td><a href="#page-13">P13</a> / <a href="#page-14">P14</a></td></tr>
+              <tr><td>长短会话怎么并行？</td><td>按 session 隔离状态、缓存和日志；支持独立终止并剔除异常轨迹。</td><td>把多轮 rollout 说成固定循环 N 次</td><td><a href="#page-5">P05</a></td></tr>
+              <tr><td>离线指标为什么可信？</td><td>盲评、随机顺序、多裁判、分桶、置信区间，以及离线与线上排序一致性。</td><td>只报 GSB 总胜率</td><td><a href="#page-6">P06</a></td></tr>
+              <tr><td>下一步最先做什么？</td><td>先补轨迹 schema、奖励原因码、工具证据和高风险回归，再扩大训练规模。</td><td>平台不稳定时先堆数据和算力</td><td><a href="#page-17">P17</a> / <a href="#page-19">P19</a></td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="chapter" id="chapter-8" data-section="chapter-8">
+        <div class="chapter-head">
+          <p class="chapter-no">08 · 逐页速查与验收</p>
+          <h2>19 页内容地图：每页讲什么、补了什么、下一步做什么</h2>
+          <p class="chapter-lead">前文已经逐页展开。本章把 19 页压缩成一张可用于评审、汇报和任务拆解的索引，并给出系统上线前的完整验收表。</p>
+        </div>
+
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>页</th><th>原页焦点</th><th>本次补充</th><th>最重要行动</th></tr></thead>
+            <tbody>
+              <tr><td><a href="#page-1">P01</a></td><td>背景、核心痛点、潜在收益、全流程</td><td>长时程决策定义、收益边界、安全转人工</td><td>先定义业务状态与正确终止</td></tr>
+              <tr><td><a href="#page-2">P02</a></td><td>数据/训练 Pipeline、个性化模拟器</td><td>模拟器数据 schema、三层能力评价、迎合风险</td><td>建立真实-模拟行为转移对照</td></tr>
+              <tr><td><a href="#page-3">P03</a></td><td>Rule、Query GRM、Session GRM</td><td>硬门控优先、多目标公式、奖励职责边界</td><td>把资金/权限/工具正确性设为硬约束</td></tr>
+              <tr><td><a href="#page-4">P04</a></td><td>自然分布和困难样本筛选</td><td>去重、隐私、泄漏、建议配比与最小验收</td><td>按用户/任务/话术簇切分数据</td></tr>
+              <tr><td><a href="#page-5">P05</a></td><td>vLLM/SGLang 多轮训练</td><td>异步状态机、执行时序、训练可观测指标</td><td>按 session 隔离状态和奖励日志</td></tr>
+              <tr><td><a href="#page-6">P06</a></td><td>单轮/多轮离线评估</td><td>多裁判 GSB、净胜率、离在线一致性</td><td>建立真实线上锚点评测集</td></tr>
+              <tr><td><a href="#page-7">P07</a></td><td>业务结果和基线比较</td><td>百分点/相对变化双口径、数据冲突提示</td><td>补样本量、置信区间与成本护栏</td></tr>
+              <tr><td><a href="#page-8">P08</a></td><td>方案分布、转人工专项</td><td>同分母比较原则、动作偏移解读</td><td>把动作正确率和方案占比一起看</td></tr>
+              <tr><td><a href="#page-9">P09</a></td><td>100 Case GSB、服务力</td><td>净胜率、混合信号与量表缺失</td><td>补评分范围、方差和裁判一致性</td></tr>
+              <tr><td><a href="#page-10">P10</a></td><td>温度与倾听好案例</td><td>可验证安抚、事实/情绪/行动三层结构</td><td>限制承诺，保留用户确认权</td></tr>
+              <tr><td><a href="#page-11">P11</a></td><td>流程连续与补偿案例</td><td>保留/压缩项、四步微策略</td><td>减少过度奉承和重复结束</td></tr>
+              <tr><td><a href="#page-12">P12</a></td><td>灵活交互案例</td><td>不确定性说明、受约束选项、失败模式表</td><td>训练“提出方案”与“宣称执行”的区别</td></tr>
+              <tr><td><a href="#page-13">P13</a></td><td>数据消融与 Reward hacking</td><td>逐版本方向分析、奖励漏洞闭环</td><td>每次改奖励都回放失败桶</td></tr>
+              <tr><td><a href="#page-14">P14</a></td><td>退款投机与反思机制</td><td>四状态拆分、原因码与修复提示</td><td>记录违反证据而不是只记总分</td></tr>
+              <tr><td><a href="#page-15">P15</a></td><td>惩罚项与风格控制</td><td>Pareto 权重、种子覆盖、风格上限</td><td>规则、数据种子和回归集一起更新</td></tr>
+              <tr><td><a href="#page-16">P16</a></td><td>Session reward 按轮分配</td><td>MTRPP 得失、进一步信用分配方案</td><td>用关键轮人工分析验证归因</td></tr>
+              <tr><td><a href="#page-17">P17</a></td><td>迁移认知、工程卡点、线上初测</td><td>平台可靠性建议、在线披露清单</td><td>先稳定奖励/日志/模拟器再扩规模</td></tr>
+              <tr><td><a href="#page-18">P18</a></td><td>理想策略与人工对话差异</td><td>风险优先状态机、完整模拟 case</td><td>把策略顺序转成可观察奖励</td></tr>
+              <tr><td><a href="#page-19">P19</a></td><td>策略评估与正确性难点</td><td>原因码、双层 verifier、安全门禁和路线图</td><td>P0 先补轨迹 schema 与高风险回归</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h3>上线前六域验收表</h3>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>域</th><th>必须回答的问题</th><th>最低可交付证据</th></tr></thead>
+            <tbody>
+              <tr><td>数据</td><td>困难场景是否覆盖？是否存在泄漏、重复和策略偏置？</td><td>数据卡、分桶统计、近重复报告、隐私审计、版本 ID</td></tr>
+              <tr><td>模拟器</td><td>是否真实、可控、能正常终止？是否迎合候选策略？</td><td>混淆矩阵、行为分布、终止准确率、真实/模拟排序一致性</td></tr>
+              <tr><td>奖励</td><td>硬约束是否优先？每个分量是否可解释？是否有已知 hack？</td><td>逐轮分量、原因码、攻击用例、回归通过率</td></tr>
+              <tr><td>训练</td><td>状态是否隔离？异常轨迹是否剔除？探索是否坍缩？</td><td>session 追踪、异常率、熵/KL、长度分布、checkpoint 可恢复性</td></tr>
+              <tr><td>评估</td><td>离线胜率能否预测线上？裁判是否稳定？</td><td>盲评协议、置信区间、裁判一致性、线上锚点相关性</td></tr>
+              <tr><td>上线</td><td>收益是否超过成本与风险？能否自动回滚？</td><td>A/B 方案、成本/投诉/合规护栏、告警、回滚演练</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div class="callout success"><div class="callout-title"><i data-lucide="flag"></i>最终判断</div><p>材料给出了方向性证据：多轮 RL 有望减少重复、提高会话连续性，并改善特定不信任场景下的安抚；但现有截图没有完整样本量、置信区间和统一基线，尚不足以证明普遍提升。它也不是单轮 RL 或回流 SFT 的无条件替代。真正可持续的优势需要：<strong>高质量难例、真实模拟器、硬正确性门控、细粒度信用分配、离在线一致性和稳定工程平台</strong>共同成立。</p></div>
+
+        <h3>原材料注释与本页处理</h3>
+        <ol class="footnotes">
+          <li>“情景 × 情绪”：情景决定共情切入点，情绪强度校准共情力度。</li>
+          <li>多轮 RL 对比单轮 RL：原页说明单轮模型严格遵循专家正向知识，退赔方案不如多轮模型灵活。</li>
+          <li>PE：Prompt Engineering，提示词工程。</li>
+          <li>多轮 RL 对比回流 SFT：原页称多轮模型使用约 6000 条自然分布会话种子；SFT 使用约 2 万人工标注监督数据与 3 万线上采纳会话回流数据。数据规模和监督强度不同，应谨慎归因。</li>
+          <li>模拟器误识率：训练师在模拟会话与真实用户会话中二选一，选错比例为误识率；建议补完整混淆矩阵。</li>
+        </ol>
+      </section>
+
+      <footer class="page-footer">
+        <p><strong>文档说明：</strong>本页面依据用户提供的 19 页材料重构，不嵌入源材料图片。数字以材料记录为准并在必要处补充口径换算；“模拟案例”“建议方案”“待验证”不代表原项目已经实施或完成实验。</p>
+        <p>最后整理日期：2026-07-31 · 本地静态 HTML · 支持导航收缩、流程图重绘与打印导出。</p>
+      </footer>
+    </main>
+  </div>
+
+  <button class="icon-btn back-top" id="back-top" aria-label="返回顶部" title="返回顶部"><i data-lucide="arrow-up"></i></button>
+
+  <script>
+    (() => {
+      const root = document.documentElement;
+      const body = document.body;
+      const themeButton = document.getElementById('theme-toggle');
+      const navButton = document.getElementById('nav-toggle');
+      const printButton = document.getElementById('print-btn');
+      const backTopButton = document.getElementById('back-top');
+      const progress = document.getElementById('reading-progress');
+      const tocLinks = Array.from(document.querySelectorAll('#toc a'));
+      const sections = Array.from(document.querySelectorAll('[data-section]'));
+      const desktopNav = window.matchMedia('(min-width: 861px)');
+      const diagrams = Array.from(document.querySelectorAll('.mermaid')).map((node) => ({
+        node,
+        code: node.textContent.trim()
+      }));
+
+      const storedTheme = localStorage.getItem('mtrl-doc-theme');
+      root.dataset.theme = storedTheme || 'light';
+      body.classList.toggle('nav-collapsed', localStorage.getItem('mtrl-nav-collapsed') === 'true');
+
+      function refreshIcons() {
+        if (window.lucide) window.lucide.createIcons({ attrs: { 'stroke-width': 1.8 } });
+      }
+
+      function updateThemeIcon() {
+        const dark = root.dataset.theme === 'dark';
+        themeButton.innerHTML = `<i data-lucide="${dark ? 'sun' : 'moon'}"></i>`;
+        themeButton.setAttribute('aria-label', dark ? '切换到明亮主题' : '切换到深色主题');
+        themeButton.title = dark ? '切换到明亮主题' : '切换到深色主题';
+        refreshIcons();
+      }
+
+      function updateNavButton() {
+        const desktop = desktopNav.matches;
+        const expanded = desktop ? !body.classList.contains('nav-collapsed') : body.classList.contains('nav-open');
+        const label = desktop
+          ? (expanded ? '收起目录' : '展开目录')
+          : (expanded ? '关闭目录' : '打开目录');
+        const icon = desktop
+          ? (expanded ? 'panel-left-close' : 'panel-left-open')
+          : (expanded ? 'x' : 'menu');
+        navButton.innerHTML = `<i data-lucide="${icon}"></i>`;
+        navButton.setAttribute('aria-expanded', String(expanded));
+        navButton.setAttribute('aria-label', label);
+        navButton.title = label;
+        refreshIcons();
+      }
+
+      async function renderDiagrams() {
+        if (!window.mermaid) return;
+        const dark = root.dataset.theme === 'dark';
+        diagrams.forEach(({ node, code }) => {
+          node.removeAttribute('data-processed');
+          node.textContent = code;
+        });
+        window.mermaid.initialize({
+          startOnLoad: false,
+          securityLevel: 'loose',
+          theme: dark ? 'dark' : 'base',
+          fontFamily: 'Inter, PingFang SC, Microsoft YaHei, sans-serif',
+          themeVariables: dark ? {
+            background: '#211f1d',
+            primaryColor: '#442c25',
+            primaryTextColor: '#f1eee8',
+            primaryBorderColor: '#df8b71',
+            secondaryColor: '#3d3421',
+            tertiaryColor: '#24383e',
+            lineColor: '#bbb5ac',
+            textColor: '#f1eee8',
+            fontSize: '15px'
+          } : {
+            background: '#fffefa',
+            primaryColor: '#f6e9e4',
+            primaryTextColor: '#242729',
+            primaryBorderColor: '#9b4d3b',
+            secondaryColor: '#f6efdc',
+            tertiaryColor: '#e8f0f2',
+            lineColor: '#656565',
+            textColor: '#242729',
+            fontSize: '15px'
+          },
+          flowchart: { useMaxWidth: true, htmlLabels: true, curve: 'stepAfter', nodeSpacing: 30, rankSpacing: 42 },
+          sequence: { useMaxWidth: true, diagramMarginX: 20, diagramMarginY: 20 }
+        });
+        try {
+          await window.mermaid.run({ nodes: diagrams.map(({ node }) => node) });
+        } catch (error) {
+          console.error('Mermaid render failed:', error);
+        }
+      }
+
+      function updateReadingState() {
+        const scrollTop = window.scrollY || document.documentElement.scrollTop;
+        const maxScroll = document.documentElement.scrollHeight - window.innerHeight;
+        const ratio = maxScroll > 0 ? Math.min(1, Math.max(0, scrollTop / maxScroll)) : 0;
+        const activationLine = window.innerHeight * 0.24;
+        let activeSection = sections[0];
+        sections.forEach((section) => {
+          if (section.getBoundingClientRect().top <= activationLine) activeSection = section;
+        });
+        progress.style.width = `${ratio * 100}%`;
+        backTopButton.classList.toggle('visible', scrollTop > 700);
+        tocLinks.forEach((link) => {
+          const active = link.getAttribute('href') === `#${activeSection.id}`;
+          link.classList.toggle('active', active);
+          if (active) link.setAttribute('aria-current', 'location');
+          else link.removeAttribute('aria-current');
+        });
+      }
+
+      themeButton.addEventListener('click', async () => {
+        root.dataset.theme = root.dataset.theme === 'dark' ? 'light' : 'dark';
+        localStorage.setItem('mtrl-doc-theme', root.dataset.theme);
+        updateThemeIcon();
+        await renderDiagrams();
+      });
+
+      navButton.addEventListener('click', () => {
+        if (desktopNav.matches) {
+          const collapsed = body.classList.toggle('nav-collapsed');
+          localStorage.setItem('mtrl-nav-collapsed', String(collapsed));
+        } else {
+          body.classList.toggle('nav-open');
+        }
+        updateNavButton();
+      });
+
+      document.querySelector('.content').addEventListener('click', () => {
+        if (window.innerWidth <= 860 && body.classList.contains('nav-open')) {
+          body.classList.remove('nav-open');
+          updateNavButton();
+        }
+      });
+
+      tocLinks.forEach((link) => link.addEventListener('click', () => {
+        body.classList.remove('nav-open');
+        updateNavButton();
+      }));
+
+      printButton.addEventListener('click', () => window.print());
+      backTopButton.addEventListener('click', () => window.scrollTo({ top: 0, behavior: 'smooth' }));
+
+      document.addEventListener('keydown', (event) => {
+        if (event.key === 'Escape' && body.classList.contains('nav-open')) {
+          body.classList.remove('nav-open');
+          updateNavButton();
+          navButton.focus();
+        }
+      });
+
+      window.addEventListener('scroll', updateReadingState, { passive: true });
+      window.addEventListener('resize', () => {
+        if (window.innerWidth > 860) {
+          body.classList.remove('nav-open');
+        }
+        updateNavButton();
+      });
+
+      updateThemeIcon();
+      updateNavButton();
+      refreshIcons();
+      updateReadingState();
+      renderDiagrams();
+    })();
+  </script>
+</body>
+</html>

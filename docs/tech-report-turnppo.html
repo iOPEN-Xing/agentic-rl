@@ -1,0 +1,1195 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="Turn-PPO 论文—实现—业务双向审计：从多轮信用分配和整轮 PPO 目标，到 τ-bench task_id=0 的真实数据流、训练张量、可运行代码与业务验收。">
+    <title>Turn-PPO 论文—实现双向审计｜公式、代码与 τ-bench 适配</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&amp;family=JetBrains+Mono:wght@400;600&amp;family=Noto+Sans+SC:wght@400;500;600;700&amp;display=swap" rel="stylesheet">
+    <script>
+        window.MathJax = {
+            tex: { inlineMath: [['$', '$'], ['\\(', '\\)']], displayMath: [['$$', '$$'], ['\\[', '\\]']] },
+            options: { skipHtmlTags: ['script', 'noscript', 'style', 'textarea', 'pre', 'code'] }
+        };
+    </script>
+    <script id="MathJax-script" async src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
+    <script type="module">
+        import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs";
+        mermaid.initialize({
+            startOnLoad: true,
+            securityLevel: "strict",
+            theme: "base",
+            themeVariables: {
+                primaryColor: "#f0e3d1",
+                primaryTextColor: "#2d2924",
+                primaryBorderColor: "#985d38",
+                lineColor: "#71665c",
+                secondaryColor: "#fffaf2",
+                tertiaryColor: "#ecd7c2",
+                fontFamily: "Inter, Noto Sans SC, sans-serif"
+            }
+        });
+    </script>
+    <style>
+        :root {
+            --paper: #f8f1e5;
+            --surface: #fffaf2;
+            --surface-strong: #f0e3d1;
+            --ink: #2d2924;
+            --muted: #71665c;
+            --line: #ddcdb9;
+            --accent: #985d38;
+            --accent-soft: #ecd7c2;
+            --shadow: 0 10px 24px rgba(67, 48, 34, 0.08);
+        }
+        * { box-sizing: border-box; }
+        html { scroll-behavior: smooth; scroll-padding-top: 88px; }
+        body {
+            margin: 0;
+            color: var(--ink);
+            background: var(--paper);
+            font-family: Inter, "Noto Sans SC", system-ui, sans-serif;
+            font-size: 17px;
+            line-height: 1.82;
+        }
+        a { color: var(--accent); text-underline-offset: 3px; }
+        a:hover { text-decoration-thickness: 2px; }
+        a:focus-visible, button:focus-visible, summary:focus-visible {
+            outline: 3px solid rgba(152, 93, 56, 0.35);
+            outline-offset: 3px;
+        }
+        .topbar {
+            position: sticky;
+            top: 0;
+            z-index: 20;
+            border-bottom: 1px solid rgba(152, 93, 56, 0.2);
+            background: rgba(248, 241, 229, 0.96);
+            backdrop-filter: blur(10px);
+        }
+        .nav {
+            max-width: 1120px;
+            min-height: 64px;
+            margin: 0 auto;
+            padding: 0 24px;
+            display: flex;
+            align-items: center;
+            gap: 22px;
+            overflow-x: auto;
+            white-space: nowrap;
+            scrollbar-width: none;
+        }
+        .nav::-webkit-scrollbar { display: none; }
+        .nav a {
+            color: var(--muted);
+            font-size: 14px;
+            font-weight: 600;
+            text-decoration: none;
+        }
+        .nav a:first-child { color: var(--ink); margin-right: auto; }
+        .nav a:last-child { color: var(--accent); }
+        main { max-width: 960px; margin: 0 auto; padding: 0 28px 96px; }
+        .hero { padding: 72px 0 42px; }
+        .eyebrow {
+            margin: 0 0 16px;
+            color: var(--accent);
+            font-family: "JetBrains Mono", monospace;
+            font-size: 13px;
+            font-weight: 600;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+        }
+        h1, h2, h3 { line-height: 1.25; letter-spacing: -0.025em; }
+        h1 { max-width: 820px; margin: 0; font-size: clamp(42px, 7vw, 72px); }
+        h2 { margin: 0 0 18px; font-size: clamp(30px, 4vw, 44px); }
+        h3 { margin: 28px 0 12px; font-size: 22px; }
+        p { margin: 0 0 18px; }
+        .dek {
+            max-width: 780px;
+            margin: 24px 0 22px;
+            color: #4f4841;
+            font-size: clamp(19px, 2.3vw, 24px);
+            line-height: 1.65;
+        }
+        .paper-meta, .hero-actions, .tag-row {
+            display: flex;
+            flex-wrap: wrap;
+            align-items: center;
+            gap: 10px;
+        }
+        .paper-meta { color: var(--muted); font-size: 14px; }
+        .chip {
+            display: inline-flex;
+            align-items: center;
+            min-height: 32px;
+            padding: 4px 11px;
+            border: 1px solid var(--line);
+            border-radius: 999px;
+            background: rgba(255, 250, 242, 0.7);
+            color: var(--muted);
+            font-size: 13px;
+            font-weight: 600;
+        }
+        .chip.accent { border-color: var(--accent); color: var(--accent); }
+        .hero-actions { margin-top: 26px; }
+        .button-link {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            min-height: 44px;
+            padding: 8px 15px;
+            border: 1px solid var(--accent);
+            border-radius: 10px;
+            color: var(--accent);
+            font-weight: 700;
+            text-decoration: none;
+        }
+        .button-link.primary { background: var(--accent); color: #fffaf2; }
+        .tldr {
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 14px;
+            margin-top: 40px;
+        }
+        .tldr-card {
+            min-height: 174px;
+            padding: 24px;
+            border: 1px solid var(--line);
+            border-radius: 16px;
+            background: var(--surface);
+            box-shadow: var(--shadow);
+        }
+        .tldr-card span {
+            color: var(--accent);
+            font-family: "JetBrains Mono", monospace;
+            font-size: 12px;
+            font-weight: 700;
+            letter-spacing: 0.06em;
+        }
+        .tldr-card h3 { margin: 12px 0 8px; font-size: 19px; }
+        .tldr-card p { margin: 0; color: var(--muted); font-size: 15px; line-height: 1.7; }
+        .reading-path {
+            margin: 0 0 26px;
+            padding: 18px 22px;
+            border-left: 4px solid var(--accent);
+            background: var(--surface-strong);
+            color: #51483f;
+            font-weight: 600;
+        }
+        section {
+            padding: 72px 0;
+            border-top: 1px solid var(--line);
+        }
+        .section-kicker {
+            margin-bottom: 10px;
+            color: var(--accent);
+            font-family: "JetBrains Mono", monospace;
+            font-size: 12px;
+            font-weight: 700;
+            letter-spacing: 0.08em;
+        }
+        .lead { max-width: 820px; color: #4d463f; font-size: 19px; }
+        .flow {
+            display: grid;
+            grid-template-columns: repeat(3, minmax(0, 1fr));
+            gap: 12px;
+            margin: 30px 0;
+        }
+        .flow-step, .compare-card, .metric, .judgment-card {
+            border: 1px solid var(--line);
+            border-radius: 14px;
+            background: var(--surface);
+        }
+        .flow-step { position: relative; padding: 22px; }
+        .flow-step:not(:last-child)::after {
+            content: "→";
+            position: absolute;
+            right: -19px;
+            top: 50%;
+            z-index: 2;
+            width: 26px;
+            color: var(--accent);
+            background: var(--paper);
+            font-weight: 700;
+            text-align: center;
+            transform: translateY(-50%);
+        }
+        .flow-step b { display: block; margin-bottom: 6px; }
+        .flow-step small { color: var(--muted); line-height: 1.55; }
+        .compare-grid, .metric-grid, .judgment-grid {
+            display: grid;
+            grid-template-columns: repeat(3, minmax(0, 1fr));
+            gap: 14px;
+            margin: 28px 0;
+        }
+        .compare-card, .judgment-card { padding: 22px; }
+        .compare-card h3, .judgment-card h3 { margin: 0 0 10px; font-size: 18px; }
+        .compare-card p, .judgment-card p { margin: 0; color: var(--muted); font-size: 15px; line-height: 1.7; }
+        .compare-card.featured { border: 2px solid var(--accent); }
+        .paper-figure {
+            margin: 32px 0;
+            overflow: hidden;
+            border: 1px solid var(--line);
+            border-radius: 16px;
+            background: var(--surface);
+            box-shadow: var(--shadow);
+        }
+        .image-button {
+            width: 100%;
+            padding: 18px;
+            border: 0;
+            background: #fff;
+            cursor: zoom-in;
+        }
+        .image-button img { display: block; width: 100%; height: auto; }
+        figcaption { padding: 18px 22px 20px; border-top: 1px solid var(--line); }
+        figcaption p { margin: 0; }
+        .caption-source { margin-top: 7px; color: var(--muted); font-size: 13px; }
+        .figure-toggle {
+            margin-top: 12px;
+            padding: 0;
+            border: 0;
+            color: var(--accent);
+            background: transparent;
+            font: inherit;
+            font-size: 14px;
+            font-weight: 700;
+            cursor: pointer;
+        }
+        .figure-detail {
+            max-height: 0;
+            overflow: hidden;
+            color: var(--muted);
+            opacity: 0;
+            transform: translateY(-4px);
+            transition: max-height 260ms ease, opacity 200ms ease, transform 200ms ease;
+        }
+        .figure-detail.active { max-height: 640px; margin-top: 12px; opacity: 1; transform: translateY(0); }
+        .figure-detail ul { margin: 0; padding-left: 22px; }
+        .formula {
+            margin: 22px 0;
+            padding: 22px;
+            overflow-x: auto;
+            border: 1px solid var(--line);
+            border-radius: 14px;
+            background: #fffdf8;
+            text-align: center;
+        }
+        .formula-note { margin-top: 12px; color: var(--muted); font-size: 14px; text-align: left; }
+        .callout {
+            margin: 24px 0;
+            padding: 20px 22px;
+            border-left: 4px solid var(--accent);
+            background: var(--accent-soft);
+        }
+        .callout p:last-child { margin-bottom: 0; }
+        .table-wrap { margin: 26px 0; overflow-x: auto; border: 1px solid var(--line); border-radius: 14px; }
+        table { width: 100%; border-collapse: collapse; min-width: 680px; background: var(--surface); }
+        th, td { padding: 15px 17px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }
+        th { background: var(--surface-strong); font-size: 14px; }
+        td { font-size: 15px; }
+        tr:last-child td { border-bottom: 0; }
+        ul, ol { padding-left: 24px; }
+        li { margin-bottom: 8px; }
+        details {
+            margin: 16px 0;
+            border: 1px solid var(--line);
+            border-radius: 14px;
+            background: var(--surface);
+        }
+        summary {
+            padding: 18px 20px;
+            cursor: pointer;
+            font-weight: 700;
+        }
+        summary span { display: block; margin-top: 4px; color: var(--muted); font-size: 13px; font-weight: 400; }
+        .details-body { padding: 0 20px 20px; }
+        code, pre { font-family: "JetBrains Mono", monospace; }
+        code {
+            padding: 0.12em 0.35em;
+            border-radius: 5px;
+            background: rgba(152, 93, 56, 0.09);
+            font-size: 0.9em;
+        }
+        pre {
+            margin: 0;
+            padding: 18px;
+            overflow-x: auto;
+            border-radius: 12px;
+            background: #312d28;
+            color: #f8f1e5;
+            font-size: 13px;
+            line-height: 1.7;
+        }
+        pre code { padding: 0; background: transparent; font-size: inherit; }
+        .code-path {
+            margin: 8px 0 16px;
+            color: var(--muted);
+            font-family: "JetBrains Mono", monospace;
+            font-size: 12px;
+            overflow-wrap: anywhere;
+        }
+        .verdict-good { color: #356a46; font-weight: 700; }
+        .verdict-watch { color: #985d38; font-weight: 700; }
+        .mermaid-wrap {
+            margin: 28px 0;
+            padding: 20px;
+            overflow-x: auto;
+            border: 1px solid var(--line);
+            border-radius: 16px;
+            background: #fffdf8;
+            box-shadow: var(--shadow);
+        }
+        .mermaid {
+            min-width: 720px;
+            margin: 0;
+            padding: 0;
+            background: transparent;
+            color: var(--ink);
+            text-align: center;
+        }
+        .case-grid {
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 14px;
+            margin: 24px 0;
+        }
+        .case-card {
+            padding: 20px 22px;
+            border: 1px solid var(--line);
+            border-radius: 14px;
+            background: var(--surface);
+        }
+        .case-card h3 { margin: 0 0 8px; font-size: 18px; }
+        .case-card p { margin: 0; color: var(--muted); font-size: 15px; }
+        .metric { padding: 22px; }
+        .metric strong { display: block; color: var(--accent); font-size: 30px; line-height: 1.1; }
+        .metric span { display: block; margin-top: 8px; color: var(--muted); font-size: 14px; }
+        .source-list { padding-left: 20px; }
+        footer { padding: 42px 0 10px; border-top: 1px solid var(--line); color: var(--muted); font-size: 14px; }
+        dialog {
+            width: min(1180px, calc(100vw - 32px));
+            max-height: calc(100vh - 32px);
+            padding: 48px 18px 18px;
+            overflow: auto;
+            border: 1px solid var(--line);
+            border-radius: 16px;
+            background: #fff;
+        }
+        dialog::backdrop { background: rgba(35, 30, 25, 0.78); }
+        dialog img { display: block; max-width: 100%; height: auto; margin: auto; }
+        .dialog-close {
+            position: absolute;
+            top: 10px;
+            right: 12px;
+            min-width: 36px;
+            min-height: 36px;
+            border: 1px solid var(--line);
+            border-radius: 999px;
+            background: var(--surface);
+            color: var(--ink);
+            cursor: pointer;
+        }
+        @media (max-width: 880px) {
+            body { font-size: 16px; }
+            .nav { padding: 0 18px; gap: 18px; }
+            main { padding: 0 18px 72px; }
+            .hero { padding-top: 48px; }
+            .tldr, .flow, .compare-grid, .metric-grid, .judgment-grid, .case-grid { grid-template-columns: 1fr; }
+            .flow-step:not(:last-child)::after {
+                content: "↓";
+                right: 50%;
+                top: auto;
+                bottom: -24px;
+                transform: translateX(50%);
+            }
+            section { padding: 56px 0; }
+            .paper-figure { border-radius: 12px; }
+            .image-button { padding: 8px; }
+        }
+        @media (prefers-reduced-motion: reduce) {
+            html { scroll-behavior: auto; }
+            *, *::before, *::after { transition-duration: 0.01ms !important; animation-duration: 0.01ms !important; }
+        }
+    </style>
+</head>
+<body>
+    <header class="topbar">
+        <nav class="nav" aria-label="报告导航">
+            <a href="scheme-analysis.html">← 返回方案总览</a>
+            <a href="#problem">为什么需要</a>
+            <a href="#method">方法怎么做</a>
+            <a href="#implementation">公式对代码</a>
+            <a href="#case-study">真实样本</a>
+            <a href="#mapping">订票映射</a>
+            <a href="#evidence">证据与边界</a>
+            <a href="#judgment">我的判断</a>
+            <a href="https://arxiv.org/abs/2512.17008" target="_blank" rel="noopener noreferrer">原论文 ↗</a>
+        </nav>
+    </header>
+
+    <main>
+        <article>
+            <header class="hero">
+                <p class="eyebrow">Paper ↔ Code audit · Multi-turn agent RL</p>
+                <h1>Turn-PPO：把一次完整交互当作强化学习的一步</h1>
+                <p class="dek">多轮 Agent 的真正决策单位不是单个 token，而是一次“读环境—作响应—看结果”的完整 Turn。本页不仅解释论文，还逐项审计当前 <code>codex/turn-level-reward</code> 实现：哪些严格对应原式，哪些属于工程保护，以及它为何可以用于当前 τ-bench 航空数据。</p>
+                <div class="paper-meta">
+                    <span class="chip accent">Findings of EACL 2026</span>
+                    <span class="chip">2026.03</span>
+                    <span class="chip">Li et al.</span>
+                    <span>UT Austin · Amazon</span>
+                </div>
+                <div class="hero-actions">
+                    <a class="button-link primary" href="https://aclanthology.org/2026.findings-eacl.328/" target="_blank" rel="noopener noreferrer">阅读 ACL Anthology 原文</a>
+                    <a class="button-link" href="https://arxiv.org/html/2512.17008v2" target="_blank" rel="noopener noreferrer">查看 arXiv HTML</a>
+                </div>
+
+                <div class="tldr" aria-label="30 秒摘要">
+                    <article class="tldr-card">
+                        <span>01 · 背景</span>
+                        <h3>多轮任务是一个真正的序列决策问题</h3>
+                        <p>搜索、工具调用和环境反馈跨越多个 Turn；早期动作会改变后续可见状态，终局奖励却很稀疏。</p>
+                    </article>
+                    <article class="tldr-card">
+                        <span>02 · 矛盾</span>
+                        <h3>GRPO 把同一个结果归因给整条轨迹</h3>
+                        <p>组内归一化后的终局优势被广播给所有 token，既忽略不同 Turn 的贡献，也容易受多轨迹采样方差影响。</p>
+                    </article>
+                    <article class="tldr-card">
+                        <span>03 · 方法</span>
+                        <h3>Turn-MDP + 可学习 critic + Turn-Level GAE</h3>
+                        <p>状态是历史与当前查询，动作是整段模型响应；critic 在 Turn 边界估值，优势与 clipping 都按 Turn 计算。</p>
+                    </article>
+                    <article class="tldr-card">
+                        <span>04 · 效果</span>
+                        <h3>在 WebShop 与 Sokoban 上更稳、更有效</h3>
+                        <p>论文在不同模型和是否启用长推理的设置中，观察到 Turn-PPO 多数情况下优于 Token-PPO，并避免多种 GRPO 崩溃。</p>
+                    </article>
+                </div>
+            </header>
+
+            <p class="reading-path">阅读路径：先理解 GRPO 的归因错位 → 拆 Turn-PPO 的状态、critic、GAE 与 actor 目标 → 用“论文符号—张量—函数”核对当前代码 → 沿真实 task_id=0 走完数据、工具、reward、张量和 optimizer step → 最后用业务与算法双层指标判断是否有效。</p>
+
+            <section id="problem">
+                <p class="section-kicker">01 · Problem</p>
+                <h2>问题不只是“奖励稀疏”，而是决策粒度错了</h2>
+                <p class="lead">单轮回答里，把 token 当作 MDP step 尚且自然；但多轮交互会在两次模型响应之间突然插入整段用户消息或工具输出。Token-MDP 因此混合了两种完全不同的状态转移：追加一个 token，以及注入一整块外部信息。</p>
+                <p>这会造成两类噪声。首先，<strong>GRPO 的组相对优势依赖同一问题的多条 rollout</strong>，环境随机性会放大估计方差。其次，<strong>同一轨迹中的所有 Turn 被赋予近似相同的优势</strong>：一次正确搜索与最后一次错误提交可能一起被惩罚；一次无效尝试也可能因为终局成功而被奖励。</p>
+
+                <div class="flow" aria-label="GRPO 在多轮任务中的信用分配问题">
+                    <div class="flow-step"><b>多次采样轨迹</b><small>同一请求与环境交互多次，得到不同终局奖励。</small></div>
+                    <div class="flow-step"><b>组内标准化</b><small>奖励减均值、除标准差，形成每条轨迹一个优势值。</small></div>
+                    <div class="flow-step"><b>广播到全部 Turn</b><small>关键动作、冗余动作与错误动作共享同一方向的训练信号。</small></div>
+                </div>
+
+                <div class="callout">
+                    <p><strong>最小例子：</strong>订票 Agent 前三步正确澄清日期、搜索航班并确认舱位，最后却用了不存在的支付方式。Outcome-only GRPO 只能说“这条轨迹失败”，无法告诉模型前三步值得保留、最后一步才应被修正。</p>
+                </div>
+
+                <h3>三种方案到底差在哪里</h3>
+                <div class="compare-grid">
+                    <article class="compare-card">
+                        <h3>GRPO</h3>
+                        <p><strong>不训练 critic。</strong>用组内终局奖励估计整条轨迹的优势，成本较低，但在长轨迹里信用分配很粗。</p>
+                    </article>
+                    <article class="compare-card">
+                        <h3>Token-PPO</h3>
+                        <p><strong>训练 token-level critic。</strong>每个 token 都是一步；外部反馈造成不连续的状态转移，critic 更难学准。</p>
+                    </article>
+                    <article class="compare-card featured">
+                        <h3>Turn-PPO</h3>
+                        <p><strong>训练 turn-level critic。</strong>一次完整响应是一项动作，状态始终位于真实交互边界，优势更贴近任务结构。</p>
+                    </article>
+                </div>
+            </section>
+
+            <section id="method">
+                <p class="section-kicker">02 · Method</p>
+                <h2>先看全局图：改变的是 MDP 切分方式</h2>
+                <p class="lead">下面这张原论文 Figure 1 把 GRPO、Token-PPO 与 Turn-PPO 放在同一条多轮轨迹上。先看 value 和 advantage 出现在哪里，再看公式，会比从 GAE 推导入手更容易理解。</p>
+
+                <figure class="paper-figure">
+                    <button class="image-button" type="button" data-lightbox data-src="https://arxiv.org/html/2512.17008v2/x1.png" data-alt="Turn-PPO 原论文 Figure 1：GRPO、Token-PPO 与 Turn-PPO 的优势计算对比" aria-label="放大查看 Turn-PPO 原论文 Figure 1">
+                        <img src="https://arxiv.org/html/2512.17008v2/x1.png" alt="Turn-PPO 原论文 Figure 1：GRPO、Token-PPO 与 Turn-PPO 的优势计算对比" loading="lazy" referrerpolicy="no-referrer">
+                    </button>
+                    <figcaption>
+                        <p><strong>Figure 1 · 应该看什么：</strong>GRPO 的同一个优势覆盖整条轨迹；Token-PPO 在每个 token 位置估值；Turn-PPO 只在交互边界估值，并把一个优势分配给本 Turn 的完整响应。</p>
+                        <p class="caption-source">来源：Turn-PPO 原论文 Figure 1。点击图片可放大。</p>
+                        <button class="figure-toggle" type="button" data-figure-toggle aria-expanded="false">展开逐区说明 ▸</button>
+                        <div class="figure-detail">
+                            <ul>
+                                <li><strong>最上方 GRPO：</strong>同一问题采样多条完整轨迹，终局奖励经组内标准化后变成一个轨迹优势；它不区分 Turn。</li>
+                                <li><strong>中间 Token-PPO：</strong>critic 在 token 位置输出 $V_t$，GAE 也在 token 粒度递推；工具输出插入时，状态转移跨度突然改变。</li>
+                                <li><strong>最下方 Turn-PPO：</strong>$Q_n$ 表示当前用户或环境输入，$R_n$ 表示模型本轮完整响应；二者共同构成自然的交互步。</li>
+                                <li><strong>状态与动作：</strong>$s_n$ 是此前所有 $(Q,R)$ 加当前 $Q_n$，$a_n$ 是整段 $R_n$，因此每一步都拥有一致的语义。</li>
+                                <li><strong>训练信号：</strong>critic 在 Turn 边界估值，Turn-level GAE 得到 $A_n$；该优势广播给本轮响应 token，但不同 Turn 可得到不同方向和大小的优势。</li>
+                            </ul>
+                        </div>
+                    </figcaption>
+                </figure>
+
+                <h3>方法拆成五步</h3>
+                <div class="flow">
+                    <div class="flow-step"><b>1. 切 Turn</b><small>以用户输入或工具观察到达、模型响应结束为边界。</small></div>
+                    <div class="flow-step"><b>2. 定义状态</b><small>$s_n$ = 完整历史 + 当前环境查询 $Q_n$。</small></div>
+                    <div class="flow-step"><b>3. 定义动作</b><small>$a_n$ = 模型在本 Turn 生成的完整响应 $R_n$。</small></div>
+                </div>
+                <div class="flow">
+                    <div class="flow-step"><b>4. 边界估值</b><small>预训练 LLM 加 value head，预测每个 Turn 状态的未来回报。</small></div>
+                    <div class="flow-step"><b>5. GAE 与更新</b><small>按 Turn 递推优势，并在整段响应级别计算 ratio、clipping 与损失。</small></div>
+                    <div class="flow-step"><b>结果</b><small>同一响应内信号一致，不同响应之间信用可分。</small></div>
+                </div>
+
+                <h3>四条公式把 critic 与 actor 串成闭环</h3>
+                <div class="formula">
+                    $$\delta_n = r_n + \gamma V(s_{n+1}) - V(s_n),\qquad
+                    A_n = \delta_n + \gamma\lambda A_{n+1}$$
+                    <p class="formula-note"><strong>Turn-Level GAE：</strong>第 $n$ 个 Turn 的优势，由“本轮奖励 + 下一 Turn 状态价值 − 当前 Turn 状态价值”开始，再把未来 TD 误差按 $\gamma\lambda$ 衰减传回。当前航空实现采用稀疏终局奖励，即 $r_1=\cdots=r_{N-1}=0,\ r_N=R_{\mathrm{terminal}}$。</p>
+                </div>
+                <div class="formula">
+                    $$\rho_n(\theta)=\frac{\pi_\theta(a_n\mid s_n)}{\pi_{\theta_{\mathrm{old}}}(a_n\mid s_n)}
+                    =\prod_{h=1}^{|a_n|}
+                    \frac{\pi_\theta(a_{n,h}\mid s_{n,h})}{\pi_{\theta_{\mathrm{old}}}(a_{n,h}\mid s_{n,h})}$$
+                    <p class="formula-note"><strong>整轮概率比：</strong>生产代码不直接连乘概率，而是先求 $\sum_h(\log\pi_\theta-\log\pi_{\mathrm{old}})$ 再取指数；数学上等价，数值上更稳。用户消息、工具观察和 padding 的 <code>turn_id=0</code>，不会进入该乘积。</p>
+                </div>
+                <div class="formula">
+                    $$\mathcal L_{\mathrm{actor}}
+                    =\frac{1}{B}\sum_{i=1}^{B}\frac{1}{|a^i|}
+                    \sum_{n=1}^{N_i}
+                    \max\!\left[-\rho_{i,n}A_{i,n},
+                    -\operatorname{clip}(\rho_{i,n},1-\epsilon,1+\epsilon)A_{i,n}\right]$$
+                    <p class="formula-note"><strong>Table 1 的关键归一化：</strong>$|a^i|$ 是第 $i$ 条轨迹全部 assistant action token 的总数，不是 Turn 数；先得到每条轨迹的目标，再对轨迹取均值。这与“把所有 batch token 做一次全局平均”不同。</p>
+                </div>
+                <div class="formula">
+                    $$\mathcal L_{\mathrm{critic}}
+                    =\frac{1}{B}\sum_{i=1}^{B}\frac{1}{N_i}
+                    \sum_{n=1}^{N_i}\frac{1}{2}\left(V_\phi(s_{i,n})-\widehat R_{i,n}\right)^2$$
+                    <p class="formula-note"><strong>边界 critic：</strong>每条轨迹先对 $N_i$ 个 Turn 状态平均，因此长对话不会仅因 Turn 更多而压过短对话。当前代码再叠加标准 PPO 的 value clipping；这是优化保护，不改变 critic 只在 Turn 边界学习的定义。</p>
+                </div>
+
+                <div class="callout">
+                    <p><strong>两个容易误解的点：</strong>第一，严格 Turn-PPO 不是给每个 Turn 人工编一个“正确性奖励”，而是让 turn-level critic 从终局回报的统计规律中学习价值；所以它改善的是信用估计，不会凭空获得步骤级真值。第二，论文在单轮 Turn-MDP/GRPO 讨论过响应概率比的几何平均及其与 GSPO 的关系，但严格的多轮 Turn-PPO 基线使用上面的整轮乘积。几何平均可以做稳定性消融，不能写成当前实现已经采用的公式。</p>
+                </div>
+            </section>
+
+            <section id="implementation">
+                <p class="section-kicker">03 · Paper ↔ implementation</p>
+                <h2>当前代码不是“近似像 Turn-PPO”，而是按严格基线闭环</h2>
+                <p class="lead">审计结论是：当前分支的主训练链路在算法定义上准确。它没有把旧的 heuristic turn reward、potential shaping 或额外 rollout importance sampling 混入 Turn-PPO，而是从 rollout 产出 Turn 身份，经过 Turn-GAE 和边界 critic，最后进入整轮 actor 目标。真正需要警惕的不是公式写错，而是长响应概率比的方差与 critic 是否从二值终局反馈中学到可泛化的状态价值。</p>
+
+                <div class="table-wrap">
+                    <table>
+                        <thead>
+                            <tr><th>论文对象</th><th>当前张量 / 代码入口</th><th>双向审计结论</th></tr>
+                        </thead>
+                        <tbody>
+                            <tr>
+                                <td>状态 $s_n$：完整历史 + 当前环境输入</td>
+                                <td><code>dp_critic.py</code> 的因果位移；第一个 assistant token 位置保存响应前状态的 value</td>
+                                <td><span class="verdict-good">准确</span>。工具观察保留在完整上下文中，但不进入 actor mask。</td>
+                            </tr>
+                            <tr>
+                                <td>动作 $a_n$：一整段 assistant response</td>
+                                <td><code>assistant_turn_spans → turn_ids</code>；正整数标识响应，环境与 padding 为 0</td>
+                                <td><span class="verdict-good">准确且 fail-loud</span>。乱序、跳号、覆盖环境 token、同一 Turn 被拆开都会报错。</td>
+                            </tr>
+                            <tr>
+                                <td>稀疏奖励 $r_n$</td>
+                                <td><code>compute_turn_gae_advantage_return</code> 把整轨迹 reward sum 放到最后一个 Turn</td>
+                                <td><span class="verdict-good">适配当前数据</span>。τ-bench 提供可验证终局结果；旧 shaping 默认关闭。</td>
+                            </tr>
+                            <tr>
+                                <td>Turn-Level GAE</td>
+                                <td><code>turn_gae</code>：仅在 Turn 起点递推，再把 $A_n$ 广播给本 Turn token</td>
+                                <td><span class="verdict-good">准确</span>。优势归一化只发生在 Turn 起点，而非重复广播后的 token 上。</td>
+                            </tr>
+                            <tr>
+                                <td>critic 的 $1/N_i$ 轨迹内平均</td>
+                                <td><code>turn_value_mask[start] = 1 / N_i</code></td>
+                                <td><span class="verdict-good">准确</span>。每条非空轨迹的 critic mask 权重之和为 1。</td>
+                            </tr>
+                            <tr>
+                                <td>整轮 ratio 与单次 clipping</td>
+                                <td><code>compute_policy_loss_turn_ppo</code>：先 sum log-ratio，再 exp、clip</td>
+                                <td><span class="verdict-good">准确</span>。不是 token-by-token clipping，也没有追加第二套 rollout IS。</td>
+                            </tr>
+                            <tr>
+                                <td>长响应数值保护</td>
+                                <td><code>turn_log_ratio</code> 截断到 $[-20,20]$，并记录 saturation fraction</td>
+                                <td><span class="verdict-watch">合理但需监控</span>。这是工程保护；频繁触发意味着策略漂移或响应过长，不能把它当成无害常数。</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+
+                <h3>从一个 token 位置读出“响应前状态”的 value</h3>
+                <p>论文说 $V(s_n)$ 位于当前查询或环境输出的末尾；veRL 的 value 张量与 response token 对齐且向前错一位。因此，代码在“第一个 assistant token 的槽位”读取的，实际是看到该 token 之前全部上下文后的 value。两种说法在因果语言模型中是同一个状态，不应再额外维护一份 <code>state_end_index</code>。</p>
+                <details>
+                    <summary>生产实现切片：因果位移、Turn 起点和 $1/N_i$ critic mask
+                        <span>这些行分别解决“value 在哪里读”和“哪些位置训练 critic”。</span>
+                    </summary>
+                    <div class="details-body">
+                        <p class="code-path">verl/verl/workers/critic/dp_critic.py · verl/verl/trainer/ppo/core_algos.py</p>
+                        <pre><code># value[t] 由 response token t 之前的完整前缀产生。
+values = values[:, -response_length - 1 : -1]
+
+# 每个 Turn 的第一个 assistant token 是该 Turn 的 state-value 槽位。
+starts = [
+    nonzero(turn_ids[batch_index] == turn_id)[0]
+    for turn_id in chronological_turn_ids
+]
+
+# 论文 critic 目标先在每条轨迹内部平均 N_i 个 Turn。
+for start in starts:
+    turn_value_mask[batch_index, start] = 1.0 / len(starts)</code></pre>
+                    </div>
+                </details>
+
+                <h3>可直接运行的标量参考：先用小数把公式算明白</h3>
+                <p>下面代码省略了批处理、whitening 和神经网络，只保留 Turn-GAE 与整轮 PPO 数学。仓库里的完整版本还包含输入校验、环境 token mask、数值饱和诊断和单元测试。</p>
+                <p class="code-path"><a href="https://github.com/iOPEN-Xing/agentic-rl/blob/codex/turn-level-reward/agentic-grpo-longhorizon/examples/turn_ppo_reference.py">agentic-grpo-longhorizon/examples/turn_ppo_reference.py</a></p>
+                <details open>
+                    <summary>可运行核心：Turn-GAE + response-product PPO
+                        <span>仅依赖 Python 标准库；复制后即可运行。</span>
+                    </summary>
+                    <div class="details-body">
+                        <pre><code>from math import exp
+
+def turn_gae(rewards, values, gamma=0.99, lam=0.9):
+    """rewards=[0, ..., terminal_reward]；values[n]=V(s_n)。"""
+    advantages = [0.0] * len(rewards)
+    next_advantage = 0.0
+    for n in range(len(rewards) - 1, -1, -1):
+        next_value = values[n + 1] if n + 1 &lt; len(values) else 0.0
+        delta = rewards[n] + gamma * next_value - values[n]
+        next_advantage = delta + gamma * lam * next_advantage
+        advantages[n] = next_advantage
+    returns = [a + v for a, v in zip(advantages, values)]
+    return advantages, returns
+
+def one_turn_loss(old_logp, new_logp, advantage, token_denominator,
+                  epsilon=0.2):
+    """整轮先乘 ratio（log 域求和），然后只 clip 一次。"""
+    log_ratio = sum(new - old for old, new in zip(old_logp, new_logp))
+    ratio = exp(max(-20.0, min(20.0, log_ratio)))
+    clipped = max(1.0 - epsilon, min(1.0 + epsilon, ratio))
+    surrogate_loss = max(-advantage * ratio, -advantage * clipped)
+    return surrogate_loss / token_denominator
+
+advantages, returns = turn_gae([0.0, 1.0], [0.0, 0.0],
+                               gamma=0.5, lam=1.0)
+assert advantages == [0.5, 1.0]
+
+# exp(0.2 + 0.2) 超过 1.2：整轮目标被 clip 到 -1.2，
+# 再按本轨迹两个 assistant token 归一化，得到 -0.6。
+loss = one_turn_loss([0.0, 0.0], [0.2, 0.2], 1.0, 2)
+assert abs(loss - (-0.6)) &lt; 1e-12</code></pre>
+                    </div>
+                </details>
+
+                <details>
+                    <summary>测试切片：锁住最容易被误改的五个不变量
+                        <span>终局奖励传播、next-state bootstrap、整轮 clipping、Table 1 分母和环境 token mask。</span>
+                    </summary>
+                    <div class="details-body">
+                        <p class="code-path"><a href="https://github.com/iOPEN-Xing/agentic-rl/blob/codex/turn-level-reward/agentic-grpo-longhorizon/examples/test_turn_ppo_reference.py">agentic-grpo-longhorizon/examples/test_turn_ppo_reference.py</a></p>
+                        <pre><code># 无 PyTorch、无 GPU：
+cd agentic-grpo-longhorizon/examples
+python3 -m unittest -v test_turn_ppo_reference.py
+
+# 完整生产测试（需要项目的 PyTorch/pytest 环境）：
+pytest -q verl/tests/trainer/ppo/test_turn_ppo_on_cpu.py
+pytest -q verl/tests/experimental/agent_loop/test_turn_ppo_utils.py</code></pre>
+                        <p>生产测试还验证：每个 turn ratio 的梯度会经过该 Turn 的全部 token；不同 Turn 数的轨迹在 critic 目标里总权重都为 1；若响应乘积的 log-ratio 触发 $[-20,20]$ 保护，监控指标会明确报告，而不是静默吞掉风险。</p>
+                    </div>
+                </details>
+
+                <div class="callout">
+                    <p><strong>严格基线边界：</strong>当前配置必须成对启用 <code>adv_estimator=turn_gae</code> 与 <code>loss_mode=turn_ppo</code>；禁止 in-reward token KL、rollout IS/RS 和 rollout-correction policy-gradient；actor 侧 reference KL 仍可作为常规正则。这样实验结果才能归因于 Turn-PPO，而不是多个 shaping 信号叠加。</p>
+                </div>
+            </section>
+
+            <section id="case-study">
+                <p class="section-kicker">04 · Real data walkthrough</p>
+                <h2>真实样本解剖：从 <code>task_id=0</code> 到一次 Turn-PPO 更新</h2>
+                <p class="lead">下面不是虚构订票脚本，而是当前仓库中可追溯的 τ-bench 航空任务。<code>task_id=0</code> 位于训练 seen split；它要求预订 5 月 20 日纽约到西雅图的单程经济舱，11 点后出发、优先直飞否则一次中转、最低价、3 件行李、不买保险，并优先使用较大代金券支付。</p>
+
+                <div class="case-grid">
+                    <article class="case-card">
+                        <h3>训练索引</h3>
+                        <p><code>split.json</code> 把任务 0 放入 40 个 seen tasks；builder 由此生成一条带 <code>interaction_kwargs.task_id=0</code> 的训练 row。</p>
+                    </article>
+                    <article class="case-card">
+                        <h3>业务正确答案</h3>
+                        <p>选择 HAT136 + HAT039，economy 总价 255 美元；使用 250 美元代金券和尾号 7447 的卡支付 5 美元，3 件行李、无保险。</p>
+                    </article>
+                    <article class="case-card">
+                        <h3>可追溯成功轨迹</h3>
+                        <p>历史 <code>sample_idx=2</code> 包含 6 个 assistant responses、4 次工具调用，最终数据库状态与 ground truth 一致，记录 <code>reward=1.0</code>。</p>
+                    </article>
+                    <article class="case-card">
+                        <h3>RL 中如何使用</h3>
+                        <p>PPO 不回放这条历史回答；它只读取任务索引，然后由当前 actor、用户模拟器和工具环境在线产生一条新轨迹。</p>
+                    </article>
+                </div>
+
+                <div class="callout">
+                    <p><strong>数据边界必须说清：</strong>本地仓库没有提交生成后的 <code>train.parquet</code> 二进制，但其 row 由 <code>build_grpo_parquet.py</code> 和 <code>split.json</code> 确定性生成。历史成功 JSONL 用来展示“该任务可能出现的一条真实交互”，不作为 Turn-PPO 的离线监督标签。</p>
+                </div>
+
+                <h3>这一个案例的证据链</h3>
+                <div class="table-wrap">
+                    <table>
+                        <thead>
+                            <tr><th>层级</th><th>当前仓库来源</th><th>在训练中的作用</th></tr>
+                        </thead>
+                        <tbody>
+                            <tr>
+                                <td>任务划分</td>
+                                <td><a href="../agentic-grpo-longhorizon/experiments/sft_collect_airline/split.json"><code>experiments/sft_collect_airline/split.json</code></a></td>
+                                <td>确认任务 0 属于 seen train，同时 val 仍覆盖全部 50 个任务。</td>
+                            </tr>
+                            <tr>
+                                <td>parquet schema</td>
+                                <td><a href="https://github.com/iOPEN-Xing/agentic-rl/blob/codex/turn-level-reward/agentic-grpo-longhorizon/scripts/train/grpo/build_grpo_parquet.py"><code>build_grpo_parquet.py</code></a></td>
+                                <td>生成 system prompt、<code>task_id</code>、split 和 interaction name；不预填用户对话。</td>
+                            </tr>
+                            <tr>
+                                <td>业务 ground truth</td>
+                                <td><a href="https://github.com/iOPEN-Xing/agentic-rl/blob/codex/turn-level-reward/tau-bench/tau_bench/envs/airline/tasks_test.py"><code>airline/tasks_test.py</code></a></td>
+                                <td>定义用户约束和预期数据库动作，用于终局任务成功判定。</td>
+                            </tr>
+                            <tr>
+                                <td>历史实例</td>
+                                <td><a href="../agentic-grpo-longhorizon/experiments/sft_collect_airline/task_0000.jsonl"><code>task_0000.jsonl · sample_idx=2</code></a></td>
+                                <td>提供一次真实成功路径，用于解释 Turn 切分；训练时不会直接 replay。</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+
+                <details>
+                    <summary>由 builder 生成的训练 row 长什么样
+                        <span>初始用户请求不在这里；它在 <code>env.reset()</code> 时才进入第一个状态。</span>
+                    </summary>
+                    <div class="details-body">
+                        <pre><code>{
+  "prompt": [{
+    "role": "system",
+    "content": "Current date is 2024-05-15; unspecified years use 2024."
+  }],
+  "extra_info": {
+    "index": 0,
+    "task_id": 0,
+    "split": "seen",
+    "interaction_kwargs": {
+      "name": "tau_bench_airline",
+      "task_id": 0
+    }
+  },
+  "data_source": "tau_bench_airline",
+  "reward_model": {"ground_truth": ""}
+}</code></pre>
+                    </div>
+                </details>
+
+                <h3>端到端数据流：从任务索引到业务指标</h3>
+                <div class="mermaid-wrap" aria-label="Turn-PPO 在当前航空数据上的端到端训练流程">
+                    <pre class="mermaid">flowchart LR
+    subgraph DATA["1. 数据索引"]
+        A["split.json：task 0 属于 seen"]
+        B["builder：system prompt + task_id 0"]
+        A --> B
+    end
+    subgraph ROLLOUT["2. 在线业务交互"]
+        C["ToolAgentLoop 启动 interaction"]
+        D["env.reset 注入真实用户请求"]
+        E["actor 生成完整 assistant Turn"]
+        F["工具或用户模拟器返回 observation"]
+        C --> D --> E --> F
+        F -->|"未终止"| E
+    end
+    subgraph REWARD["3. 终局判定"]
+        G["用户 STOP 或环境 done"]
+        H["数据库状态与 ground truth 比较"]
+        I["binary outcome：成功 1，失败 0"]
+        G --> H --> I
+    end
+    subgraph TRAIN["4. Turn-PPO 张量与更新"]
+        J["assistant spans 物化为 turn_ids"]
+        K["critic 在 Turn 起点估值"]
+        L["Turn-GAE 生成并广播优势"]
+        M["整轮 ratio + 单次 clip"]
+        N["actor 与 critic 更新"]
+        J --> K --> L --> M --> N
+    end
+    subgraph BIZ["5. 业务验收"]
+        O["seen 与 unseen 成功率"]
+        P["工具错误、转人工、Turn 数与 token 成本"]
+    end
+    B --> C
+    F -->|"终止"| G
+    I --> J
+    N --> O
+    N --> P</pre>
+                </div>
+
+                <h3>这条成功轨迹在业务上发生了什么</h3>
+                <div class="mermaid-wrap" aria-label="航空任务零的一条真实成功交互序列">
+                    <pre class="mermaid">sequenceDiagram
+    autonumber
+    participant P as Parquet row
+    participant A as Actor
+    participant E as Airline env
+    participant U as User simulator
+
+    P->>E: task_id 0
+    E->>U: reset with task instruction
+    U-->>A: JFK to SEA，5 月 20 日，11 点后，economy
+    A->>E: Turn 1，search_direct_flight
+    E-->>A: 直飞均早于 11 点
+    A->>E: Turn 2，search_onestop_flight
+    E-->>A: HAT136 + HAT039，economy 255 美元
+    A->>U: Turn 3，展示方案并请求确认
+    U-->>A: 确认航班，给出用户与支付约束
+    A->>E: Turn 4，get_user_details
+    E-->>A: 乘机人资料、250 美元代金券与尾号 7447 卡
+    A->>E: Turn 5，book_reservation
+    E-->>A: 返回 reservation HATHAT，数据库已更新
+    A->>U: Turn 6，确认预订结果
+    U-->>E: STOP
+    E-->>A: DB hash 匹配 ground truth，reward 1</pre>
+                </div>
+
+                <div class="table-wrap">
+                    <table>
+                        <thead>
+                            <tr><th>Turn</th><th>进入状态的业务事实</th><th>actor 的完整动作 $a_n$</th><th>环境反馈与训练含义</th></tr>
+                        </thead>
+                        <tbody>
+                            <tr>
+                                <td>1</td>
+                                <td>用户要 JFK→SEA、5 月 20 日、11 点后、economy；尚不知道是否有合适直飞。</td>
+                                <td>解释计划并调用 <code>search_direct_flight</code>。</td>
+                                <td>只找到 06:00 和 01:00 的直飞；工具 JSON 进入下一状态但不参与 actor loss。</td>
+                            </tr>
+                            <tr>
+                                <td>2</td>
+                                <td>已知直飞不满足时间约束，用户允许一次中转。</td>
+                                <td>调用 <code>search_onestop_flight</code>。</td>
+                                <td>找到 HAT136 + HAT039，19:00 出发，economy 总价 255 美元。</td>
+                            </tr>
+                            <tr>
+                                <td>3</td>
+                                <td>已有满足时间与价格偏好的候选，但缺少最终选择和账户信息。</td>
+                                <td>展示候选、推荐较低价方案并请求确认。</td>
+                                <td>用户确认航班，提供 synthetic user id、代金券和卡尾号；这是 user observation。</td>
+                            </tr>
+                            <tr>
+                                <td>4</td>
+                                <td>已确认行程，仍需合法乘机人资料和完整 payment ids。</td>
+                                <td>调用 <code>get_user_details</code>。</td>
+                                <td>得到乘机人资料、100/250 美元代金券和尾号 7447 卡的内部 ID。</td>
+                            </tr>
+                            <tr>
+                                <td>5</td>
+                                <td>航班、乘机人、3 件行李、无保险和 250+5 支付拆分均已确定。</td>
+                                <td>调用 <code>book_reservation</code>，参数与 task ground truth 一致。</td>
+                                <td>工具更新数据库并返回 reservation；此时任务动作完成，但用户仍需收到确认。</td>
+                            </tr>
+                            <tr>
+                                <td>6</td>
+                                <td>数据库已有正确 reservation，模型看到完整预订结果。</td>
+                                <td>向用户确认航班、支付、行李和保险结果。</td>
+                                <td>用户模拟器返回 STOP；环境比较最终数据库状态，得到 binary outcome 1。</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+
+                <h3>同一轨迹如何变成 veRL 训练张量</h3>
+                <p>初始 system prompt 和 <code>env.reset()</code> 产生的第一条 user request 一起位于 <code>prompts</code>。只有后续 assistant、tool 和 user 内容进入 rollout 的 <code>responses</code> 区域；其中 assistant span 的 <code>response_mask=1</code>，外部 observation 的 mask 为 0。</p>
+                <pre><code>responses:
+[ assistant Turn 1 ][ tool observation ]
+[ assistant Turn 2 ][ tool observation ]
+[ assistant Turn 3 ][ user confirmation ]
+[ assistant Turn 4 ][ tool observation ]
+[ assistant Turn 5 ][ tool observation ]
+[ assistant Turn 6 ][ terminal user framing ]
+
+response_mask:
+[       1 ... 1    ][      0 ... 0     ] ...
+
+turn_ids:
+[       1 ... 1    ][      0 ... 0     ]
+[       2 ... 2    ][      0 ... 0     ]
+[       3 ... 3    ][      0 ... 0     ]
+[       4 ... 4    ][      0 ... 0     ]
+[       5 ... 5    ][      0 ... 0     ]
+[       6 ... 6    ][      0 ... 0     ]
+
+rm_scores:
+[ 0 ... 0 ][ terminal outcome = 1 ]</code></pre>
+                <p>critic value 张量仍覆盖完整因果前缀，但 <code>turn_value_mask</code> 只在 6 个 assistant span 起点非零，且每个起点权重为 $1/6$。actor 则只读取正 <code>turn_id</code> 的 token，并为每个完整 response 计算一个概率比。</p>
+
+                <h3>用具体数字看：终局 1 如何变成 6 个不同的 Turn 信号</h3>
+                <p>历史 JSONL 没有保存训练时 critic 的 value，因此下面的 $V(s_n)$ 是<strong>教学性假设</strong>，不是实验观测。假设 critic 随业务事实逐渐完整而给出 $[0.10,0.18,0.32,0.48,0.72,0.90]$，使用当前配置 $\gamma=0.99,\lambda=0.9$，显式 reward 为 $[0,0,0,0,0,1]$，则未 whitening 的结果如下。</p>
+                <div class="table-wrap">
+                    <table>
+                        <thead>
+                            <tr><th>Turn</th><th>假设 $V(s_n)$</th><th>$r_n$</th><th>TD error $\delta_n$</th><th>raw $A_n$</th><th>critic target $\widehat R_n$</th></tr>
+                        </thead>
+                        <tbody>
+                            <tr><td>1 · 查直飞</td><td>0.1000</td><td>0</td><td>0.0782</td><td>0.6519</td><td>0.7519</td></tr>
+                            <tr><td>2 · 查中转</td><td>0.1800</td><td>0</td><td>0.1368</td><td>0.6439</td><td>0.8239</td></tr>
+                            <tr><td>3 · 用户确认</td><td>0.3200</td><td>0</td><td>0.1552</td><td>0.5691</td><td>0.8891</td></tr>
+                            <tr><td>4 · 查账户</td><td>0.4800</td><td>0</td><td>0.2328</td><td>0.4645</td><td>0.9445</td></tr>
+                            <tr><td>5 · 执行预订</td><td>0.7200</td><td>0</td><td>0.1710</td><td>0.2601</td><td>0.9801</td></tr>
+                            <tr><td>6 · 确认结果</td><td>0.9000</td><td>1</td><td>0.1000</td><td>0.1000</td><td>1.0000</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+                <p>这张表揭示了业务落地时最重要的语义：Turn-PPO 奖励的不是“离终点越近越多”。Turn 6 虽然接到终局 1，但 critic 已预测 0.9，所以 surprise 只有 0.1；前面的搜索与确认通过提高下一状态价值，也能获得较大的正 TD 信号。生产代码会在 batch 的所有 Turn 起点上 whitening，所以上表绝对值不会原样进入 actor，但状态间的相对信息来自这条递推。</p>
+
+                <div class="callout">
+                    <p><strong>工具错误不是人工负标签：</strong>同一任务的另一个真实历史 attempt 曾把 255 美元误付成 305 美元，工具返回 error 后，模型下一 Turn 修正为 250+5 并最终成功。严格 Turn-PPO 不应看到 error 就硬加负 reward；它让 error observation 改变下一状态价值，并根据最终是否恢复来学习。这样既惩罚不可恢复的错误，也保留“发现并修正错误”的业务能力。</p>
+                </div>
+
+                <h3>一次 optimizer step 实际优化了什么</h3>
+                <ol>
+                    <li><strong>critic：</strong>只在 6 个 Turn 起点回归上表的 $\widehat R_n$；每个起点 mask 权重为 $1/6$，整条轨迹总权重为 1。</li>
+                    <li><strong>advantage：</strong>每个 $A_n$ 在本 Turn 的全部 assistant token 上广播；搜索工具参数、解释文字和最终确认属于各自完整动作。</li>
+                    <li><strong>actor ratio：</strong>分别把 Turn 1 到 Turn 6 的 token log-ratio 求和、取指数并各 clip 一次；工具 JSON 和用户回复完全不进入 ratio。</li>
+                    <li><strong>轨迹归一化：</strong>6 个 Turn surrogate 求和后除以本轨迹 assistant token 总数，再与 batch 中其他 31 条轨迹等权平均。</li>
+                    <li><strong>业务效果：</strong>如果类似状态上的正确搜索、约束确认和支付组合持续通向成功，它们的概率会上升；一次偶然成功不会自动把每个步骤认定为正确。</li>
+                </ol>
+
+                <h3>从算法健康到业务上线：指标必须分三层</h3>
+                <div class="table-wrap">
+                    <table>
+                        <thead>
+                            <tr><th>层级</th><th>应回答的问题</th><th>当前可直接观测</th><th>建议补齐</th></tr>
+                        </thead>
+                        <tbody>
+                            <tr>
+                                <td>业务结果</td>
+                                <td>数据库最终状态是否精确满足用户约束？是否能泛化到未见任务？</td>
+                                <td>binary outcome、seen/unseen split、val success。</td>
+                                <td>按 booking / change / cancel、约束数量和任务长度分桶的成功率及置信区间。</td>
+                            </tr>
+                            <tr>
+                                <td>业务安全</td>
+                                <td>是否产生错误工具调用、无效写操作或过早转人工？</td>
+                                <td><code>total_errors</code>、<code>total_tool_calls</code>、error rate；环境保留 transfer 状态。</td>
+                                <td>写工具错误率、不可恢复数据库变更率、转人工率及失败原因 taxonomy。</td>
+                            </tr>
+                            <tr>
+                                <td>业务效率</td>
+                                <td>成功是否以更少交互和更低推理成本完成？</td>
+                                <td>assistant/user Turn 数、tool calls、<code>reasoning_tokens_per_turn</code>。</td>
+                                <td>success-conditioned Turn/token 成本，避免模型靠拉长对话换成功率。</td>
+                            </tr>
+                            <tr>
+                                <td>critic 可信度</td>
+                                <td>value 真在识别业务进度，还是只记住 Turn index 和工具名？</td>
+                                <td><code>critic/vf_loss</code>、<code>critic/vf_clipfrac</code>、value mean。</td>
+                                <td>held-out explained variance、value calibration，以及相同前缀的反事实后续对比。</td>
+                            </tr>
+                            <tr>
+                                <td>actor 稳定性</td>
+                                <td>整轮 product ratio 是否仍在可学习区间？</td>
+                                <td>Turn clip fraction、KL、Turns per sequence、log-ratio saturation fraction。</td>
+                                <td>按 response 长度和工具类型分桶的 clip/saturation，定位长 reasoning 的方差来源。</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+
+                <div class="callout">
+                    <p><strong>业务验收顺序：</strong>先要求 unseen success 在多随机种子下改善；再确认工具错误率、错误写操作和转人工没有恶化；最后比较 success-conditioned Turn/token 成本。只有三层同时成立，才能说 Turn-PPO 把算法增益转成了真实业务增益，而不是只把训练 reward 做高。</p>
+                </div>
+            </section>
+
+            <section id="mapping">
+                <p class="section-kicker">05 · Engineering mapping</p>
+                <h2>适配结论：当前 τ-bench 数据与框架都能承载 Turn-PPO</h2>
+                <p class="lead">这一节是对当前航空项目的工程审计，<strong>不是 Turn-PPO 论文中的实验</strong>。结论不是“换回另一个框架才能做”：当前 veRL agent loop 已经具备完整交互历史、assistant span、工具观察和可验证终局奖励，足以构造 Turn-MDP；需要新增的 critic 与专用 loss 也已接入。真正的不确定性是统计效率，而不是数据结构不兼容。</p>
+
+                <div class="callout">
+                    <p><strong>为什么这份数据可用：</strong>parquet 中的 prompt 只是任务入口；环境 <code>reset()</code> 返回的初始观察会在第一次生成前追加为 user message，所以 $s_1$ 不是“只有 system prompt”。之后每次工具结果也进入完整上下文。若工具 metadata 标记 <code>done</code>，发起该终局工具调用的 assistant response 就是最后一个动作，不会再凭空生成一个没有环境后继的 Turn。</p>
+                </div>
+
+                <div class="table-wrap">
+                    <table>
+                        <thead>
+                            <tr><th>Turn</th><th>状态 $s_n$</th><th>动作 $a_n$</th><th>critic 应估计的含义</th></tr>
+                        </thead>
+                        <tbody>
+                            <tr><td>澄清需求</td><td>用户初始请求</td><td>追问日期、人数或舱位</td><td>获得完整可执行约束后，未来成功预订的期望回报</td></tr>
+                            <tr><td>搜索航班</td><td>历史 + 已澄清约束</td><td>调用搜索工具并组织参数</td><td>正确候选航班进入上下文后，后续完成任务的可能性</td></tr>
+                            <tr><td>确认选择</td><td>历史 + 搜索结果</td><td>向用户呈现候选并请求确认</td><td>用户选择是否把轨迹推进到可提交状态</td></tr>
+                            <tr><td>执行预订</td><td>历史 + 用户确认</td><td>调用预订工具并返回结果</td><td>终局成功、政策合规与工具执行结果</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+
+                <p>初始 user request 与 system prompt 一起位于 <code>prompts</code>；后续用户消息和工具观察进入 <code>responses</code> 时，其 <code>turn_id</code> 与 <code>response_mask</code> 都设为 0。actor 只训练模型生成的 response token，但 critic 的因果输入始终保留完整历史。工具调用参数与同一 assistant response 中的自然语言属于一个动作，共享一个 $A_n$。这正好匹配 τ-bench 中“生成工具调用 → 环境执行 → 返回观察”的自然边界。</p>
+
+                <details>
+                    <summary>实际 rollout 数据流：从环境 reset 到 <code>turn_ids</code>
+                        <span>当前实现不依赖离线数据预先标注 Turn，也不需要额外的 state_end_index。</span>
+                    </summary>
+                    <div class="details-body">
+                        <pre><code>initial_observation = await interaction.get_initial_observation(...)
+messages.append({"role": "user", "content": initial_observation})
+
+# 每次 generate 完整记录一个 assistant span；工具观察追加 mask=0。
+append_assistant_turn(assistant_turn_spans, turn_start, turn_end)
+
+# batch 后处理阶段把 span 物化为训练张量：
+# assistant token → 1, 2, ...；user/tool/padding → 0。
+batch["turn_ids"] = materialize_turn_ids(
+    assistant_turn_spans, response_mask
+)</code></pre>
+                    </div>
+                </details>
+
+                <details>
+                    <summary>公平预算：GRPO 与 Turn-PPO 都消费 32 条 rollout
+                        <span>组大小不同，但采样轨迹总数对齐，避免把更多环境交互误当成算法增益。</span>
+                    </summary>
+                    <div class="details-body">
+                        <ul>
+                            <li><strong>vanilla GRPO：</strong><code>train_batch_size=4</code>、<code>rollout.n=8</code>，共 32 条轨迹；同一 prompt 的 8 条 rollout 用于组相对优势。</li>
+                            <li><strong>Turn-PPO：</strong><code>train_batch_size=32</code>、<code>rollout.n=1</code>，同样是 32 条轨迹；价值基线来自 critic，不要求同 prompt 组采样。</li>
+                            <li><strong>仍需单独报告：</strong>critic 的参数、优化器状态、forward/backward 与显存是 Turn-PPO 的额外成本，不能用“rollout 相等”掩盖。</li>
+                        </ul>
+                    </div>
+                </details>
+
+                <details>
+                    <summary>验证切片：用失败预订检查优势是否分化
+                        <span>它是 critic 信用分配的诊断，不是预设“正确步骤必为正优势”。</span>
+                    </summary>
+                    <div class="details-body">
+                        <ul>
+                            <li><strong>对照组：</strong>原始 GRPO 给整条轨迹同一个轨迹级优势，无法区分失败发生前后的响应。</li>
+                            <li><strong>Turn-PPO：</strong>按失败前阶段、工具类型和错误类型分桶，检查 $V(s_n)$、TD error 与 $A_n$ 是否呈现稳定而可解释的差异；单条轨迹上的正负不等价于步骤真值。</li>
+                            <li><strong>必要诊断：</strong>记录 value loss、explained variance、每 Turn advantage 分布、episode success、整轮 clip fraction，以及 <code>turn_ppo_log_ratio_saturation_fraction</code>。</li>
+                            <li><strong>反事实检查：</strong>对相同前缀比较不同后续动作/结果，才能更有力地判断 critic 是学到进度，还是只记住位置、长度或工具名称。</li>
+                        </ul>
+                    </div>
+                </details>
+            </section>
+
+            <section id="evidence">
+                <p class="section-kicker">06 · Evidence</p>
+                <h2>实验真正证明了什么</h2>
+                <p class="lead">论文的证据重点不是一个孤立的最高分，而是：在不同任务、不同骨干模型、是否启用长推理的多种设置中，Turn 粒度让 PPO 的优势估计更可靠；反过来，GRPO 在多轮长推理中会出现系统性训练崩溃。</p>
+
+                <div class="metric-grid">
+                    <article class="metric"><strong>2</strong><span>互补环境：WebShop 测交互式购物，Sokoban 测长程规划与不可逆动作。</span></article>
+                    <article class="metric"><strong>3 类</strong><span>核心比较：GRPO、Token-PPO、Turn-PPO，统一放在多轮 MDP 框架下。</span></article>
+                    <article class="metric"><strong>≈ 同 PPO 成本</strong><span>论文指出 Turn-PPO 与 Token-PPO 的 actor/critic 前后向形式相近；这不表示它与无 critic 的 GRPO 成本相同。</span></article>
+                </div>
+
+                <ul>
+                    <li><strong>GRPO 失败诊断：</strong>去除标准差归一化、调整 KL 或增加 batch diversity 都不能稳定消除崩溃，说明问题不只是某个超参数。</li>
+                    <li><strong>PPO 对比：</strong>可学习 critic 让 PPO 比采样式组相对优势更稳定；Turn-level critic 又通常比 Token-level critic 更准确。</li>
+                    <li><strong>适用范围：</strong>论文只研究文本环境 WebShop 与 Sokoban；对真实工具 API、非平稳用户和更长航空任务的泛化仍需单独验证。</li>
+                    <li><strong>当前代码证据：</strong>源码审计和 CPU 级数学测试只能证明“实现的是预期公式”，不能证明它在航空任务上一定优于 GRPO；最终结论仍需受控训练实验。</li>
+                </ul>
+            </section>
+
+            <section id="judgment">
+                <p class="section-kicker">07 · Critical reading</p>
+                <h2>最终判断：方案一适用当前数据，也适合当前框架</h2>
+                <div class="judgment-grid">
+                    <article class="judgment-card">
+                        <h3>为什么可以作为主线</h3>
+                        <p>τ-bench 有自然 Turn 边界、完整工具历史和可验证终局奖励；当前 veRL 改造已把 rollout、critic、GAE 与 actor loss 接通，无需换回另一套训练框架。</p>
+                    </article>
+                    <article class="judgment-card">
+                        <h3>最大的理论风险</h3>
+                        <p>二值终局反馈没有步骤级真值，critic 只能从跨轨迹统计规律学习；若失败样本占比过高或状态覆盖不足，Turn advantage 可能只是带偏差的 value 残差。</p>
+                    </article>
+                    <article class="judgment-card">
+                        <h3>最大的实现风险</h3>
+                        <p>长 reasoning response 会让整轮概率比的方差随 token 数累积。若 clipping 或 log-ratio saturation 长期偏高，应先处理更新幅度，而不是静默改成另一种算法。</p>
+                    </article>
+                </div>
+
+                <h3>什么结果才算“这套方案在当前数据上工作”</h3>
+                <div class="table-wrap">
+                    <table>
+                        <thead>
+                            <tr><th>观察项</th><th>健康信号</th><th>失败信号与含义</th></tr>
+                        </thead>
+                        <tbody>
+                            <tr><td>任务指标</td><td>相同 32-rollout 预算下，多随机种子成功率优于或至少稳定于 GRPO</td><td>只在单次 run 上上涨：无法区分算法收益与环境/采样方差</td></tr>
+                            <tr><td>critic</td><td>held-out explained variance 逐步为正，value calibration 随任务阶段有区分</td><td>训练 loss 降但 held-out EV≤0：critic 在记忆位置/表面模式</td></tr>
+                            <tr><td>优势</td><td>同一 Turn 内一致，不同阶段分布可区分；与反事实后续结果方向一致</td><td>优势只随响应长度、Turn index 或工具名变化：出现 shortcut</td></tr>
+                            <tr><td>actor 更新</td><td>turn clip fraction 与 log-ratio saturation 处于可控区间且不过早顶满</td><td>大量 Turn 饱和：整轮 product ratio 已失去有效分辨率</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+                <div class="callout">
+                    <p><strong>路线建议：</strong>保留当前 veRL 实现，按原技术报告的严格 Turn-PPO 定义作为方案一主线，不需要因为数据集而退回“人工 turn reward shaping”。首轮实验优先验证 critic 的 held-out 解释力和整轮 ratio 的稳定性。只有当 log-ratio 饱和成为结构性问题时，再把几何平均/长度归一化 ratio 作为清晰命名的算法消融；只有当 critic 明显学不动时，再比较 TRACE 等 critic-free 方案。</p>
+                </div>
+            </section>
+        </article>
+
+        <footer>
+            <p><strong>原文与权威来源</strong></p>
+            <ul class="source-list">
+                <li><a href="https://aclanthology.org/2026.findings-eacl.328/" target="_blank" rel="noopener noreferrer">Turn-PPO · Findings of EACL 2026 · ACL Anthology</a></li>
+                <li><a href="https://arxiv.org/html/2512.17008v2" target="_blank" rel="noopener noreferrer">Turn-PPO arXiv HTML v2（公式、Table 1 与实验细节）</a></li>
+                <li><a href="https://github.com/mll-lab-nu/RAGEN" target="_blank" rel="noopener noreferrer">RAGEN：论文使用的多轮 Agent RL 代码基础</a></li>
+                <li><a href="https://github.com/iOPEN-Xing/agentic-rl/tree/codex/turn-level-reward" target="_blank" rel="noopener noreferrer">当前 Turn-PPO 实现分支</a></li>
+                <li><a href="scheme-analysis.html">返回 Agentic-GRPO 航空订票方案总览</a></li>
+            </ul>
+            <p>本页为论文—实现双向审计；“航空订票映射”和代码准确性结论来自当前仓库源码，算法效果仍需训练实验验证。</p>
+        </footer>
+    </main>
+
+    <dialog id="lightbox" aria-label="论文图片放大预览">
+        <button class="dialog-close" type="button" aria-label="关闭图片预览">×</button>
+        <img src="" alt="">
+    </dialog>
+
+    <script>
+        document.querySelectorAll('[data-figure-toggle]').forEach((button) => {
+            button.addEventListener('click', () => {
+                const detail = button.nextElementSibling;
+                const expanded = button.getAttribute('aria-expanded') === 'true';
+                button.setAttribute('aria-expanded', String(!expanded));
+                detail.classList.toggle('active', !expanded);
+                button.textContent = expanded ? '展开逐区说明 ▸' : '收起逐区说明 ▴';
+            });
+        });
+
+        const lightbox = document.getElementById('lightbox');
+        const lightboxImage = lightbox.querySelector('img');
+        const closeButton = lightbox.querySelector('.dialog-close');
+
+        document.querySelectorAll('[data-lightbox]').forEach((button) => {
+            button.addEventListener('click', () => {
+                lightboxImage.src = button.dataset.src;
+                lightboxImage.alt = button.dataset.alt;
+                if (typeof lightbox.showModal === 'function') {
+                    lightbox.showModal();
+                } else {
+                    lightbox.setAttribute('open', '');
+                }
+            });
+        });
+
+        closeButton.addEventListener('click', () => lightbox.close());
+        lightbox.addEventListener('click', (event) => {
+            if (event.target === lightbox) lightbox.close();
+        });
+    </script>
+</body>
+</html>
