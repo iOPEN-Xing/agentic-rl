@@ -5,64 +5,59 @@
 # You may obtain a copy of the License at
 #
 # http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+
+"""Utilities for adapting interactive rollouts to TRACE state transitions."""
 
 from __future__ import annotations
 
-import math
+from dataclasses import dataclass
 
 
-def append_assistant_turn(
-    spans: list[tuple[int, int]],
-    rewards: list[float],
-    start: int,
-    end: int,
-) -> None:
-    """Append one assistant generation span and its initially empty event reward."""
-    if start < 0 or end <= start:
-        raise ValueError(f"Invalid assistant turn span: {(start, end)}")
-    if spans and start < spans[-1][1]:
-        raise ValueError(f"Assistant turn spans overlap: {spans[-1]} and {(start, end)}")
-    spans.append((start, end))
-    rewards.append(0.0)
+@dataclass(frozen=True)
+class TraceLayout:
+    """TRACE metadata for one rollout.
+
+    ``state_boundaries`` are response-token offsets immediately before each
+    assistant generation. Consecutive boundaries therefore contain one policy
+    decision and its following tool/user observation. The last assistant span
+    is treated as the final-answer tail and has no local TRACE transition.
+    """
+
+    state_boundaries: list[int]
+    turn_spans: list[tuple[int, int]]
+    final_answer_span: tuple[int, int] | None
 
 
-def accumulate_latest_turn_reward(rewards: list[float], reward: float | None) -> bool:
-    """Attach a tool or interaction reward to the assistant turn that caused it."""
-    if reward is None:
-        return False
-    value = float(reward)
-    if not math.isfinite(value):
-        raise ValueError(f"Turn reward must be finite, got {reward!r}")
-    if not rewards:
-        raise ValueError("Received a turn reward before any assistant generation")
-    rewards[-1] += value
-    return True
-
-
-def clip_turn_reward_events(
-    spans: list[tuple[int, int]],
-    rewards: list[float],
+def build_trace_layout(
+    assistant_turn_spans: list[tuple[int, int]],
     response_length: int,
-) -> tuple[list[tuple[int, int]], list[float]]:
-    """Clip aligned turn events to the response tokens returned by the rollout."""
-    if len(spans) != len(rewards):
-        raise ValueError(f"Turn span/reward length mismatch: {len(spans)} != {len(rewards)}")
+) -> TraceLayout:
+    """Validate and clip assistant spans, then form TRACE transitions."""
     if response_length < 0:
         raise ValueError(f"response_length must be non-negative, got {response_length}")
 
-    clipped_spans: list[tuple[int, int]] = []
-    clipped_rewards: list[float] = []
-    for (start, end), reward in zip(spans, rewards, strict=True):
+    clipped: list[tuple[int, int]] = []
+    previous_end = 0
+    for turn_index, span in enumerate(assistant_turn_spans):
+        if not isinstance(span, (tuple, list)) or len(span) != 2:
+            raise ValueError(f"Invalid assistant span at turn {turn_index}: {span!r}")
+        start, end = int(span[0]), int(span[1])
+        if start < previous_end:
+            raise ValueError(f"Assistant turn spans overlap: {clipped[-1]} and {(start, end)}")
+        if start < 0 or end <= start:
+            raise ValueError(f"Invalid assistant turn span: {(start, end)}")
+        previous_end = end
         if start >= response_length:
             break
         clipped_end = min(end, response_length)
         if clipped_end > start:
-            clipped_spans.append((start, clipped_end))
-            clipped_rewards.append(float(reward))
-    return clipped_spans, clipped_rewards
+            clipped.append((start, clipped_end))
+
+    if not clipped:
+        return TraceLayout(state_boundaries=[], turn_spans=[], final_answer_span=None)
+
+    return TraceLayout(
+        state_boundaries=[start for start, _ in clipped],
+        turn_spans=clipped[:-1],
+        final_answer_span=clipped[-1],
+    )

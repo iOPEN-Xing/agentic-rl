@@ -1,4 +1,4 @@
-# Hybrid session/turn advantage experiment.
+# TRACE-style hybrid outcome/turn advantage for τ-bench airline.
 hydra:
   searchpath:
     - pkg://verl/trainer/config
@@ -8,8 +8,10 @@ defaults:
   - _self_
 
 data:
-  train_files: experiments/vanilla/train.parquet
-  val_files: experiments/vanilla/val.parquet
+  # Built by run_hybrid_advantage.sh so reward_model.ground_truth contains the
+  # training-only canonical action/output target used by the frozen scorer.
+  train_files: experiments/hybrid_advantage/train.parquet
+  val_files: experiments/hybrid_advantage/val.parquet
   train_batch_size: 4
   max_prompt_length: 8192
   max_response_length: 12288
@@ -88,8 +90,18 @@ algorithm:
   rollout_correction:
     bypass_mode: true
   hybrid_advantage:
-    turn_gamma: 0.9
-    turn_weight: 0.1
+    # TRACE paper Algorithm 1 / Appendix A.1 defaults. Turn credit remains an
+    # auxiliary signal; it is not group-normalized or scheduled to dominate.
+    outcome_weight: 1.0
+    turn_weight: 0.2
+    gap_epsilon: 0.1
+    td_horizon: 3
+    td_gamma: 0.8
+    terminal_scale: 2.0
+    score_temperature: 1.0
+    # Refuse silent truncation because it changes which state is being scored.
+    max_scoring_length: 24576
+    max_target_tokens: 2048
 
 trainer:
   total_epochs: 50

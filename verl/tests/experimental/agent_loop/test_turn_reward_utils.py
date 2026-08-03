@@ -1,35 +1,30 @@
-import math
-
 import pytest
 
-from verl.experimental.agent_loop.turn_reward_utils import (
-    accumulate_latest_turn_reward,
-    append_assistant_turn,
-    clip_turn_reward_events,
-)
+from verl.experimental.agent_loop.turn_reward_utils import build_trace_layout
 
 
-def test_turn_events_accumulate_and_clip_in_alignment():
-    spans = []
-    rewards = []
+def test_trace_layout_uses_pre_generation_states_and_excludes_answer_tail():
+    layout = build_trace_layout(
+        assistant_turn_spans=[(0, 2), (4, 7), (9, 11)],
+        response_length=11,
+    )
 
-    append_assistant_turn(spans, rewards, 0, 3)
-    assert accumulate_latest_turn_reward(rewards, 0.25)
-    assert accumulate_latest_turn_reward(rewards, -0.05)
-    append_assistant_turn(spans, rewards, 5, 9)
-    assert accumulate_latest_turn_reward(rewards, 1.0)
-
-    clipped_spans, clipped_rewards = clip_turn_reward_events(spans, rewards, response_length=7)
-    assert clipped_spans == [(0, 3), (5, 7)]
-    assert clipped_rewards == pytest.approx([0.2, 1.0])
+    assert layout.state_boundaries == [0, 4, 9]
+    assert layout.turn_spans == [(0, 2), (4, 7)]
+    assert layout.final_answer_span == (9, 11)
 
 
-def test_turn_event_validation_fails_loud():
-    with pytest.raises(ValueError, match="before any assistant"):
-        accumulate_latest_turn_reward([], 1.0)
-    with pytest.raises(ValueError, match="finite"):
-        accumulate_latest_turn_reward([0.0], math.inf)
+def test_trace_layout_clips_the_final_span_without_inventing_a_transition():
+    layout = build_trace_layout(
+        assistant_turn_spans=[(0, 3), (5, 9)],
+        response_length=7,
+    )
+
+    assert layout.state_boundaries == [0, 5]
+    assert layout.turn_spans == [(0, 3)]
+    assert layout.final_answer_span == (5, 7)
+
+
+def test_trace_layout_validates_monotonic_spans():
     with pytest.raises(ValueError, match="overlap"):
-        append_assistant_turn([(0, 3)], [0.0], 2, 4)
-    with pytest.raises(ValueError, match="mismatch"):
-        clip_turn_reward_events([(0, 2)], [], response_length=2)
+        build_trace_layout([(0, 3), (2, 4)], response_length=4)

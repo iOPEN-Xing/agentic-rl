@@ -1,5 +1,3 @@
-# Exp 2: LATA GRPO hf_step_300 评测配置
-# policy = hf_step_300, user sim = fixed Qwen3-14B
 
 env:
   name: airline
@@ -10,6 +8,7 @@ env:
   task_split: test
 
 policy:
+  # Stable vLLM service alias; the checkpoint backbone is Qwen3-8B.
   model_name: "agentic-rl-policy"
   base_url: "http://localhost:8000/v1"
   temperature: 0.7
@@ -23,4 +22,4 @@ eval:
   num_workers: 2
 
 output:
-  dir: "experiments/lata/eval_step_300"
+  dir: "experiments/hybrid_advantage/eval_step_150"

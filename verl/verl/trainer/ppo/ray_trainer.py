@@ -50,6 +50,10 @@ from verl.trainer.ppo.metric_utils import (
     process_validation_metrics,
 )
 from verl.trainer.ppo.reward import compute_reward, compute_reward_async
+from verl.trainer.ppo.trace_reference import (
+    build_trace_reference_batch,
+    scatter_trace_prefix_scores,
+)
 from verl.trainer.ppo.utils import Role, WorkerType, need_critic, need_reference_policy, need_reward_model
 from verl.utils.checkpoint.checkpoint_manager import find_latest_ckpt_path, should_save_ckpt_esi
 from verl.utils.config import omega_conf_to_dataclass
@@ -186,8 +190,6 @@ def compute_advantage(
     num_repeat: int = 1,
     norm_adv_by_std_in_grpo: bool = True,
     config: Optional[AlgoConfig] = None,
-    global_step: int = 0,
-    total_steps: Optional[int] = None,
 ) -> DataProto:
     """Compute advantage estimates for policy optimization.
 
@@ -203,8 +205,6 @@ def compute_advantage(
         norm_adv_by_std_in_grpo (bool, optional): Whether to normalize advantages by standard deviation in
             GRPO. Defaults to True.
         config (dict, optional): Configuration dictionary for algorithm settings. Defaults to None.
-        global_step (int, optional): Current optimizer step for scheduled estimators.
-        total_steps (int, optional): Total optimizer steps for scheduled estimators.
 
     Returns:
         DataProto: The updated data with computed advantages and returns.
@@ -257,19 +257,19 @@ def compute_advantage(
             adv_kwargs["reward_baselines"] = data.batch["reward_baselines"]
 
         if adv_estimator == "grpo_hybrid":
-            required_fields = ("assistant_turn_spans", "assistant_turn_rewards")
+            required_fields = ("trace_turn_spans", "trace_prefix_avg_log_probs")
             missing_fields = [key for key in required_fields if key not in data.non_tensor_batch]
             if missing_fields:
                 raise ValueError(
-                    "grpo_hybrid requires rollout turn events in non_tensor_batch; "
+                    "grpo_hybrid requires TRACE rollout metadata in non_tensor_batch; "
                     f"missing {missing_fields}"
                 )
             adv_kwargs.update(
                 {
-                    "assistant_turn_spans": data.non_tensor_batch["assistant_turn_spans"],
-                    "assistant_turn_rewards": data.non_tensor_batch["assistant_turn_rewards"],
-                    "global_step": global_step,
-                    "total_steps": total_steps,
+                    "trace_turn_spans": data.non_tensor_batch["trace_turn_spans"],
+                    "trace_prefix_avg_log_probs": data.non_tensor_batch[
+                        "trace_prefix_avg_log_probs"
+                    ],
                 }
             )
 
@@ -1224,6 +1224,13 @@ class RayPPOTrainer:
 
                     assert "old_log_probs" in batch.batch, f'"old_log_prob" not in {batch.batch.keys()=}'
 
+                    trace_enabled = self.config.algorithm.adv_estimator == "grpo_hybrid"
+                    if trace_enabled and not self.use_reference_policy:
+                        raise RuntimeError(
+                            "grpo_hybrid requires a frozen reference policy for "
+                            "gold-target prefix scoring"
+                        )
+
                     if self.use_reference_policy:
                         # compute reference log_prob
                         with marked_timer(str(Role.RefPolicy), timing_raw, color="olive"):
@@ -1232,6 +1239,63 @@ class RayPPOTrainer:
                             else:
                                 ref_log_prob = self.actor_rollout_wg.compute_ref_log_prob(batch)
                             batch = batch.union(ref_log_prob)
+
+                        if trace_enabled:
+                            with marked_timer("trace_ref_score", timing_raw, color="olive"):
+                                trace_config = self.config.algorithm.hybrid_advantage
+                                reference_batch = build_trace_reference_batch(
+                                    batch,
+                                    self.tokenizer,
+                                    max_scoring_length=int(
+                                        trace_config.get("max_scoring_length", 24576)
+                                    ),
+                                    max_target_tokens=int(
+                                        trace_config.get("max_target_tokens", 2048)
+                                    ),
+                                    score_temperature=float(
+                                        trace_config.get("score_temperature", 1.0)
+                                    ),
+                                )
+                                if reference_batch is None:
+                                    prefix_scores = np.empty(len(batch), dtype=object)
+                                    prefix_scores[:] = [[] for _ in range(len(batch))]
+                                else:
+                                    reference_worker = (
+                                        self.actor_rollout_wg
+                                        if self.ref_in_actor
+                                        else self.ref_policy_wg
+                                    )
+                                    padded_reference_data, pad_size = pad_dataproto_to_divisor(
+                                        reference_batch.data,
+                                        reference_worker.world_size,
+                                    )
+                                    trace_ref_output = reference_worker.compute_ref_log_prob(
+                                        padded_reference_data
+                                    )
+                                    trace_ref_output = unpad_dataproto(
+                                        trace_ref_output,
+                                        pad_size,
+                                    )
+                                    prefix_scores = scatter_trace_prefix_scores(
+                                        reference_batch,
+                                        trace_ref_output.batch["ref_log_prob"],
+                                    )
+                                batch.non_tensor_batch[
+                                    "trace_prefix_avg_log_probs"
+                                ] = prefix_scores
+
+                                flat_prefix_scores = [
+                                    score
+                                    for sample_scores in prefix_scores
+                                    for score in sample_scores
+                                ]
+                                metrics["trace/scored_prefixes"] = float(
+                                    len(flat_prefix_scores)
+                                )
+                                if flat_prefix_scores:
+                                    metrics["trace/prefix_log_prob_mean"] = float(
+                                        np.mean(flat_prefix_scores)
+                                    )
 
                     # compute values
                     if self.use_critic:
@@ -1286,8 +1350,6 @@ class RayPPOTrainer:
                             num_repeat=self.config.actor_rollout_ref.rollout.n,
                             norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo,
                             config=self.config.algorithm,
-                            global_step=self.global_steps,
-                            total_steps=self.total_training_steps,
                         )
 
                     # update critic

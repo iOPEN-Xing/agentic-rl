@@ -968,19 +968,23 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         from contextlib import nullcontext
 
         is_lora = data.meta_info.pop("is_lora", False)
+        log_prob_temperature = data.meta_info.pop(
+            "log_prob_temperature",
+            self.config.rollout.temperature,
+        )
         adapter_ctx = self.actor.actor_module.disable_adapter() if is_lora else nullcontext()
         # we should always recompute old_log_probs when it is HybridEngine
         data.meta_info["micro_batch_size"] = self.config.rollout.log_prob_micro_batch_size_per_gpu
         data.meta_info["max_token_len"] = self.config.rollout.log_prob_max_token_len_per_gpu
         data.meta_info["use_dynamic_bsz"] = self.config.rollout.log_prob_use_dynamic_bsz
-        data.meta_info["temperature"] = self.config.rollout.temperature
+        data.meta_info["temperature"] = log_prob_temperature
         # perform recompute log_prob
         with self.ulysses_sharding_manager:
             with adapter_ctx:
                 output, entropys = self.actor.compute_log_prob(data=data, calculate_entropy=True)
             output = DataProto.from_dict(
                 tensors={"old_log_probs": output, "entropys": entropys},
-                meta_info={"temperature": self.config.rollout.temperature},
+                meta_info={"temperature": log_prob_temperature},
             )
 
         output = output.to("cpu")
@@ -999,14 +1003,19 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="actor"))
     @DistProfiler.annotate(color="olive", role="ref_compute_log_prob")
     def compute_ref_log_prob(self, data: DataProto):
+        ref_log_prob_temperature = data.meta_info.pop(
+            "ref_log_prob_temperature",
+            self.config.rollout.temperature,
+        )
         if self._is_lora:
             # if _is_lora, actor without lora applied is the ref
             data.meta_info["is_lora"] = True
+            data.meta_info["log_prob_temperature"] = ref_log_prob_temperature
             data = self.compute_log_prob(data)
             # this old_log_probs is in fact ref_log_prob
             data = DataProto.from_dict(
                 tensors={"ref_log_prob": data.batch["old_log_probs"]},
-                meta_info={"temperature": self.config.rollout.temperature},
+                meta_info={"temperature": ref_log_prob_temperature},
             )
             return data
         assert self._is_ref
@@ -1015,7 +1024,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
         micro_batch_size = self.config.ref.log_prob_micro_batch_size_per_gpu
         data.meta_info["micro_batch_size"] = micro_batch_size
-        data.meta_info["temperature"] = self.config.rollout.temperature
+        data.meta_info["temperature"] = ref_log_prob_temperature
         data.meta_info["max_token_len"] = self.config.ref.log_prob_max_token_len_per_gpu
         data.meta_info["use_dynamic_bsz"] = self.config.ref.log_prob_use_dynamic_bsz
         with self.ulysses_sharding_manager:
@@ -1023,7 +1032,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             output, _ = self.ref_policy.compute_log_prob(data=data, calculate_entropy=False)
             output = DataProto.from_dict(
                 tensors={"ref_log_prob": output},
-                meta_info={"temperature": self.config.rollout.temperature},
+                meta_info={"temperature": ref_log_prob_temperature},
             )
 
         output = output.to("cpu")

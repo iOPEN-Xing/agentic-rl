@@ -1,5 +1,4 @@
-#  vanilla GRPO hf_step_200 评测配置
-# policy = hf_step_200, user sim = 72B-AWQ
+# Vanilla GRPO hf_step_200. The user simulator is the fixed Qwen3-14B service on port 8001.
 
 env:
   name: airline
@@ -10,7 +9,8 @@ env:
   task_split: test
 
 policy:
-  model_name: "Qwen/Qwen2.5-7B-Instruct"
+  # Stable vLLM service alias; the checkpoint backbone is Qwen3-8B.
+  model_name: "agentic-rl-policy"
   base_url: "http://localhost:8000/v1"
   temperature: 0.7
   top_p: 0.9

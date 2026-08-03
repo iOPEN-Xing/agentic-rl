@@ -22,11 +22,7 @@ from uuid import uuid4
 
 from verl.experimental.agent_loop.agent_loop import AgentLoopBase, AgentLoopOutput, register
 from verl.experimental.agent_loop.tool_parser import FunctionCall, ToolParser
-from verl.experimental.agent_loop.turn_reward_utils import (
-    accumulate_latest_turn_reward,
-    append_assistant_turn,
-    clip_turn_reward_events,
-)
+from verl.experimental.agent_loop.turn_reward_utils import build_trace_layout
 from verl.experimental.agent_loop.utils import add_generation_prompt_for_gpt_oss, format_gpt_oss_tool_response_manually
 from verl.interactions.base import BaseInteraction
 
@@ -92,7 +88,6 @@ class AgentData:
         self.turn_scores: list[float] = []
         self.tool_rewards: list[float] = []
         self.assistant_turn_spans: list[tuple[int, int]] = []
-        self.assistant_turn_rewards: list[float] = []
         self.reasoning_tokens_per_turn: list[int] = []
         self.total_tool_calls: int = 0
         self.total_errors: int = 0
@@ -245,9 +240,8 @@ class ToolAgentLoop(AgentLoopBase):
             reward_score = 0.0
 
         # Finalize output
-        assistant_turn_spans, assistant_turn_rewards = clip_turn_reward_events(
+        trace_layout = build_trace_layout(
             agent_data.assistant_turn_spans,
-            agent_data.assistant_turn_rewards,
             self.response_length,
         )
         response_token_count = len(agent_data.response_mask)
@@ -274,8 +268,9 @@ class ToolAgentLoop(AgentLoopBase):
         output.extra_fields.update({
             "turn_scores": agent_data.turn_scores,
             "tool_rewards": agent_data.tool_rewards,
-            "assistant_turn_spans": assistant_turn_spans,
-            "assistant_turn_rewards": assistant_turn_rewards,
+            "trace_state_boundaries": trace_layout.state_boundaries,
+            "trace_turn_spans": trace_layout.turn_spans,
+            "trace_final_answer_span": trace_layout.final_answer_span,
             "reasoning_tokens_per_turn": agent_data.reasoning_tokens_per_turn,
             "total_tool_calls": agent_data.total_tool_calls,
             "total_errors": agent_data.total_errors,
@@ -335,12 +330,7 @@ class ToolAgentLoop(AgentLoopBase):
         agent_data.prompt_ids += agent_data.response_ids
         agent_data.response_mask += [1] * len(agent_data.response_ids)
         if agent_data.response_ids:
-            append_assistant_turn(
-                agent_data.assistant_turn_spans,
-                agent_data.assistant_turn_rewards,
-                turn_start,
-                len(agent_data.response_mask),
-            )
+            agent_data.assistant_turn_spans.append((turn_start, len(agent_data.response_mask)))
         if output.log_probs:
             agent_data.response_logprobs += output.log_probs
 
@@ -450,7 +440,6 @@ class ToolAgentLoop(AgentLoopBase):
 
             if tool_reward is not None:
                 agent_data.tool_rewards.append(tool_reward)
-                accumulate_latest_turn_reward(agent_data.assistant_turn_rewards, tool_reward)
 
         agent_data.messages.extend(add_messages)
         # Update prompt with tool responses
@@ -532,7 +521,6 @@ class ToolAgentLoop(AgentLoopBase):
 
         if reward is not None:
             agent_data.turn_scores.append(reward)
-            accumulate_latest_turn_reward(agent_data.assistant_turn_rewards, reward)
 
         # Update prompt with user responses (similar to _handle_processing_tools_state)
         if self.processor is not None:

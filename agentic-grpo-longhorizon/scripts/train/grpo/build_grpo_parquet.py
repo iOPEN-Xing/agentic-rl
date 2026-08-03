@@ -11,6 +11,7 @@ Design: patch v2 §3.4
 - Each row = one task, rollout.n=4 expands at runtime by veRL
 - prompt column: only system message (date grounding), user msg from Interaction
 - extra_info: index, task_id, split, interaction_kwargs
+- reward_model.ground_truth: training-only canonical TRACE target
 - No traj_uid column (veRL repeat mechanism makes it non-unique)
 """
 from __future__ import annotations
@@ -26,6 +27,11 @@ PROJECT_ROOT = Path(__file__).resolve().parent
 while not (PROJECT_ROOT / "src").is_dir():
     PROJECT_ROOT = PROJECT_ROOT.parent
 sys.path.insert(0, str(PROJECT_ROOT))
+BUNDLE_ROOT = PROJECT_ROOT.parent
+sys.path.insert(0, str(BUNDLE_ROOT / "tau-bench"))
+
+from tau_bench.envs.airline.tasks_test import TASKS
+from tau_bench.types import RESPOND_ACTION_NAME
 
 SYSTEM_PROMPT = (
     "# Current Date Context\n"
@@ -39,9 +45,41 @@ INTERACTION_NAME = "tau_bench_airline"
 NUM_AIRLINE_TASKS = 50
 
 
+def serialize_tau_bench_trace_target(task) -> str:
+    """Serialize the verifier's stable action/output target for TRACE scoring.
+
+    The hidden user-simulator instruction is intentionally excluded: it
+    contains behavioral prose that is not checked by the τ-bench verifier.
+    Dynamic post-booking identifiers are also absent because τ-bench ground
+    truth specifies the required database mutation before such IDs exist.
+    """
+    required_actions = [
+        {
+            "name": action.name,
+            "kwargs": action.kwargs,
+        }
+        for action in task.actions
+        if action.name != RESPOND_ACTION_NAME
+    ]
+    payload = {
+        "version": "tau_bench_airline_actions_outputs_v1",
+        "required_actions": required_actions,
+        "required_outputs": list(task.outputs),
+    }
+    return json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
 def build_rows(task_ids: list[int], split: str) -> list[dict]:
     rows = []
     for idx, tid in enumerate(task_ids):
+        if tid < 0 or tid >= len(TASKS):
+            raise ValueError(f"Unknown airline task id {tid}; expected 0..{len(TASKS) - 1}")
+        trace_target = serialize_tau_bench_trace_target(TASKS[tid])
         rows.append({
             "prompt": [{"role": "system", "content": SYSTEM_PROMPT}],
             "extra_info": {
@@ -54,7 +92,9 @@ def build_rows(task_ids: list[int], split: str) -> list[dict]:
                 },
             },
             "data_source": INTERACTION_NAME,
-            "reward_model": {"ground_truth": ""},
+            # This field is consumed only by the frozen reference scorer. It
+            # is never inserted into the actor prompt or user simulator.
+            "reward_model": {"ground_truth": trace_target},
             "ability": INTERACTION_NAME,
         })
     return rows
