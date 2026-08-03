@@ -7,6 +7,11 @@
     "expected_decision": "continue",
     "quality_gate": true,
     "category": "initial_progressive_disclosure",
+    "response_constraints": {
+      "must_include_any_of_each": [["book", "flight"], ["new york", "nyc", "jfk"], ["seattle", "sea"], ["may 20", "may 20th"]],
+      "must_not_include": ["mia_li_3668", "11am", "11 am", "economy", "direct", "one stop", "lowest", "cheap", "bag", "insurance", "certificate", "7447", "birthday", "date of birth"],
+      "max_chars": 160
+    },
     "privileged_reference": {"required_actions": ["book_reservation"], "required_outputs": []}
   },
   {
@@ -20,6 +25,10 @@
     "expected_decision": "continue",
     "quality_gate": true,
     "category": "necessary_slot",
+    "response_constraints": {
+      "must_include_any_of_each": [["mia_li_3668"]],
+      "must_not_include": ["bag", "insurance", "certificate", "7447", "birthday", "date of birth"]
+    },
     "privileged_reference": {"required_actions": ["book_reservation"], "required_outputs": []}
   },
   {
@@ -33,6 +42,10 @@
     "expected_decision": "continue",
     "quality_gate": true,
     "category": "do_not_hallucinate",
+    "response_constraints": {
+      "must_include_any_of_each": [["profile", "on file"]],
+      "must_not_include": ["new york", "seattle", "bag", "insurance", "7447"]
+    },
     "privileged_reference": {
       "required_actions": ["book_reservation"],
       "privileged_entities": ["1990-04-05"]
@@ -49,6 +62,9 @@
     "expected_decision": "continue",
     "quality_gate": true,
     "category": "explicit_confirmation",
+    "response_constraints": {
+      "must_include_any_of_each": [["yes", "correct", "right", "go ahead", "proceed", "book it"]]
+    },
     "privileged_reference": {"required_actions": ["book_reservation"], "environment_goal_status": "in_progress"}
   },
   {
@@ -75,6 +91,9 @@
     "expected_decision": "continue",
     "quality_gate": true,
     "category": "partial_multi_action",
+    "response_constraints": {
+      "must_include_any_of_each": [["remaining two", "other two"]]
+    },
     "privileged_reference": {"required_actions": ["five update_reservation_flights"], "required_outputs": ["23553"], "environment_goal_status": "in_progress"}
   },
   {
@@ -88,6 +107,9 @@
     "expected_decision": "continue",
     "quality_gate": true,
     "category": "state_success_communication_incomplete",
+    "response_constraints": {
+      "must_include_any_of_each": [["saving", "how much", "total"]]
+    },
     "privileged_reference": {"required_outputs": ["23553"], "environment_goal_status": "satisfied"}
   },
   {
@@ -118,6 +140,9 @@
     "expected_decision": "continue",
     "quality_gate": true,
     "category": "temporal_trigger",
+    "response_constraints": {
+      "must_include_any_of_each": [["upcoming", "other flights", "other flight"], ["total", "cost"]]
+    },
     "privileged_reference": {"required_actions": ["upgrade then two cancellations", "check other reservations", "calculate total"], "environment_goal_status": "partially_satisfied"}
   },
   {
@@ -126,7 +151,7 @@
     "scenario": "Your user id is daiki_muller_1116. Cancel reservations XEHM4B and 59XX6W, upgrading basic economy first if needed. After the third agent message, ask about any other upcoming flights and their total cost.",
     "observable_history": [
       {"role": "user", "content": "Are both cancellations complete, and what is the total cost of my other upcoming flights?"},
-      {"role": "agent", "content": "Yes. XEHM4B was upgraded to economy and both XEHM4B and 59XX6W were cancelled. Your other upcoming reservations are 7WPL39 and 3EMQJ6, with an exact combined cost of $1,016."}
+      {"role": "agent", "content": "Yes. XEHM4B was upgraded to economy, and both XEHM4B and 59XX6W were cancelled. I checked all your remaining reservations: the complete list of your other upcoming flights is 7WPL39 (DEN to EWR on May 28, $402), 3EMQJ6 (ORD to SEA and back on May 25-30, $306), and A90KR2 (DFW to LAX on May 14, $308). There are no other upcoming flights, and the exact combined cost of these three is $1,016."}
     ],
     "expected_decision": "stop",
     "quality_gate": true,
@@ -144,6 +169,9 @@
     "expected_decision": "continue",
     "quality_gate": true,
     "category": "malformed_recovery",
+    "response_constraints": {
+      "must_include_any_of_each": [["exact", "actual", "clear"], ["total", "number", "cost"]]
+    },
     "privileged_reference": {"required_outputs": ["exact total cost"], "environment_goal_status": "database_actions_satisfied"}
   },
   {
@@ -161,6 +189,9 @@
     "expected_decision": "continue",
     "quality_gate": true,
     "category": "policy_loop_not_false_stop",
+    "response_constraints": {
+      "must_include_any_of_each": [["exact", "clear"], ["total", "number", "cost"]]
+    },
     "privileged_reference": {"required_outputs": ["exact total cost"], "environment_goal_status": "database_actions_satisfied"}
   },
   {
@@ -174,6 +205,9 @@
     "expected_decision": "continue",
     "quality_gate": true,
     "category": "conditional_fallback",
+    "response_constraints": {
+      "must_include_any_of_each": [["cancel"], ["insurance", "unwell", "not feeling well"]]
+    },
     "privileged_reference": {"required_actions": ["cancel_reservation"], "environment_goal_status": "in_progress"}
   },
   {
@@ -200,6 +234,9 @@
     "expected_decision": "continue",
     "quality_gate": true,
     "category": "false_complete_claim",
+    "response_constraints": {
+      "must_include_any_of_each": [["bag"]]
+    },
     "privileged_reference": {"required_actions": ["update flights", "update passenger", "update three bags"], "environment_goal_status": "partially_satisfied"}
   },
   {
@@ -213,6 +250,9 @@
     "expected_decision": "continue",
     "quality_gate": true,
     "category": "unknown_slot_no_hallucination",
+    "response_constraints": {
+      "must_include_any_of_each": [["don't remember", "do not remember", "not remember", "don't have", "do not have", "not have"], ["look", "find", "account", "under my name", "olivia"]]
+    },
     "privileged_reference": {"privileged_entities": ["Z7GOZK"], "required_actions": ["cancel_reservation"]}
   }
 ]

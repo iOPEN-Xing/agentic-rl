@@ -270,7 +270,7 @@ python3 scripts/train/user_simulator/generate.py \
   --workers 4
 ```
 
-若 `v1.report.json` 中 `quality_gate_passed=false`，停止 full generation，先修 prompt 或 case contract，再写入 `v1.1.jsonl`。不要覆盖 v1。
+若 report 中 `quality_gate_passed=false`，停止 full generation，先修 prompt 或 case contract，并写入新版本文件，不覆盖旧结果。真实迭代与最终 `v1.7` 结果见 [`PILOT_AUDIT.md`](PILOT_AUDIT.md)。
 
 ### 8.4 Pilot 通过后生成 seen full batch
 
@@ -398,7 +398,7 @@ flowchart TD
 - [UserRL 论文](https://arxiv.org/abs/2509.19736) 与 [官方代码](https://github.com/SalesforceAIResearch/UserRL)：SFT cold start、User Simulator 选择会显著影响多轮 RL 上限；其主实验以 Qwen3-32B 作训练 simulator，并用更强 simulator/真人做泛化检查。UserRL 为 Apache-2.0。
 - [DeepSeek V4 官方模型列表](https://api-docs.deepseek.com/api/list-models)：模型 ID 为 `deepseek-v4-flash`。
 - [DeepSeek JSON Output](https://api-docs.deepseek.com/guides/json_mode/)：要求 `response_format={"type":"json_object"}`，prompt 中显式要求 JSON，并配置足够 max tokens。
-- [DeepSeek Thinking Mode](https://api-docs.deepseek.com/guides/thinking_mode)：默认启用；thinking mode 下 temperature/top_p 不生效，本生成器使用 `reasoning_effort=high`，且不保存 `reasoning_content`。
+- [DeepSeek Thinking Mode](https://api-docs.deepseek.com/guides/thinking_mode)：thinking mode 下 temperature/top_p 不生效。真实 pilot 证明高强度 thinking 对本任务造成输出预算浪费和 JSON 截断，因此最终 teacher 显式关闭 thinking，使用 `temperature=0.3, top_p=0.9`；客户端仍不保存 `reasoning_content`。
 - [DeepSeek V4 pricing](https://api-docs.deepseek.com/quick_start/pricing)：当前 full cases 的 prompt 约 21.3M 字符，按 4 chars/token 粗估约 5.3M input tokens；实际费用以 API usage 与当日价格为准。
 
 ## 12. 当前状态
@@ -408,8 +408,9 @@ flowchart TD
 - DeepSeek V4 Flash JSON/Thinking client：完成；
 - seen/holdout 防泄漏、resume、quarantine、export：完成；
 - `last_assistant` loss mask 与 4×H200 LoRA 配置：完成；
-- 标准库单测：19 个通过（16 个 synthesis + 3 个 mask）；
-- DeepSeek real pilot：等待运行时安全注入 `DEEPSEEK_API_KEY`；
-- full batch：必须在 real pilot 100% 通过后执行。
+- 标准库单测：20 个通过（17 个 synthesis + 3 个 loss-mask）；
+- DeepSeek real pilot：完成，最终 `v1.7` 为 48/48 accepted、48/48 decision match、0 leak、`quality_gate_passed=true`；
+- 多样性：36 条 CONTINUE 中有 25 条不同的规范化文本；排除必须固定回答的 ID 后，11 个可变组中 9 个有多种表达；
+- full batch：按当前阶段要求未执行。
 
-这不是形式上的阻塞：禁止把已经暴露在聊天中的明文 key 再复制进 shell command、测试或 Git，是数据生产管线应具备的最低安全边界。
+API key 没有写入源码、配置、测试、生成结果或 Git；每条结果只记录不敏感的 model、usage 与 request sampling config。

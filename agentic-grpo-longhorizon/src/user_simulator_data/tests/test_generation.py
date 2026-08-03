@@ -125,6 +125,5 @@ class GenerationTests(unittest.TestCase):
         self.assertFalse(failed["quality_gate_passed"])
         self.assertEqual(failed["curated_decision_accuracy"], 0.5)
 
-
 if __name__ == "__main__":
     unittest.main()

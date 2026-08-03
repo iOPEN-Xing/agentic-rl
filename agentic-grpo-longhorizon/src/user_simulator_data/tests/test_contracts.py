@@ -7,6 +7,7 @@ from src.user_simulator_data.contracts import (
     TeacherDecision,
     build_sft_record,
     parse_teacher_decision,
+    validate_response_constraints,
     validate_teacher_decision,
 )
 
@@ -134,6 +135,35 @@ class ContractTests(unittest.TestCase):
     )
 
         self.assertIn("privileged_entity_leak:ZXCV12", issues)
+
+    def test_case_constraints_gate_semantics_without_forcing_one_wording(self):
+        decision = TeacherDecision.from_mapping(
+            {
+                "decision": "continue",
+                "is_over": False,
+                "termination_reason": "continue",
+                "goal_status": "in_progress",
+                "communication_status": "none",
+                "response": "I need a flight to Seattle in economy with three bags.",
+                "resolved_goals": [],
+                "unresolved_goals": ["book flight"],
+                "evidence": [],
+            }
+        )
+
+        issues = validate_response_constraints(
+            decision,
+            {
+                "must_include_any_of_each": [["flight", "book"], ["Seattle", "SEA"]],
+                "must_not_include": ["economy", "bag"],
+                "max_chars": 120,
+            },
+        )
+
+        self.assertNotIn("missing_required_response_group:0", issues)
+        self.assertNotIn("missing_required_response_group:1", issues)
+        self.assertIn("forbidden_response_content:0", issues)
+        self.assertIn("forbidden_response_content:1", issues)
 
     def test_build_sft_record_requires_agent_input_before_teacher_target(self):
         decision = TeacherDecision.from_mapping(

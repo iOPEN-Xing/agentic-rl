@@ -82,8 +82,10 @@ class DeepSeekClient:
         messages: list[dict[str, str]],
         *,
         max_tokens: int = 1600,
-        thinking: bool = True,
+        thinking: bool = False,
         reasoning_effort: str = "high",
+        temperature: float = 0.3,
+        top_p: float = 0.9,
     ) -> dict[str, Any]:
         """Request one JSON object and discard provider chain-of-thought."""
 
@@ -98,6 +100,12 @@ class DeepSeekClient:
         # DeepSeek documents that temperature/top_p are ignored in thinking mode.
         if thinking:
             payload["reasoning_effort"] = reasoning_effort
+        else:
+            # Diversity belongs to surface realization, never to task semantics.
+            # Sampling is disabled by DeepSeek in thinking mode, so only set these
+            # controls for the non-thinking teacher requested by this pipeline.
+            payload["temperature"] = float(temperature)
+            payload["top_p"] = float(top_p)
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
@@ -134,4 +142,11 @@ class DeepSeekClient:
             "model": response.get("model", self.model),
             "response_id": response.get("id"),
             "usage": dict(response.get("usage") or {}),
+            "request_config": {
+                "thinking": bool(thinking),
+                "max_tokens": int(max_tokens),
+                "temperature": None if thinking else float(temperature),
+                "top_p": None if thinking else float(top_p),
+                "reasoning_effort": reasoning_effort if thinking else None,
+            },
         }

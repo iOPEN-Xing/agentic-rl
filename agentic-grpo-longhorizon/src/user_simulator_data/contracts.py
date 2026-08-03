@@ -214,6 +214,38 @@ def validate_teacher_decision(
     return issues
 
 
+def validate_response_constraints(
+    decision: TeacherDecision,
+    constraints: Optional[Mapping[str, Any]],
+) -> list[str]:
+    """Apply case-specific semantic gates to curated pilot responses.
+
+    These constraints are deliberately absent from historical full-batch cases. They
+    turn a small set of high-risk behaviors—such as eager slot disclosure—into
+    executable release tests without teaching the model a single canonical wording.
+    Each inner ``must_include_any_of_each`` group is an OR-set; all groups must match.
+    """
+
+    if not constraints:
+        return []
+    text = decision.response.casefold()
+    issues: list[str] = []
+    for group_index, raw_group in enumerate(
+        constraints.get("must_include_any_of_each", [])
+    ):
+        group = [str(item).strip().casefold() for item in raw_group if str(item).strip()]
+        if group and not any(item in text for item in group):
+            issues.append(f"missing_required_response_group:{group_index}")
+    for item_index, raw_item in enumerate(constraints.get("must_not_include", [])):
+        item = str(raw_item).strip().casefold()
+        if item and item in text:
+            issues.append(f"forbidden_response_content:{item_index}")
+    max_chars = constraints.get("max_chars")
+    if max_chars is not None and len(decision.response) > int(max_chars):
+        issues.append(f"case_response_too_long:{len(decision.response)}")
+    return issues
+
+
 def build_sft_record(
     source_case: Mapping[str, Any],
     decision: TeacherDecision,

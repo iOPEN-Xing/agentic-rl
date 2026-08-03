@@ -32,6 +32,11 @@ class PromptTests(unittest.TestCase):
         self.assertIn('"is_over"', rendered)
         self.assertIn('"response"', rendered)
         self.assertIn("###STOP###", rendered)
+        self.assertIn("wording", rendered.lower())
+        self.assertIn("semantics", rendered.lower())
+        self.assertIn("reactive customer", rendered.lower())
+        self.assertIn("courtesy acknowledgement", rendered.lower())
+        self.assertIn("conversation is empty", rendered.lower())
 
 
     def test_teacher_prompt_says_state_success_alone_is_not_user_visible_completion(self):

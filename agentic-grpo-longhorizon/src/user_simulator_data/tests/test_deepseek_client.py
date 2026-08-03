@@ -14,7 +14,7 @@ class DeepSeekClientTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "DEEPSEEK_API_KEY"):
                 DeepSeekClient.from_environment()
 
-    def test_request_uses_v4_flash_thinking_and_json_contract(self):
+    def test_request_uses_v4_flash_non_thinking_json_contract_with_sampling(self):
         captured = {}
 
         def fake_transport(url, headers, payload, timeout):
@@ -52,12 +52,24 @@ class DeepSeekClientTests(unittest.TestCase):
         self.assertEqual(captured["url"], "https://api.deepseek.com/chat/completions")
         self.assertEqual(captured["payload"]["model"], "deepseek-v4-flash")
         self.assertEqual(captured["payload"]["response_format"], {"type": "json_object"})
-        self.assertEqual(captured["payload"]["thinking"], {"type": "enabled"})
-        self.assertEqual(captured["payload"]["reasoning_effort"], "high")
-        self.assertNotIn("temperature", captured["payload"])
+        self.assertEqual(captured["payload"]["thinking"], {"type": "disabled"})
+        self.assertNotIn("reasoning_effort", captured["payload"])
+        self.assertEqual(captured["payload"]["max_tokens"], 1600)
+        self.assertEqual(captured["payload"]["temperature"], 0.3)
+        self.assertEqual(captured["payload"]["top_p"], 0.9)
         self.assertNotIn("reasoning_content", result)
         self.assertNotIn("runtime-secret", json.dumps(result))
         self.assertEqual(result["usage"]["completion_tokens"], 20)
+        self.assertEqual(
+            result["request_config"],
+            {
+                "thinking": False,
+                "max_tokens": 1600,
+                "temperature": 0.3,
+                "top_p": 0.9,
+                "reasoning_effort": None,
+            },
+        )
 
 
 if __name__ == "__main__":

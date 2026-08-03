@@ -9,6 +9,7 @@ from .contracts import (
     ContractError,
     build_sft_record,
     parse_teacher_decision,
+    validate_response_constraints,
     validate_teacher_decision,
 )
 from .prompts import PROMPT_VERSION, build_teacher_messages
@@ -58,6 +59,12 @@ def generate_one(client: Any, case: Mapping[str, Any]) -> dict[str, Any]:
             observable_history=case.get("observable_history", []),
             privileged_entities=privileged.get("privileged_entities", []),
         )
+        issues.extend(
+            validate_response_constraints(
+                decision,
+                case.get("response_constraints"),
+            )
+        )
         expected = case.get("expected_decision")
         if case.get("quality_gate") and expected and decision.decision != expected:
             issues.append("expected_decision_mismatch")
@@ -77,6 +84,7 @@ def generate_one(client: Any, case: Mapping[str, Any]) -> dict[str, Any]:
                 "model": api_result.get("model"),
                 "response_id": api_result.get("response_id"),
                 "usage": api_result.get("usage", {}),
+                "request_config": api_result.get("request_config", {}),
             },
         }
     except (ContractError, RuntimeError, KeyError, TypeError, ValueError) as exc:
