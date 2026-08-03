@@ -408,7 +408,7 @@ flowchart TD
 - DeepSeek V4 Flash JSON/Thinking client：完成；
 - seen/holdout 防泄漏、resume、quarantine、export：完成；
 - `last_assistant` loss mask 与 4×H200 LoRA 配置：完成；
-- 标准库单测：18 个通过（15 个 synthesis + 3 个 mask）；
+- 标准库单测：19 个通过（16 个 synthesis + 3 个 mask）；
 - DeepSeek real pilot：等待运行时安全注入 `DEEPSEEK_API_KEY`；
 - full batch：必须在 real pilot 100% 通过后执行。
 

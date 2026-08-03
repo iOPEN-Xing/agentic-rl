@@ -135,6 +135,32 @@ class ContractTests(unittest.TestCase):
 
         self.assertIn("privileged_entity_leak:ZXCV12", issues)
 
+    def test_build_sft_record_requires_agent_input_before_teacher_target(self):
+        decision = TeacherDecision.from_mapping(
+            {
+                "decision": "continue",
+                "is_over": False,
+                "termination_reason": "continue",
+                "goal_status": "in_progress",
+                "communication_status": "partial",
+                "response": "Which date?",
+                "resolved_goals": [],
+                "unresolved_goals": ["date"],
+                "evidence": [],
+            }
+        )
+        invalid_case = {
+            "case_id": "two-customer-turns",
+            "task_id": 0,
+            "student_messages": [
+                {"role": "system", "content": "simulate"},
+                {"role": "assistant", "content": "I need a flight."},
+            ],
+        }
+
+        with self.assertRaisesRegex(ContractError, "must end with role=user"):
+            build_sft_record(invalid_case, decision, prompt_version="v1")
+
 
 if __name__ == "__main__":
     unittest.main()

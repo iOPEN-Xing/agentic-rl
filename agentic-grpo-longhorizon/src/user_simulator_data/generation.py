@@ -120,6 +120,12 @@ def summarize_generations(rows: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
         and leak_count == 0
         and accepted == total
     )
+    contract_gate_passed = bool(
+        total
+        and statuses["rejected"] == 0
+        and leak_count == 0
+        and accepted / total >= 0.98
+    )
     return {
         "total": total,
         "status_counts": dict(statuses),
@@ -129,5 +135,6 @@ def summarize_generations(rows: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
         "curated_decision_matches": curated_matches,
         "curated_decision_accuracy": curated_accuracy,
         "privileged_entity_leaks": leak_count,
+        "contract_gate_passed": contract_gate_passed,
         "quality_gate_passed": quality_gate_passed,
     }

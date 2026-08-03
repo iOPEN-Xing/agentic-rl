@@ -167,6 +167,13 @@ def validate_teacher_decision(
             raise ContractError("goal_satisfied requires goal_status=satisfied")
         if decision.unresolved_goals:
             raise ContractError("goal_satisfied requires no unresolved_goals")
+    if decision.termination_reason == "goal_failed" and decision.goal_status != "failed":
+        raise ContractError("goal_failed requires goal_status=failed")
+    if (
+        decision.termination_reason == "cannot_continue"
+        and decision.goal_status not in {"blocked", "failed"}
+    ):
+        raise ContractError("cannot_continue requires blocked or failed goal_status")
 
     issues: list[str] = []
     if not decision.response:
@@ -189,6 +196,14 @@ def validate_teacher_decision(
     ]
     if decision.response.casefold() in customer_messages:
         issues.append("exact_user_repetition")
+    valid_turn_indices = {
+        int(item["turn_index"])
+        for item in observable_history
+        if "turn_index" in item
+    }
+    for item in decision.evidence:
+        if item.turn_index not in valid_turn_indices:
+            issues.append(f"invalid_evidence_turn:{item.turn_index}")
     if decision.decision == "continue" and not decision.unresolved_goals:
         issues.append("continue_without_unresolved_goal")
     if (
@@ -209,6 +224,8 @@ def build_sft_record(
     """Create a drop-in chat SFT record with audit labels outside the target."""
 
     messages = [dict(message) for message in source_case["student_messages"]]
+    if not messages or messages[-1].get("role") != "user":
+        raise ContractError("student_messages must end with role=user before target")
     messages.append({"role": "assistant", "content": decision.response})
     return {
         "case_id": source_case["case_id"],

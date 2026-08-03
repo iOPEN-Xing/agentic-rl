@@ -66,13 +66,13 @@ def main() -> None:
             )
             (eval_rows if is_eval else train_rows).append(value)
 
+    if args.eval_output and not eval_rows:
+        raise RuntimeError("--eval-output requested but no trial07 cases were found")
     args.output.parent.mkdir(parents=True, exist_ok=True)
     with args.output.open("w", encoding="utf-8") as handle:
         for row in train_rows:
             handle.write(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n")
     if args.eval_output:
-        if not eval_rows:
-            raise RuntimeError("--eval-output requested but no trial07 cases were found")
         args.eval_output.parent.mkdir(parents=True, exist_ok=True)
         with args.eval_output.open("w", encoding="utf-8") as handle:
             for row in eval_rows:
