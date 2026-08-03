@@ -31,19 +31,16 @@ import numpy as np
 
 from src.envs.tau_bench_wrapper import TauBenchWrapper
 from src.models.vllm_policy import VLLMPolicy
-from src.evaluation.pass_k_eval import run_eval
+from src.evaluation.pass_k_eval import (
+    estimate_pass_at_k,
+    estimate_pass_power_k,
+    run_eval,
+)
 
 os.environ.setdefault("OPENAI_API_KEY", "EMPTY")
 
 os.environ.setdefault("HF_HUB_OFFLINE", "1")
 os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
-
-
-def pass_at_k(n: int, c: int, k: int) -> float:
-    """HumanEval-style unbiased estimator"""
-    if n - c < k:
-        return 1.0
-    return 1.0 - float(np.prod(1.0 - k / np.arange(n - c + 1, n + 1)))
 
 
 def aggregate_subset(per_task_results: list[dict], task_ids_subset: set[int]) -> dict:
@@ -53,26 +50,33 @@ def aggregate_subset(per_task_results: list[dict], task_ids_subset: set[int]) ->
     subset = [r for r in per_task_results if r["task_id"] in task_ids_subset]
     if not subset:
         return {
-            "n_tasks": 0, "pass_at_1": 0.0, "pass_hat_1": 0.0,
-            "pass_hat_4": 0.0, "pass_hat_8": 0.0,
+            "n_tasks": 0, "any_success_rate": 0.0,
+            "pass_at_1": 0.0, "pass_at_4": None, "pass_at_8": None,
+            "pass_power_1": 0.0, "pass_power_4": None, "pass_power_8": None,
+            "pass_hat_1": 0.0, "pass_hat_4": None, "pass_hat_8": None,
             "avg_turns": 0.0, "avg_tool_calls": 0.0, "error_rate": 0.0,
             "avg_reasoning_tokens_per_turn": 0.0,
             "max_reasoning_tokens_single_turn": 0,
         }
 
-    pass_1_list, pass_4_list, pass_8_list, pass_at_1_list = [], [], [], []
+    pass_at_1_list, pass_at_4_list, pass_at_8_list = [], [], []
+    pass_power_1_list, pass_power_4_list, pass_power_8_list = [], [], []
+    any_success_list = []
     all_turns, all_tool_calls, all_errors = [], [], []
     all_reasoning_tokens = []  # 每个 assistant turn 的 token 数
 
     for r in subset:
         n = r["total_samples"]
         c = r["success_count"]
-        pass_1_list.append(pass_at_k(n, c, 1))
-        pass_at_1_list.append(1.0 if c > 0 else 0.0)
+        pass_at_1_list.append(estimate_pass_at_k(n, c, 1))
+        pass_power_1_list.append(estimate_pass_power_k(n, c, 1))
+        any_success_list.append(1.0 if c > 0 else 0.0)
         if n >= 4:
-            pass_4_list.append(pass_at_k(n, c, 4))
+            pass_at_4_list.append(estimate_pass_at_k(n, c, 4))
+            pass_power_4_list.append(estimate_pass_power_k(n, c, 4))
         if n >= 8:
-            pass_8_list.append(pass_at_k(n, c, 8))
+            pass_at_8_list.append(estimate_pass_at_k(n, c, 8))
+            pass_power_8_list.append(estimate_pass_power_k(n, c, 8))
         for tr in r["trajectories"]:
             all_turns.append(tr["num_turns"])
             all_tool_calls.append(tr["num_tool_calls"])
@@ -84,10 +88,16 @@ def aggregate_subset(per_task_results: list[dict], task_ids_subset: set[int]) ->
 
     return {
         "n_tasks": len(subset),
+        "any_success_rate": float(np.mean(any_success_list)),
         "pass_at_1": float(np.mean(pass_at_1_list)),
-        "pass_hat_1": float(np.mean(pass_1_list)),
-        "pass_hat_4": float(np.mean(pass_4_list)) if pass_4_list else 0.0,
-        "pass_hat_8": float(np.mean(pass_8_list)) if pass_8_list else 0.0,
+        "pass_at_4": float(np.mean(pass_at_4_list)) if pass_at_4_list else None,
+        "pass_at_8": float(np.mean(pass_at_8_list)) if pass_at_8_list else None,
+        "pass_power_1": float(np.mean(pass_power_1_list)),
+        "pass_power_4": float(np.mean(pass_power_4_list)) if pass_power_4_list else None,
+        "pass_power_8": float(np.mean(pass_power_8_list)) if pass_power_8_list else None,
+        "pass_hat_1": float(np.mean(pass_power_1_list)),
+        "pass_hat_4": float(np.mean(pass_power_4_list)) if pass_power_4_list else None,
+        "pass_hat_8": float(np.mean(pass_power_8_list)) if pass_power_8_list else None,
         "avg_turns": float(np.mean(all_turns)) if all_turns else 0.0,
         "avg_tool_calls": float(np.mean(all_tool_calls)) if all_tool_calls else 0.0,
         "error_rate": float(np.mean(all_errors)) if all_errors else 0.0,
@@ -168,7 +178,13 @@ def main():
         unseen_metrics = aggregate_subset(report.per_task_results, unseen_ids)
         overall_metrics = {
             "n_tasks": report.num_tasks,
+            "any_success_rate": report.any_success_rate,
             "pass_at_1": report.pass_at_1,
+            "pass_at_4": report.pass_at_4,
+            "pass_at_8": report.pass_at_8,
+            "pass_power_1": report.pass_power_1,
+            "pass_power_4": report.pass_power_4,
+            "pass_power_8": report.pass_power_8,
             "pass_hat_1": report.pass_hat_1,
             "pass_hat_4": report.pass_hat_4,
             "pass_hat_8": report.pass_hat_8,
@@ -192,7 +208,7 @@ def main():
 
         # 简化版输出: 四组 + 关键判据
         BASELINE_OVERALL_P1 = 0.160     # 数字（72B-user）
-        BASELINE_OVERALL_PA1 = 0.340
+        BASELINE_OVERALL_ANY_SUCCESS = 0.340
         BASELINE_OVERALL_TURNS = 12.29
 
         print()
@@ -201,23 +217,23 @@ def main():
         print("=" * 60)
         print(f"  covered-seen   ({covered_metrics['n_tasks']:>2}): "
               f"pass^1={covered_metrics['pass_hat_1']:.3f}  "
-              f"pass@1={covered_metrics['pass_at_1']:.3f}  "
+              f"any-success={covered_metrics['any_success_rate']:.3f}  "
               f"avg_turns={covered_metrics['avg_turns']:.2f}")
         print(f"  uncovered-seen ({uncovered_seen_metrics['n_tasks']:>2}): "
               f"pass^1={uncovered_seen_metrics['pass_hat_1']:.3f}  "
-              f"pass@1={uncovered_seen_metrics['pass_at_1']:.3f}  "
+              f"any-success={uncovered_seen_metrics['any_success_rate']:.3f}  "
               f"avg_turns={uncovered_seen_metrics['avg_turns']:.2f}")
         print(f"  unseen         ({unseen_metrics['n_tasks']:>2}): "
               f"pass^1={unseen_metrics['pass_hat_1']:.3f}  "
-              f"pass@1={unseen_metrics['pass_at_1']:.3f}  "
+              f"any-success={unseen_metrics['any_success_rate']:.3f}  "
               f"avg_turns={unseen_metrics['avg_turns']:.2f}")
         print(f"  overall        ({overall_metrics['n_tasks']:>2}): "
               f"pass^1={overall_metrics['pass_hat_1']:.3f}  "
-              f"pass@1={overall_metrics['pass_at_1']:.3f}  "
+              f"any-success={overall_metrics['any_success_rate']:.3f}  "
               f"avg_turns={overall_metrics['avg_turns']:.2f}")
         print(f"  Baseline        ({50:>2}): "
               f"pass^1={BASELINE_OVERALL_P1:.3f}  "
-              f"pass@1={BASELINE_OVERALL_PA1:.3f}  "
+              f"any-success={BASELINE_OVERALL_ANY_SUCCESS:.3f}  "
               f"avg_turns={BASELINE_OVERALL_TURNS:.2f}")
         print("=" * 60)
 
@@ -233,9 +249,9 @@ def main():
     else:
         # 兼容模式: 只报 overall
         print(f"\n=== 与 baseline (72B-user) 对比 ===")
-        print(f"  baseline:  pass^1 = 0.160, pass@1 = 0.340, avg_turns = 12.29")
+        print(f"  baseline:  pass^1 = 0.160, any-success = 0.340, avg_turns = 12.29")
         print(f"  SFT:       pass^1 = {report.pass_hat_1:.3f}, "
-              f"pass@1 = {report.pass_at_1:.3f}, "
+              f"any-success = {report.any_success_rate:.3f}, "
               f"avg_turns = {report.avg_turns:.2f}")
         delta = report.pass_hat_1 - 0.160
         print(f"  Δ pass^1:  {delta:+.3f}  "
