@@ -69,6 +69,8 @@ def main():
         tokenizer=tokenizer,
         tools=None,
         max_length=cfg["data"]["max_length"],
+        loss_mask_mode=cfg["data"].get("loss_mask_mode", "all_assistant"),
+        chat_template_kwargs=cfg["data"].get("chat_template_kwargs", {}),
     )
     if len(train_ds) == 0:
         raise RuntimeError("训练集为空，先跑 04_collect_sft_data.py 并确认 04b_inspect_sft_dataset.py")
@@ -80,6 +82,8 @@ def main():
             tokenizer=tokenizer,
             tools=None,
             max_length=cfg["data"]["max_length"],
+            loss_mask_mode=cfg["data"].get("loss_mask_mode", "all_assistant"),
+            chat_template_kwargs=cfg["data"].get("chat_template_kwargs", {}),
         )
 
     # ------- Model + LoRA -------
@@ -111,6 +115,12 @@ def main():
     with open(os.path.join(output_dir, "train_config.yaml"), "w") as f:
         yaml.dump(cfg, f, allow_unicode=True)
 
+    logger_cfg = cfg.get("logger", {})
+    logger_backend = logger_cfg.get("backend", "swanlab")
+    if logger_backend == "wandb":
+        os.environ.setdefault("WANDB_PROJECT", logger_cfg.get("project", "agentic-grpo-longhorizon"))
+        if logger_cfg.get("entity"):
+            os.environ.setdefault("WANDB_ENTITY", logger_cfg["entity"])
     targs = TrainingArguments(
         output_dir=output_dir,
         num_train_epochs=cfg["train"]["num_epochs"],
@@ -128,9 +138,8 @@ def main():
         save_strategy=cfg["train"].get("save_strategy", "epoch"),
         save_total_limit=cfg["train"].get("save_total_limit", 3),
         eval_strategy="epoch" if eval_ds is not None else "no",
-        # 关键：report_to 设 "none" 关掉 HF 自带的 wandb/tensorboard 自动连接
-        # swanlab 用 callback 方式手动接入（见下面 callbacks=...）
-        report_to="none",
+        # wandb 走 HF 原生 report_to；swanlab 仍走下方 callback。
+        report_to="wandb" if logger_backend == "wandb" else "none",
         run_name=cfg["train"].get("run_name", "sft_airline_lora"),
         seed=cfg["train"].get("seed", 42),
         remove_unused_columns=False,  # ⚠️ 必须 False，否则 labels 会被 Trainer 删掉
@@ -139,8 +148,7 @@ def main():
 
     # ------- swanlab callback -------
     callbacks = []
-    logger_cfg = cfg.get("logger", {})
-    use_swanlab = logger_cfg.get("backend", "swanlab") == "swanlab"
+    use_swanlab = logger_backend == "swanlab"
     if use_swanlab:
         try:
             from swanlab.integration.transformers import SwanLabCallback
@@ -167,6 +175,11 @@ def main():
         )
         callbacks.append(swanlab_cb)
         print(f"[logger] swanlab enabled, project={logger_cfg.get('project', 'agentic-grpo-longhorizon')}")
+    elif logger_backend == "wandb":
+        print(
+            f"[logger] wandb enabled, entity={logger_cfg.get('entity')}, "
+            f"project={logger_cfg.get('project', 'agentic-grpo-longhorizon')}"
+        )
     else:
         print("[logger] disabled, only stdout + train_summary.json")
 

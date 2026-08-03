@@ -32,6 +32,12 @@ def main():
     parser.add_argument("--max-length", type=int, default=8192)
     parser.add_argument("--num-show", type=int, default=2,
                         help="打印几条样本看 loss mask")
+    parser.add_argument(
+        "--loss-mask-mode",
+        choices=["all_assistant", "last_assistant"],
+        default="all_assistant",
+    )
+    parser.add_argument("--disable-thinking", action="store_true")
     args = parser.parse_args()
 
     print(f"加载 tokenizer: {args.tokenizer}")
@@ -42,6 +48,8 @@ def main():
         tokenizer=tokenizer,
         tools=None,  # 不传 tools，靠 messages 里 assistant 的 tool_calls 字段渲染
         max_length=args.max_length,
+        loss_mask_mode=args.loss_mask_mode,
+        chat_template_kwargs={"enable_thinking": False} if args.disable_thinking else {},
     )
 
     print(f"\n数据集大小: {len(ds)}")

@@ -14,11 +14,34 @@ from .contracts import (
 from .prompts import PROMPT_VERSION, build_teacher_messages
 
 
+def replicate_cases(
+    cases: Iterable[Mapping[str, Any]], *, samples_per_case: int
+) -> list[dict[str, Any]]:
+    """Create unique, resume-safe case IDs for stochastic pilot repeats."""
+
+    if samples_per_case < 1:
+        raise ValueError("samples_per_case must be >= 1")
+    if samples_per_case == 1:
+        return [dict(case) for case in cases]
+    replicas: list[dict[str, Any]] = []
+    for case in cases:
+        base_case_id = str(case["case_id"])
+        for replica in range(samples_per_case):
+            value = dict(case)
+            value["base_case_id"] = base_case_id
+            value["replica"] = replica
+            value["case_id"] = f"{base_case_id}-rep{replica:02d}"
+            replicas.append(value)
+    return replicas
+
+
 def generate_one(client: Any, case: Mapping[str, Any]) -> dict[str, Any]:
     """Generate, validate, and package one teacher-labeled case."""
 
     base = {
         "case_id": case["case_id"],
+        "base_case_id": case.get("base_case_id", case["case_id"]),
+        "replica": int(case.get("replica", 0)),
         "task_id": int(case["task_id"]),
         "source": case.get("source", "curated-pilot"),
         "quality_gate": bool(case.get("quality_gate", False)),

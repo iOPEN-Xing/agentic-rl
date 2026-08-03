@@ -18,6 +18,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 from src.user_simulator_data.deepseek_client import DeepSeekClient  # noqa: E402
 from src.user_simulator_data.generation import (  # noqa: E402
     generate_one,
+    replicate_cases,
     summarize_generations,
 )
 
@@ -45,6 +46,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model", default="deepseek-v4-flash")
     parser.add_argument("--workers", type=int, default=4)
     parser.add_argument("--limit", type=int, default=None)
+    parser.add_argument(
+        "--samples-per-case",
+        type=int,
+        default=1,
+        help="Use 3 for the pilot stability gate; keep 1 for full generation.",
+    )
     parser.add_argument("--no-resume", action="store_true")
     return parser.parse_args()
 
@@ -54,6 +61,7 @@ def main() -> None:
     cases = _read_jsonl(args.input)
     if args.limit is not None:
         cases = cases[: args.limit]
+    cases = replicate_cases(cases, samples_per_case=args.samples_per_case)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     report_path = args.report or args.output.with_suffix(".report.json")
 

@@ -1,0 +1,53 @@
+# Qwen3-14B user simulator LoRA SFT on DeepSeek-audited airline turns.
+# Only the final assistant turn is supervised; earlier assistant turns are context.
+
+model:
+  name_or_path: "/data/xjz/model/qwen3-14b"
+  attn_impl: "flash_attention_2"
+
+data:
+  train_jsonl: "outputs/user_simulator_data/sft/train.jsonl"
+  eval_jsonl: "outputs/user_simulator_data/sft/eval.jsonl"
+  max_length: 16384
+  loss_mask_mode: "last_assistant"
+  chat_template_kwargs:
+    enable_thinking: false
+
+lora:
+  r: 32
+  alpha: 64
+  dropout: 0.05
+  target_modules:
+    - q_proj
+    - k_proj
+    - v_proj
+    - o_proj
+    - gate_proj
+    - up_proj
+    - down_proj
+
+train:
+  # The dataset is small and narrow. Start at two epochs; select by held-out
+  # termination F1 and online STOP latency instead of blindly adding epochs.
+  num_epochs: 2
+  per_device_batch_size: 1
+  grad_accum_steps: 8
+  lr: 5.0e-5
+  lr_scheduler: cosine
+  warmup_ratio: 0.05
+  weight_decay: 0.0
+  max_grad_norm: 1.0
+  logging_steps: 5
+  save_strategy: epoch
+  save_total_limit: 2
+  run_name: "user-simulator-qwen3-14b-airline-v1"
+  seed: 42
+
+logger:
+  backend: "wandb"
+  entity: "jiezhengxing-aaaa"
+  project: "agentic-grpo-longhorizon"
+  description: "Qwen3-14B user simulator: termination-calibrated airline SFT"
+
+output:
+  dir: "outputs/user_simulator_sft/qwen3-14b-airline-v1"

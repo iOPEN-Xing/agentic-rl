@@ -16,17 +16,19 @@ from .contracts import STOP_TOKEN
 
 
 def build_runtime_system_prompt(scenario: str) -> str:
+    """Mirror the current τ-bench LLMUserSimulationEnv prompt exactly."""
+
     return f"""You are a user interacting with an agent.
 
 Instruction: {scenario}
 
 Rules:
 - Just generate one line at a time to simulate the user's message.
-- Do not give away all the instruction at once. Only provide information necessary for the current step.
-- Do not hallucinate information not provided in the instruction.
-- If every instruction goal is satisfied and communicated, generate '###STOP###' as a standalone message.
-- Paraphrase rather than repeating the exact instruction.
-- Keep the conversation natural and follow the instruction's personality.
+- Do not give away all the instruction at once. Only provide the information that is necessary for the current step.
+- Do not hallucinate information that is not provided in the instruction. For example, if the agent asks for the order id but it is not mentioned in the instruction, do not make up an order id, just say you do not remember or have it.
+- If the instruction goal is satisified, generate '###STOP###' as a standalone message without anything else to end the conversation.
+- Do not repeat the exact instruction in the conversation. Instead, use your own words to convey the same information.
+- Try to make the conversation as natural as possible, and stick to the personalities in the instruction.
 """.strip()
 
 

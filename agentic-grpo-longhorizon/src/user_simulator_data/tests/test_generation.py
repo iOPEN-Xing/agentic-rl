@@ -3,7 +3,11 @@ from __future__ import annotations
 import json
 import unittest
 
-from src.user_simulator_data.generation import generate_one, summarize_generations
+from src.user_simulator_data.generation import (
+    generate_one,
+    replicate_cases,
+    summarize_generations,
+)
 
 
 class FakeClient:
@@ -40,6 +44,16 @@ def source_case(expected_decision="continue"):
 
 
 class GenerationTests(unittest.TestCase):
+    def test_replicate_cases_produces_resume_safe_unique_ids(self):
+        replicas = replicate_cases([source_case()], samples_per_case=3)
+
+        self.assertEqual(len(replicas), 3)
+        self.assertEqual(
+            [case["case_id"] for case in replicas],
+            ["pilot-1-rep00", "pilot-1-rep01", "pilot-1-rep02"],
+        )
+        self.assertTrue(all(case["base_case_id"] == "pilot-1" for case in replicas))
+
     def test_generate_one_outputs_plain_student_target_and_audit_record(self):
         client = FakeClient(
             {

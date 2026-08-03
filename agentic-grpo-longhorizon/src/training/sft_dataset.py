@@ -24,6 +24,8 @@ import torch
 from torch.utils.data import Dataset
 from transformers import PreTrainedTokenizerBase
 
+from src.training.loss_mask import select_assistant_indices
+
 
 IGNORE_INDEX = -100
 
@@ -33,6 +35,8 @@ def build_supervised_example(
     tokenizer: PreTrainedTokenizerBase,
     tools: Optional[list[dict]] = None,
     max_length: int = 8192,
+    loss_mask_mode: str = "all_assistant",
+    chat_template_kwargs: Optional[dict] = None,
 ) -> Optional[dict]:
     """
     把一条 OpenAI 格式的 multi-turn trajectory 渲染成 (input_ids, labels, attention_mask)
@@ -48,8 +52,10 @@ def build_supervised_example(
         {"role": "assistant", "content": "..."},  # 最后回复
       ]
     """
+    chat_template_kwargs = chat_template_kwargs or {}
+
     # 1. 找出所有 assistant turn 的位置
-    assistant_indices = [i for i, m in enumerate(messages) if m.get("role") == "assistant"]
+    assistant_indices = select_assistant_indices(messages, loss_mask_mode)
     if not assistant_indices:
         return None
 
@@ -60,6 +66,7 @@ def build_supervised_example(
             tools=tools,
             tokenize=False,
             add_generation_prompt=False,
+            **chat_template_kwargs,
         )
         full_ids = tokenizer(full_text, add_special_tokens=False)["input_ids"]
     except Exception as e:
@@ -79,12 +86,14 @@ def build_supervised_example(
                 tools=tools,
                 tokenize=False,
                 add_generation_prompt=True,  # 关键：让模板输出到 "<|im_start|>assistant\n" 为止
+                **chat_template_kwargs,
             )
             with_assistant_text = tokenizer.apply_chat_template(
                 messages[:ai + 1],
                 tools=tools,
                 tokenize=False,
                 add_generation_prompt=False,
+                **chat_template_kwargs,
             )
         except Exception as e:
             print(f"[skip] prefix 渲染失败 ai={ai}: {type(e).__name__}: {e}")
@@ -138,6 +147,8 @@ class TrajectorySFTDataset(Dataset):
         tokenizer: PreTrainedTokenizerBase,
         tools: Optional[list[dict]] = None,
         max_length: int = 8192,
+        loss_mask_mode: str = "all_assistant",
+        chat_template_kwargs: Optional[dict] = None,
         cache_in_memory: bool = True,
         verbose: bool = True,
     ):
@@ -145,6 +156,8 @@ class TrajectorySFTDataset(Dataset):
         self.tokenizer = tokenizer
         self.tools = tools
         self.max_length = max_length
+        self.loss_mask_mode = loss_mask_mode
+        self.chat_template_kwargs = chat_template_kwargs or {}
 
         # 一次性预处理（trajectory 数量不大，几百条以内 OK）
         raw = []
@@ -159,12 +172,20 @@ class TrajectorySFTDataset(Dataset):
 
         for r in raw:
             msgs = r["messages"]
-            ex = build_supervised_example(msgs, tokenizer, tools=tools, max_length=max_length)
+            ex = build_supervised_example(
+                msgs,
+                tokenizer,
+                tools=tools,
+                max_length=max_length,
+                loss_mask_mode=loss_mask_mode,
+                chat_template_kwargs=self.chat_template_kwargs,
+            )
             if ex is None:
                 # 区分丢弃原因方便诊断
                 try:
                     full_text = tokenizer.apply_chat_template(msgs, tools=tools,
-                                                              tokenize=False, add_generation_prompt=False)
+                                                              tokenize=False, add_generation_prompt=False,
+                                                              **self.chat_template_kwargs)
                     if len(tokenizer(full_text)["input_ids"]) > max_length:
                         n_skipped_long += 1
                     else:
@@ -177,6 +198,7 @@ class TrajectorySFTDataset(Dataset):
 
         if verbose:
             print(f"[Dataset] 加载 {jsonl_path}")
+            print(f"  loss mask mode:    {self.loss_mask_mode}")
             print(f"  原始 trajectory:   {len(raw)}")
             print(f"  保留 example:      {len(self.examples)}")
             print(f"  丢弃-超长:         {n_skipped_long}")
