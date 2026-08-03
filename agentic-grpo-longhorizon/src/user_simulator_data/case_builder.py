@@ -30,6 +30,42 @@ Rules:
 """.strip()
 
 
+def prepare_curated_case(value: Mapping[str, Any]) -> dict[str, Any]:
+    """Add the role-flipped student prompt to a human-curated pilot case."""
+
+    case = dict(value)
+    scenario = str(case["scenario"]).strip()
+    student_messages: list[dict[str, str]] = [
+        {"role": "system", "content": build_runtime_system_prompt(scenario)},
+        {"role": "user", "content": "Hi! How can I help you today?"},
+    ]
+    normalized_history: list[dict[str, Any]] = []
+    for index, message in enumerate(case.get("observable_history", [])):
+        role = str(message.get("role", "")).lower()
+        content = str(message.get("content", "") or "").strip()
+        if role not in {"user", "agent"} or not content:
+            raise ValueError(
+                f"curated case {case.get('case_id')} has invalid observable turn {index}"
+            )
+        normalized_history.append(
+            {
+                "turn_index": int(message.get("turn_index", index)),
+                "role": role,
+                "content": content,
+            }
+        )
+        student_messages.append(
+            {"role": "assistant" if role == "user" else "user", "content": content}
+        )
+    case["scenario"] = scenario
+    case["observable_history"] = normalized_history
+    case["student_messages"] = student_messages
+    case.setdefault("source", "curated-pilot")
+    case.setdefault("quality_gate", True)
+    case.setdefault("privileged_reference", {})
+    return case
+
+
 def _tool_trace(messages: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]]:
     trace: list[dict[str, Any]] = []
     for index, message in enumerate(messages):

@@ -3,10 +3,34 @@ from __future__ import annotations
 import json
 import unittest
 
-from src.user_simulator_data.case_builder import build_cases_from_historical_rows
+from src.user_simulator_data.case_builder import (
+    build_cases_from_historical_rows,
+    prepare_curated_case,
+)
 
 
 class CaseBuilderTests(unittest.TestCase):
+    def test_prepare_curated_case_flips_customer_and_agent_roles_for_student(self):
+        case = prepare_curated_case(
+            {
+                "case_id": "pilot-role-flip",
+                "task_id": 0,
+                "scenario": "Book a flight.",
+                "observable_history": [
+                    {"role": "user", "content": "I need a flight."},
+                    {"role": "agent", "content": "Which date?"},
+                ],
+                "expected_decision": "continue",
+            }
+        )
+
+        self.assertEqual(
+            [message["role"] for message in case["student_messages"]],
+            ["system", "user", "assistant", "user"],
+        )
+        self.assertEqual(case["student_messages"][-1]["content"], "Which date?")
+        self.assertTrue(case["quality_gate"])
+
     def test_historical_case_builder_preserves_terminal_target_for_audit_only(self):
         rows = [
         {

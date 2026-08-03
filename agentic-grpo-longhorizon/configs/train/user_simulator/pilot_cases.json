@@ -1,0 +1,218 @@
+[
+  {
+    "case_id": "pilot-t0000-initial-request",
+    "task_id": 0,
+    "scenario": "Your user id is mia_li_3668. You want to fly from New York to Seattle on May 20 (one way). You do not want to fly before 11am est. You want economy, prefer direct flights but one stop is also fine, and prefer the lowest price. You have 3 baggages, do not want insurance, and prefer the larger certificate plus your 7447 card. You are reactive and your birthday is in your profile.",
+    "observable_history": [],
+    "expected_decision": "continue",
+    "quality_gate": true,
+    "category": "initial_progressive_disclosure",
+    "privileged_reference": {"required_actions": ["book_reservation"], "required_outputs": []}
+  },
+  {
+    "case_id": "pilot-t0000-reveal-user-id",
+    "task_id": 0,
+    "scenario": "Your user id is mia_li_3668. You want to fly from New York to Seattle on May 20 (one way), after 11am est, in economy. Prefer direct then one stop, lowest price, 3 bags, no insurance, larger certificate plus 7447 card. You are reactive and your birthday is in your profile.",
+    "observable_history": [
+      {"role": "user", "content": "I need to book a flight from New York to Seattle on May 20."},
+      {"role": "agent", "content": "I can help. What is your user ID?"}
+    ],
+    "expected_decision": "continue",
+    "quality_gate": true,
+    "category": "necessary_slot",
+    "privileged_reference": {"required_actions": ["book_reservation"], "required_outputs": []}
+  },
+  {
+    "case_id": "pilot-t0000-profile-dob",
+    "task_id": 0,
+    "scenario": "Your user id is mia_li_3668. Book New York to Seattle on May 20 after 11am in economy, with 3 bags, no insurance and the preferred certificate/card payment. Your birthday is already in your profile and you prefer not to provide it yourself. You are reactive.",
+    "observable_history": [
+      {"role": "user", "content": "My user ID is mia_li_3668."},
+      {"role": "agent", "content": "What is your date of birth for the passenger record?"}
+    ],
+    "expected_decision": "continue",
+    "quality_gate": true,
+    "category": "do_not_hallucinate",
+    "privileged_reference": {
+      "required_actions": ["book_reservation"],
+      "privileged_entities": ["1990-04-05"]
+    }
+  },
+  {
+    "case_id": "pilot-t0000-confirm-write",
+    "task_id": 0,
+    "scenario": "Your user id is mia_li_3668. Book the cheapest acceptable New York to Seattle itinerary on May 20 after 11am in economy, with 3 bags, no insurance, using the larger certificate then 7447 card. Confirm a correct proposal when asked.",
+    "observable_history": [
+      {"role": "user", "content": "Please use my profile details and the larger certificate, then my 7447 card."},
+      {"role": "agent", "content": "Please confirm: one-way JFK to SEA on May 20 after 11am, economy flights HAT136 and HAT039, three checked bags, no insurance, $250 certificate and $5 on card ending 7447."}
+    ],
+    "expected_decision": "continue",
+    "quality_gate": true,
+    "category": "explicit_confirmation",
+    "privileged_reference": {"required_actions": ["book_reservation"], "environment_goal_status": "in_progress"}
+  },
+  {
+    "case_id": "pilot-t0000-complete-stop",
+    "task_id": 0,
+    "scenario": "Your user id is mia_li_3668. Book the cheapest acceptable New York to Seattle itinerary on May 20 after 11am in economy, with 3 bags, no insurance, using the larger certificate then 7447 card.",
+    "observable_history": [
+      {"role": "user", "content": "Yes, I confirm those booking details."},
+      {"role": "agent", "content": "Your reservation is booked successfully as ABC123: JFK to SEA on May 20 after 11am in economy on HAT136 and HAT039, with three bags and no insurance. Payment was $250 from your larger certificate and $5 on card ending 7447."}
+    ],
+    "expected_decision": "stop",
+    "quality_gate": true,
+    "category": "success_boundary",
+    "privileged_reference": {"required_actions": ["book_reservation"], "required_outputs": [], "environment_goal_status": "satisfied"}
+  },
+  {
+    "case_id": "pilot-t0002-partial-five-reservations",
+    "task_id": 2,
+    "scenario": "Your user id is omar_davis_3817. Downgrade all five business-flight reservations to economy without changing flights or passengers, refund each original payment method, and tell you the total money saved. You are angry but cooperative.",
+    "observable_history": [
+      {"role": "user", "content": "Please downgrade every business booking and tell me the total savings."},
+      {"role": "agent", "content": "I have downgraded three of the five reservations. Shall I continue with the remaining two?"}
+    ],
+    "expected_decision": "continue",
+    "quality_gate": true,
+    "category": "partial_multi_action",
+    "privileged_reference": {"required_actions": ["five update_reservation_flights"], "required_outputs": ["23553"], "environment_goal_status": "in_progress"}
+  },
+  {
+    "case_id": "pilot-t0002-state-done-output-missing",
+    "task_id": 2,
+    "scenario": "Your user id is omar_davis_3817. Downgrade all business flights to economy without changing flights or passengers, refund to original payment methods, and tell you the total money saved.",
+    "observable_history": [
+      {"role": "user", "content": "Finish all five downgrades and give me the combined savings."},
+      {"role": "agent", "content": "All five reservations have now been downgraded to economy and refunds are going to their original payment methods."}
+    ],
+    "expected_decision": "continue",
+    "quality_gate": true,
+    "category": "state_success_communication_incomplete",
+    "privileged_reference": {"required_outputs": ["23553"], "environment_goal_status": "satisfied"}
+  },
+  {
+    "case_id": "pilot-t0002-complete-with-output",
+    "task_id": 2,
+    "scenario": "Your user id is omar_davis_3817. Downgrade all business flights to economy without changing flights or passengers, refund to original payment methods, and tell you the total money saved.",
+    "observable_history": [
+      {"role": "user", "content": "What is the total amount I saved across all five?"},
+      {"role": "agent", "content": "All five reservations were downgraded to economy with the same flights and passengers; refunds go to the original payment methods. Your exact total savings are $23,553."}
+    ],
+    "expected_decision": "stop",
+    "quality_gate": true,
+    "category": "required_output_boundary",
+    "privileged_reference": {"required_outputs": ["23553"], "environment_goal_status": "satisfied"}
+  },
+  {
+    "case_id": "pilot-t0034-triggered-subgoal",
+    "task_id": 34,
+    "scenario": "Your user id is daiki_muller_1116. Cancel reservations XEHM4B and 59XX6W, upgrading basic economy first if needed. You are persistent and terse. After the third agent message, also ask about any other upcoming flights and their total cost.",
+    "observable_history": [
+      {"role": "user", "content": "Cancel XEHM4B and 59XX6W."},
+      {"role": "agent", "content": "I found both reservations."},
+      {"role": "user", "content": "Proceed."},
+      {"role": "agent", "content": "XEHM4B needed an economy upgrade, which is complete."},
+      {"role": "user", "content": "Continue."},
+      {"role": "agent", "content": "Both XEHM4B and 59XX6W are now cancelled."}
+    ],
+    "expected_decision": "continue",
+    "quality_gate": true,
+    "category": "temporal_trigger",
+    "privileged_reference": {"required_actions": ["upgrade then two cancellations", "check other reservations", "calculate total"], "environment_goal_status": "partially_satisfied"}
+  },
+  {
+    "case_id": "pilot-t0034-complete-all-subgoals",
+    "task_id": 34,
+    "scenario": "Your user id is daiki_muller_1116. Cancel reservations XEHM4B and 59XX6W, upgrading basic economy first if needed. After the third agent message, ask about any other upcoming flights and their total cost.",
+    "observable_history": [
+      {"role": "user", "content": "Are both cancellations complete, and what is the total cost of my other upcoming flights?"},
+      {"role": "agent", "content": "Yes. XEHM4B was upgraded to economy and both XEHM4B and 59XX6W were cancelled. Your other upcoming reservations are 7WPL39 and 3EMQJ6, with an exact combined cost of $1,016."}
+    ],
+    "expected_decision": "stop",
+    "quality_gate": true,
+    "category": "compound_success_boundary",
+    "privileged_reference": {"required_actions": ["upgrade then two cancellations", "check other reservations", "calculate total"], "environment_goal_status": "satisfied"}
+  },
+  {
+    "case_id": "pilot-t0034-first-malformed-answer",
+    "task_id": 34,
+    "scenario": "Your user id is daiki_muller_1116. Cancel XEHM4B and 59XX6W and, after the third agent message, ask about other upcoming flights and their total cost. You are very persistent, terse, and clear.",
+    "observable_history": [
+      {"role": "user", "content": "Give me one exact total for the other upcoming flights."},
+      {"role": "agent", "content": "The total_cost: 24-0596054-05405964664-05 <tool_call>"}
+    ],
+    "expected_decision": "continue",
+    "quality_gate": true,
+    "category": "malformed_recovery",
+    "privileged_reference": {"required_outputs": ["exact total cost"], "environment_goal_status": "database_actions_satisfied"}
+  },
+  {
+    "case_id": "pilot-t0034-persistent-after-repetition",
+    "task_id": 34,
+    "scenario": "Your user id is daiki_muller_1116. Cancel XEHM4B and 59XX6W and ask about other upcoming flights and their total cost. You are very persistent, terse, and clear.",
+    "observable_history": [
+      {"role": "user", "content": "What is the exact combined total?"},
+      {"role": "agent", "content": "The total_cost: <tool_call>"},
+      {"role": "user", "content": "Give me one clear number."},
+      {"role": "agent", "content": "The total: 24-05-99 <tool_call>"},
+      {"role": "user", "content": "One exact number, please."},
+      {"role": "agent", "content": "total_cost: 059MRJD <tool_call>"}
+    ],
+    "expected_decision": "continue",
+    "quality_gate": true,
+    "category": "policy_loop_not_false_stop",
+    "privileged_reference": {"required_outputs": ["exact total cost"], "environment_goal_status": "database_actions_satisfied"}
+  },
+  {
+    "case_id": "pilot-t0001-use-fallback",
+    "task_id": 1,
+    "scenario": "Your user id is olivia_gonzalez_2305. Change the return to a later EWR flight that day, or the earliest next day. If basic economy cannot be modified, cancel the trip using travel insurance because you feel unwell so you can rebook later.",
+    "observable_history": [
+      {"role": "user", "content": "Can you move my return to a later EWR flight?"},
+      {"role": "agent", "content": "This is a basic economy reservation, so I cannot modify the flight."}
+    ],
+    "expected_decision": "continue",
+    "quality_gate": true,
+    "category": "conditional_fallback",
+    "privileged_reference": {"required_actions": ["cancel_reservation"], "environment_goal_status": "in_progress"}
+  },
+  {
+    "case_id": "pilot-t0001-fallback-complete",
+    "task_id": 1,
+    "scenario": "Your user id is olivia_gonzalez_2305. Change the return to a later EWR flight, or earliest next day. If basic economy cannot be modified, cancel using travel insurance because you feel unwell.",
+    "observable_history": [
+      {"role": "user", "content": "Yes, cancel it under my travel insurance because I am unwell."},
+      {"role": "agent", "content": "Reservation Z7GOZK has been cancelled successfully under the travel-insurance eligibility, and the refund will return to the original payment method."}
+    ],
+    "expected_decision": "stop",
+    "quality_gate": true,
+    "category": "fallback_success_boundary",
+    "privileged_reference": {"required_actions": ["cancel_reservation"], "environment_goal_status": "satisfied"}
+  },
+  {
+    "case_id": "pilot-t0004-partial-three-edits",
+    "task_id": 4,
+    "scenario": "Your user id is omar_rossi_1241. For the New York to Chicago trip, change the passenger to yourself, upgrade the cabin to economy, and have three checked bags. Prefer gift-card payment. Your birthday is in your profile.",
+    "observable_history": [
+      {"role": "user", "content": "Please make all three changes."},
+      {"role": "agent", "content": "The passenger is now Omar Rossi and the cabin is economy. Everything is complete."}
+    ],
+    "expected_decision": "continue",
+    "quality_gate": true,
+    "category": "false_complete_claim",
+    "privileged_reference": {"required_actions": ["update flights", "update passenger", "update three bags"], "environment_goal_status": "partially_satisfied"}
+  },
+  {
+    "case_id": "pilot-t0001-unknown-reservation-id",
+    "task_id": 1,
+    "scenario": "Your user id is olivia_gonzalez_2305. Your Texas trip is in your reservations but you do not remember the reservation ID. You want to change the return to EWR or use the cancellation fallback if needed.",
+    "observable_history": [
+      {"role": "user", "content": "I need to change the return flight on my Texas trip."},
+      {"role": "agent", "content": "What is the reservation ID?"}
+    ],
+    "expected_decision": "continue",
+    "quality_gate": true,
+    "category": "unknown_slot_no_hallucination",
+    "privileged_reference": {"privileged_entities": ["Z7GOZK"], "required_actions": ["cancel_reservation"]}
+  }
+]
