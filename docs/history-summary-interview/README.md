@@ -1,8 +1,10 @@
 # 面试题：为什么当前 Agentic RL 项目暂不做对话历史 Summary？
 
-> 适用场景：大模型算法、Agentic RL、智能体开发、上下文工程和强化学习系统面试。  
+> 适用场景：大模型算法、Agentic RL、智能体开发、上下文工程和强化学习系统面试。
+>
 > 项目范围：τ-bench airline、多轮工具调用、Qwen3-8B Policy、Qwen3-14B User Simulator，
-> 以及 Vanilla GRPO、Turn-PPO、TRACE-style Hybrid Advantage、User Simulator Judge 四组实验。  
+> 以及 Vanilla GRPO、Turn-PPO、TRACE-style Hybrid Advantage、User Simulator Judge 四组实验。
+>
 > 当前结论：**暂不实现通用的中途历史 Summary；先解决终止、工具信息和可观测性问题。**
 
 ---
@@ -803,4 +805,3 @@ observable structured memory
 - AgentLoop 单序列输出：[`agent_loop.py`](../../verl/verl/experimental/agent_loop/agent_loop.py)
 - Tool response 截断默认值：[`rollout.yaml`](../../verl/verl/trainer/config/rollout/rollout.yaml)
 - τ-bench STOP/reward：[`base.py`](../../tau-bench/tau_bench/envs/base.py)
-
