@@ -10,11 +10,11 @@
 > critic, GAE recursion, importance ratio, PPO clipping, and actor objective are
 > all evaluated at turn granularity.
 
-This README describes the `codex/turn-level-reward` branch at
-[`b4f127a`](https://github.com/iOPEN-Xing/agentic-rl/commit/b4f127ab55b1f9c6d01209134b22126a5ad3d53f).
-The implementation and CPU contracts are complete. Server-side gray validation
-has been performed, while controlled training results are intentionally left as
-`TBD` until the full comparison is finished.
+This README describes the audited `codex/turn-level-reward` implementation as
+of [`a39d8c3`](https://github.com/iOPEN-Xing/agentic-rl/commit/a39d8c36611b8989b3ab95560b931386faeb2c58)
+plus the evaluation-contract corrections documented below.  The implementation
+and CPU contracts are complete.  Controlled training results are intentionally
+left as `TBD` until the full comparison is finished.
 
 ## Status
 
@@ -24,8 +24,8 @@ has been performed, while controlled training results are intentionally left as
 | Turn-level critic and GAE | Implemented | Values are read at turn starts; GAE recurs over turns |
 | Turn-level PPO actor loss | Implemented | Response log-ratios are summed, exponentiated, and clipped once per turn |
 | Native tau-bench terminal reward | Implemented | Intermediate rewards are zero; the final assistant turn receives the terminal score |
-| Policy/infrastructure failure separation | Implemented in `b4f127a` | Policy errors remain trainable; infrastructure-failed trajectories receive a zero response mask |
-| Independent checkpoint evaluation | Implemented in `b4f127a` | Matching configs for steps 50, 100, 150, and 200 |
+| Policy/infrastructure failure separation | Implemented | Policy errors remain trainable; infrastructure-failed trajectories receive a zero response mask |
+| Independent checkpoint evaluation | Implemented | Matching configs for steps 50, 100, 150, and 200 |
 | Controlled Turn-PPO vs GRPO results | Pending | Result tables below are placeholders, not claims |
 
 ## Why Turn-PPO
@@ -85,7 +85,35 @@ returned by `env.reset()` and merged into the prompt before generation. Later
 user messages and tool observations remain in the causal context but use
 `response_mask=0` and `turn_id=0`; only assistant tokens are optimized.
 
-## What `b4f127a` Adds
+## τ-bench Airline Case
+
+Consider a task that requires reading a reservation, confirming which passenger
+is affected, changing only the outbound flight, preserving the return leg and
+reporting the result.  A possible trajectory is:
+
+```text
+turn 1: get_reservation(...)                 → valid reservation observation
+turn 2: search_flights(...)                  → candidate flight observation
+turn 3: update_reservation_flights(wrong id) → tool error or wrong state
+turn 4: recover and issue the correct update → terminal verifier success/failure
+```
+
+Outcome-only GRPO gives every assistant token in this trajectory one scalar
+advantage.  Turn-PPO instead learns `V(s_t)` immediately before each assistant
+decision.  If the critic is calibrated, the valid read and search can receive
+different advantages from the wrong write, even though only turn 4 receives a
+nonzero environment reward.  The distinction is created by Turn-GAE bootstrapping
+over state values; the code does not pretend that τ-bench supplies native dense
+turn rewards.
+
+This fits τ-bench particularly well because every tool observation creates a
+causal state boundary and assistant messages are already explicit actions.  It
+does not solve reward semantics automatically: a binary final verifier still
+limits critic quality, and the critic may learn shortcuts based on turn index,
+tool type or response length.  Held-out value calibration and matched
+counterfactual trajectories are therefore acceptance requirements.
+
+## Rollout and Failure Correctness
 
 The gray-validation update is deliberately focused on rollout correctness,
 failure attribution, and evaluation semantics:
@@ -147,6 +175,37 @@ Turn-PPO has additional critic parameters, optimizer state, forward/backward
 compute, and memory. Those costs must be reported separately even when rollout
 counts match.
 
+## One-Node 4×H200 Launcher
+
+The dedicated launcher keeps the strict Turn-PPO YAML unchanged and uses a
+`1+3` hardware split: Qwen3-14B user simulator on physical GPU 0; Qwen3-8B
+actor, frozen reference, critic and rollout workers on GPUs 1–3.  Rollout TP=1
+allows three data-parallel rollout ranks and avoids TP=3 head divisibility.
+
+```bash
+cd agentic-grpo-longhorizon
+
+AGENTIC_RL_DRY_RUN=1 \
+bash scripts/train/grpo/run_turn_ppo_h200_4gpu.sh
+
+AGENTIC_RL_VANILLA_DATA_ROOT=/absolute/path/to/experiments/vanilla \
+bash scripts/train/grpo/run_turn_ppo_h200_4gpu.sh
+```
+
+The H200 profile uses prompt/response limits `12288/16384` and a `32768`
+policy/user context.  It does not change Turn-GAE, response-product clipping,
+actor/critic learning rates, terminal reward or rollout count.  Each run is
+isolated under `experiments/h200_4gpu/turn_ppo/<run-tag>/` and contains
+checkpoints, console/user logs, launch metadata, the exact resolved Hydra
+command and W&B local artifacts.  Online records are uploaded to
+[`jiezhengxing-aaaa/agentic-grpo-longhorizon`](https://wandb.ai/jiezhengxing-aaaa/agentic-grpo-longhorizon).
+
+Set `AGENTIC_RL_RUN_TAG=turn_ppo_seed1` for a stable resumable run identity.
+No existing process is killed.  An occupied port 8001 is rejected by default
+because the service's GPU placement cannot be inferred; set
+`AGENTIC_RL_REUSE_USER_SIMULATOR=1` only after verifying it uses GPU 0 alone.
+Only a simulator started by this launcher is cleaned up.
+
 ## Quick Start
 
 ### 1. Install the project
@@ -201,7 +260,7 @@ bash agentic-grpo-longhorizon/scripts/eval/eval_turn_ppo.sh
 
 ## Experimental Results
 
-No controlled Turn-PPO result is claimed at `b4f127a`. Replace `TBD` only after
+No controlled Turn-PPO result is claimed at this snapshot. Replace `TBD` only after
 the corresponding artifact, W&B run, split file, checkpoint, and random seed
 have been recorded.
 
@@ -246,9 +305,22 @@ Metric definitions:
 - **Error rate**: fraction of trajectories ending in an evaluation error.
 - **Unseen pass^1**: mean single-sample success on tasks excluded from training.
 
+For `n` samples with `c` successes, the evaluator uses the exact combinatorial
+definitions:
+
+```text
+pass@k = 1 - C(n-c, k) / C(n, k)
+pass^k = C(c, k) / C(n, k)
+```
+
+All four method branches use the served policy alias `agentic-rl-policy` and the
+same Qwen3-14B user-simulator contract.  `AGENTIC_RL_EVAL_STEPS` and
+`AGENTIC_RL_EVAL_SPLIT_FILE` can override checkpoint selection and split without
+editing method-specific YAML files.
+
 ## Verification
 
-The `b4f127a` adaptation report records 93 passing CPU tests: 84 parser,
+The branch adaptation report records 93 passing CPU tests: 84 parser,
 policy-error, PRM-Lite, rollout-validity, Turn-PPO math, and metric tests, plus 9
 algorithm/config tests. It also records successful `py_compile`, `bash -n`,
 Hydra-resolution, invariant, and `git diff --check` validation.

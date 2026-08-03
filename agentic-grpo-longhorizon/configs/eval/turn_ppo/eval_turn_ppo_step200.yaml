@@ -7,7 +7,7 @@ env:
   task_split: test
 
 policy:
-  model_name: "Qwen/Qwen2.5-7B-Instruct"
+  model_name: "agentic-rl-policy"
   base_url: "http://localhost:8000/v1"
   temperature: 0.7
   top_p: 0.9

@@ -549,11 +549,13 @@ def compute_grpo_lata_outcome_advantage(
     config: Optional[AlgoConfig] = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
-    LATA: Length-Aware Turn-weighted Advantage.
-    Two-stage design:
-      1. Turn-discount: earlier tokens get higher weight (alpha^(L-1-t))
-      2. Length-aware normalization: divide by sqrt(L) instead of L
-         to preserve incentive for longer reasoning trajectories.
+    Legacy LATA: position-weighted, length-damped GRPO advantage.
+
+    The implementation applies exponentially larger weights to earlier response
+    tokens (normalized to mean one), followed by an explicit ``1 / sqrt(L)``
+    factor.  With the default token-mean actor loss this is an *additional*
+    length damping; it does not replace the reducer's ``1 / L`` normalization
+    and it does not identify semantic assistant/tool turns.
     """
     alpha = 1.05
     if config is not None:
@@ -603,11 +605,9 @@ def compute_grpo_lata_outcome_advantage(
         active_count = active_lengths
         weights = (weights_stable * active_count / weight_sum).to(torch.float32)
 
-        # Step 3: length-aware normalization
-        # Instead of implicit linear division by L (in token-mean loss aggregation),
-        # explicitly divide by sqrt(L) to preserve long-trajectory incentive.
-        # Rationale: per-token gradient ~ A / sqrt(L) decays sublinearly,
-        # keeping "willingness to write longer reasoning" alive.
+        # Step 3: explicit length damping. The actor's default token-mean loss
+        # still contributes its own 1/L reducer, so this factor must not be
+        # described as replacing 1/L with 1/sqrt(L).
         length_norm = torch.sqrt(active_lengths).to(torch.float32)
         scores = scores.unsqueeze(-1) * weights * response_mask / length_norm
 

@@ -1,7 +1,7 @@
-# Exp 2: LATA — Length-Aware Turn-weighted Advantage (300 step)
-# 对照 turn-discount: 在 turn-discount 基础上增加 length-aware normalization
-# 解决 "per-token advantage 被 response_length 线性稀释" 的问题
-# 两阶段: turn-discount (时间维度) + sqrt(L) normalization (token 维度)
+# Exp 2: legacy LATA — position-weighted, length-damped GRPO (300 step)
+# 实际实现: 绝对 token 位置指数权重（均值归一为 1）后，再乘 1/sqrt(L)。
+# 默认 actor 仍使用 token-mean reducer，因此这不是用 sqrt(L) 替换 L，
+# 也不是基于 assistant/tool 边界的真实 turn-level credit assignment。
 hydra:
   searchpath:
     - pkg://verl/trainer/config

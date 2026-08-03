@@ -47,5 +47,6 @@ def test_turn_ppo_eval_config_matches_vanilla_sampling_contract(step):
 
     assert turn_ppo["env"] == vanilla["env"]
     assert turn_ppo["policy"] == vanilla["policy"]
+    assert turn_ppo["policy"]["model_name"] == "agentic-rl-policy"
     assert turn_ppo["eval"] == vanilla["eval"]
     assert turn_ppo["output"]["dir"] == f"experiments/turn_ppo/eval_step_{step}"
