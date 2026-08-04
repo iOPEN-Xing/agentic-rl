@@ -1,6 +1,6 @@
 # DeepSeek V4 Flash User Simulator Pilot 审计
 
-> 状态：通过。本文只记录 16 个 curated case × 3 次采样的真实 pilot；按当前阶段要求，未执行 1,527-case full generation，也未启动微调。
+> 状态：通过。本文只记录 16 个 curated case × 3 次采样的真实 pilot；后续 1,513-case full generation 已完成，结果见 [`FULL_GENERATION_AUDIT.md`](FULL_GENERATION_AUDIT.md)，Qwen3-14B 微调尚未启动。
 
 ## 1. 最终结论
 
@@ -57,7 +57,7 @@ API key、provider reasoning、Authorization header 和原始私有推理均不�
 - 已完整完成 fallback/cancellation 后仍输出感谢或再次确认，而不是 STOP；
 - compound task 已给出结果后仍重复询问。
 
-当前数据的目标不是生成客服文案，而是训练一个稳定的 RL 环境。对 User Simulator 来说，STOP precision、STOP recall、目标坚持和不泄漏必须优先于表面措辞变化。因此最终使用 `temperature=0.3, top_p=0.9`，多样性主要来自 1,527 个不同的 seen-task 对话状态、不同 persona、不同未完成子目标和自然历史，而不是让同一个决策边界高温漂移。
+当前数据的目标不是生成客服文案，而是训练一个稳定的 RL 环境。对 User Simulator 来说，STOP precision、STOP recall、目标坚持和不泄漏必须优先于表面措辞变化。因此最终使用 `temperature=0.3, top_p=0.9`，多样性主要来自 1,513 个 runtime-reachable seen-task 对话状态、不同 persona、不同未完成子目标和自然历史，而不是让同一个决策边界高温漂移。
 
 ## 4. 多样性不是“每句话必须不同”
 
@@ -158,11 +158,11 @@ total  = $1,016
 
 ## 9. 当前放行边界
 
-当前只证明：这 16 类关键边界在 3 次随机采样下稳定，prompt、合同和 non-thinking 调用配置可进入下一阶段。它没有证明：
+在当时，这一阶段只证明：16 类关键边界在 3 次随机采样下稳定，prompt、合同和 non-thinking 调用配置可进入全量阶段。它没有单独证明：
 
-- 1,527 个历史状态全部能自动通过；
+- 1,513 个 runtime-reachable 历史状态全部能自动通过；
 - 微调后的 Qwen3-14B 在线 STOP latency 一定改善；
 - 主 Agent terminal success 一定提升；
 - unseen 10-task benchmark 的泛化已经成立。
 
-按当前指令，full generation 保持未执行。未来若放行 full batch，必须继续执行 quarantine、seen/holdout 隔离、人工抽检和微调后的同 simulator / cross-simulator 在线评估。
+后续 full generation 已按这些条件执行：1,513/1,513 自动门禁通过、0 privileged leak，并完成 70 个决策分歧的逐条语义审计。该结果不反向改变本页的 pilot 统计；微调后的同 simulator / cross-simulator 在线评估仍待执行。

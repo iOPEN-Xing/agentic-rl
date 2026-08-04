@@ -4,7 +4,7 @@
 > - 主 Policy：Qwen3-8B
 > - User Simulator：Qwen3-14B
 > - Teacher：DeepSeek V4 Flash
-> - 当前状态：16 个关键边界 case × 3 次真实采样的 pilot 已 48/48 通过；按阶段要求，1,527-case 全量生成和 Qwen3-14B 微调尚未执行。
+> - 当前状态：16 个关键边界 case × 3 次真实采样的 pilot 已 48/48 通过；1,513-case 全量生成、70 个分歧审计和 TRL 导出已完成，Qwen3-14B 微调与在线 A/B 尚未执行。
 
 这份 README 不是把一次 Prompt 调优包装成算法工作，而是说明：在多轮 Agentic RL 中，User Simulator 为什么是环境动力学的一部分，它会怎样决定训练上限，以及如何从真实坏例、数据合同、Prompt Engineering、可执行门禁和在线评估五个层面把它做对。
 
@@ -407,8 +407,8 @@ flowchart LR
 - 官方 `sonnet-35-new-airline.json`：400 条历史 trajectory；
 - 16 条人工 curated pilot；
 - 当前固定 split：40 seen task、10 unseen task；
-- 去重后：1,527 个 seen teacher-generation case；
-- 424 个 unseen audit case，程序强制禁止发给 teacher 或进入微调。
+- 去重并过滤 runtime 不可达的连续 Customer 状态后：1,513 个 seen teacher-generation case；
+- 420 个 unseen audit case，程序强制禁止发给 teacher 或进入微调。
 
 为什么不先混 MultiWOZ/Schema-Guided Dialogue？
 
@@ -491,19 +491,19 @@ Teacher 输出：
 ```mermaid
 flowchart TD
     C["Source case"] --> O["OBSERVABLE_CONTEXT"]
-    C --> A["PRIVILEGED_AUDIT_REFERENCE"]
+    C --> A["Local privileged QA reference"]
     O --> T["DeepSeek teacher decision"]
-    A --> T
     T --> Q["Deterministic QA"]
+    A --> Q
     Q -->|"accepted"| S["Plain student response"]
     Q -->|"leak or mismatch"| X["Quarantine"]
     S --> F["Qwen3-14B User Simulator SFT"]
 
     O -.->|"student can see"| F
-    A -.->|"must never enter student prompt"| X
+    A -.->|"must never enter Teacher or Student prompt"| X
 ```
 
-Privileged reference 可以帮助 Teacher 审计：
+Privileged reference 只帮助本地 QA 审计：
 
 - gold actions；
 - required outputs；
@@ -511,7 +511,7 @@ Privileged reference 可以帮助 Teacher 审计：
 - trajectory reward；
 - hidden entity list。
 
-但生成的现实用户回复只能使用 observable information。校验器会拦截未在 scenario/history 出现的 reservation、flight、payment 等实体。
+DeepSeek Teacher 和 Student 都只能使用 observable information。校验器会拦截未在 scenario/history 出现的 reservation、flight、payment 等实体；v1.5 不再依赖“模型看见但别使用”的软约束。
 
 面试时可以这样解释：
 
@@ -1319,7 +1319,7 @@ vs
 
 ### 13.1 错误会被批量放大
 
-如果 Prompt 在 5% case 上 premature STOP，1,527 条数据可能产生约 76 个错误边界；再对 STOP oversample，会进一步放大。
+如果 Prompt 在 5% case 上 premature STOP，1,513 条数据可能产生约 76 个错误边界；再对 STOP oversample，会进一步放大。
 
 ### 13.2 Pilot 要覆盖“最危险边界”，不是随机抽 16 条
 
@@ -1415,9 +1415,9 @@ Pilot 必须：
 
 > 完全确定性有利于边界，但会降低自然表达覆盖。最终选择 0.3，在 48-case pilot 上保持 100% 语义正确，同时 36 条 CONTINUE 中有 25 条不同文本。更重要的是，多样性主要来自不同 state/persona，不依赖高温改写。
 
-### 追问 7：为什么 Teacher 可以看 privileged reference？
+### 追问 7：为什么最终不让 Teacher 看 privileged reference？
 
-> 只用于审计 gold action/output 和发现 historical label 问题，Student response 仍受 observable-context 约束。校验器检查 hidden entity leakage。类似 asymmetric critic：训练期可以有额外监督，但 actor observation 不能泄漏。
+> v1.4 full run 给出了直接证据：即使 Prompt 明确禁止使用，Teacher 只要实际看到 gold/tool block，仍会在 58 个 case 中泄漏 hidden reservation/payment entity。这里不能只依赖语言约束，必须做 information-flow control。v1.5 请求只发送 runtime-observable scenario/history；privileged action、tool trace 和 hidden entity 留在本地 QA 检查，最终 1,513 条 leak 为 0。训练期额外信息可以用于独立 verifier，但不能进入生成 target 的模型上下文。
 
 ### 追问 8：为什么不直接复制 historical User 回复？
 
@@ -1465,13 +1465,13 @@ Pilot 必须：
 >
 > 数据上，现有 80 条成功 Policy SFT 没有 terminal User turn，官方 400 条历史轨迹里 STOP 和 reward 又明显不等价，所以不能直接反转或复制标签。我把错误拆成 delayed STOP、premature STOP、partial goal、fallback、false-complete、malformed recovery 和 evaluator gap，基于 task 0/1/2/4/34 构造 16 类边界 case。
 >
-> 实现上让 DeepSeek V4 Flash Teacher 输出富 JSON，Student 只学一条自然回复或精确 STOP；observable 与 privileged audit 分层，并通过实体泄漏和 case-specific semantic gate 做自动隔离。真实 pilot 经历七轮迭代，最终 non-thinking、temperature 0.3、top-p 0.9 下 48/48 accepted，12 个 STOP 和 36 个 CONTINUE 全部符合预期，0 privileged leak。现在我只把它定义为“数据合同和 pilot 已通过”，还没有把未执行的全量微调或主 Policy 收益包装成结果。
+> 实现上让 DeepSeek V4 Flash Teacher 输出富 JSON，Student 只学一条自然回复或精确 STOP；Teacher 请求只含 observable context，privileged 信息留在独立 QA。真实 pilot 经七轮迭代达到 48/48，随后 v1.5 full batch 达到 1,513/1,513 accepted、0 leak。对 70 个历史/Teacher 决策分歧逐条复核后，保留 1,467 条 DeepSeek 原始 target，显式修订 46 条 semantic tail，并导出 train 1,693 / eval 168。这里仍不把未执行的 LoRA、在线 A/B 或主 Policy 收益包装成结果。
 
 ### 15.2 面试官：这不就是调了一个 Prompt 吗？算法含量在哪里？
 
 > 如果只是加一句“任务完成就 STOP”，那确实只是 Prompt 调优。这个工作的核心是先定义了一个 learned environment 的正确监督对象。
 >
-> 第一，我把 \(z_t^{env}\) 和 \(z_t^{comm}\) 分开：数据库完成不代表用户可见目标完成。第二，我把 STOP 当成 termination hazard，而不是普通回复 token；premature 和 delayed 会改变 trajectory horizon 与 reward 结算。第三，我显式处理 Simulator 对 occupancy distribution 和 GRPO 组内方差的影响。第四，数据合同用了 asymmetric information：Teacher 可借助 privileged reference 审计，但 Student observation 必须与 runtime 完全一致。
+> 第一，我把 \(z_t^{env}\) 和 \(z_t^{comm}\) 分开：数据库完成不代表用户可见目标完成。第二，我把 STOP 当成 termination hazard，而不是普通回复 token；premature 和 delayed 会改变 trajectory horizon 与 reward 结算。第三，我显式处理 Simulator 对 occupancy distribution 和 GRPO 组内方差的影响。第四，我把信息权限落实成架构：Teacher 与 Student 都只看 runtime observation，privileged state 只供独立 QA，不靠 Prompt 要求模型“看见但别用”。
 >
 > Prompt 只是把这些算法和环境假设表达给 Teacher；真正让方案可训练、可回归的是 case construction、role flip、last-assistant loss mask、leak detector、semantic gate、holdout 隔离和 cross-simulator 评估。
 
@@ -1552,7 +1552,7 @@ assistant = 模拟用户的下一条回复
 | 是否懂多轮 RL，而不只会 SFT | transition kernel、occupancy、termination hazard、GRPO 方差 |
 | 是否有数据判断力 | STOP/reward 交叉审计、80 条轨迹缺标签、seen/holdout 隔离 |
 | 是否有工程闭环 | 七轮 pilot、错误分类、semantic gate、role/prompt/loss 对齐 |
-| 是否诚实且可追问 | 明确区分 48/48 pilot 与尚未执行的 full/SFT/在线收益 |
+| 是否诚实且可追问 | 明确区分已完成的 full/SFT 数据与尚未执行的 LoRA/在线收益 |
 
 ---
 
@@ -1579,12 +1579,12 @@ assistant = 模拟用户的下一条回复
 | Situation | 多轮 airline RL 中出现 delayed STOP、post-tool loop 和 malformed tail |
 | Task | 构建服务主 Policy 的高质量 User Simulator 数据，不掩盖 Agent failure |
 | Action | 环境穿刺、数据审计、边界分类、Teacher contract、16-case pilot、七轮真实迭代、semantic gate、task 34 事实修复 |
-| Result | v1.7 真实 pilot 48/48，通过安全、终止、任务遵循和多样性检查；full/微调保持未执行并设置后续放行门槛 |
+| Result | pilot 48/48；full 1,513/1,513、0 leak；70 个分歧全审计并导出 TRL；LoRA/在线收益保持未执行 |
 
 ### 16.5 当前阶段可直接放进简历的两条表述
 
-> - 面向 τ-bench Airline 多轮 Agentic RL，穿刺 User Simulator 的可观测性、STOP/reward 语义与 Policy–Verifier 边界；审计 400 条历史轨迹并构建 40-seen/10-unseen、1,527/424 隔离的数据方案，覆盖 compound goal、fallback、temporal trigger 与 communication-completeness 难例。
-> - 设计 DeepSeek V4 Flash Teacher → Qwen3-14B Student 的可审计 SFT 管线，落地 observable/privileged 隔离、last-assistant loss mask、entity leak/semantic gates；经七轮真实 pilot 将关键边界集提升到 48/48 accepted、0 leak，并规划 frozen-policy 与 cross-simulator 评估。
+> - 面向 τ-bench Airline 多轮 Agentic RL，穿刺 User Simulator 的可观测性、STOP/reward 语义与 Policy–Verifier 边界；审计 400 条历史轨迹并构建 40-seen/10-unseen、1,513/420 隔离的数据方案，覆盖 compound goal、fallback、temporal trigger 与 communication-completeness 难例。
+> - 设计 DeepSeek V4 Flash Teacher → Qwen3-14B Student 的可审计 SFT 管线，落地 observable-only generation、last-assistant loss mask、entity/semantic gates；pilot 48/48 后完成 full 1,513/1,513、0 leak 与 70-case 分歧审计，导出 train 1,693 / eval 168 的 TRL 数据，并保留 frozen-policy 与 cross-simulator 评估边界。
 
 当前不能写成：
 
@@ -1592,7 +1592,7 @@ assistant = 模拟用户的下一条回复
 “通过微调 User Simulator 显著提升主模型 reward”
 ```
 
-因为 full generation、LoRA 和主 Policy 在线对照都还没有执行。等后续实验完成，才可以补充 STOP latency、terminal success、trajectory token 和 cross-simulator gap 的真实变化。项目包装的底线是：把已做深的部分讲透，不用未发生的结果补气势。
+因为 LoRA 和主 Policy 在线对照还没有执行。等后续实验完成，才可以补充 STOP latency、terminal success、trajectory token 和 cross-simulator gap 的真实变化。项目包装的底线是：把已做深的部分讲透，不用未发生的结果补气势。
 
 ---
 
@@ -1632,22 +1632,23 @@ assistant = 模拟用户的下一条回复
 - `last_assistant` loss mask；
 - 4×H200 Qwen3-14B LoRA 配置；
 - 20 个相关单元测试；
-- 真实 v1.7 pilot：48/48。
+- 真实 v1.7 pilot：48/48；
+- v1.5 full batch：1,513/1,513、0 leak；
+- 70 个历史/Teacher decision disagreement 全量语义复核；
+- rich + TRL train/eval 导出与 1,513/1,513 runtime prompt 对齐。
 
 ### 尚未执行，不能虚构结果
 
-- 1,527-case full teacher generation；
-- 全量人工抽检；
 - Qwen3-14B User Simulator LoRA；
+- frozen-policy online User A/B；
 - W&B 微调曲线；
-- frozen-policy User A/B；
 - 主 Policy 重新训练；
 - cross-simulator reward 提升；
 - unseen 10-task 最终收益。
 
 因此当前最准确的项目结论是：
 
-> User Simulator 数据方案、Prompt、合同和关键边界 pilot 已验证可用；是否能提高主 Agentic RL 上限，仍需全量数据、Simulator 微调和在线交叉评估证明。
+> User Simulator 的全量 seen SFT 数据、Prompt、合同、语义审计和 TRL 导出已验证可用；是否能提高主 Agentic RL 上限，仍需 Simulator 微调和在线交叉评估证明。
 
 ---
 
@@ -1655,6 +1656,7 @@ assistant = 模拟用户的下一条回复
 
 - 数据方案与实现：[`docs/user-simulator-data/README.md`](../user-simulator-data/README.md)
 - 真实 pilot 审计：[`PILOT_AUDIT.md`](../user-simulator-data/PILOT_AUDIT.md)
+- 全量生成与导出审计：[`FULL_GENERATION_AUDIT.md`](../user-simulator-data/FULL_GENERATION_AUDIT.md)
 - UserRL/Simulator Judge 技术报告：[`tech-report-userrl.html`](../tech-report-userrl.html)
 - 多轮 Agentic RL 面试总结：[`agentic-rl-multiturn-interview.html`](../agentic-rl-multiturn-interview.html)
 - 当前 User 环境：[`tau_bench/envs/user.py`](../../tau-bench/tau_bench/envs/user.py)

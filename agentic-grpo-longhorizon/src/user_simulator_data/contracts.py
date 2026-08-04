@@ -194,7 +194,38 @@ def validate_teacher_decision(
         for item in observable_history
         if str(item.get("role", "")).lower() == "user"
     ]
-    if decision.response.casefold() in customer_messages:
+    latest_agent_message = next(
+        (
+            str(item.get("content", "")).casefold()
+            for item in reversed(observable_history)
+            if str(item.get("role", "")).lower() == "agent"
+        ),
+        "",
+    )
+    confirmation_requested = any(
+        cue in latest_agent_message
+        for cue in (
+            "please confirm",
+            "confirm if",
+            "do you confirm",
+            "shall i proceed",
+            "would you like me to proceed",
+            "please say \"yes\"",
+            "please say 'yes'",
+            "say \"yes\" to confirm",
+            "say 'yes' to confirm",
+        )
+    )
+    is_short_confirmation = bool(
+        re.match(
+            r"^(?:yes|yeah|yep|sure|please proceed)\b",
+            decision.response.casefold(),
+        )
+    )
+    if (
+        decision.response.casefold() in customer_messages
+        and not (confirmation_requested and is_short_confirmation)
+    ):
         issues.append("exact_user_repetition")
     valid_turn_indices = {
         int(item["turn_index"])

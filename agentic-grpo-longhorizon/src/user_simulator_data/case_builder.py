@@ -1,8 +1,9 @@
 """Convert public τ-bench trajectories into regeneration cases.
 
 Historical customer turns are references for audit and coverage, not trusted labels.
-Tool messages stay in the privileged teacher reference and are deliberately absent from
-the student input, matching the current ``LLMUserSimulationEnv`` observation contract.
+Tool messages stay in a local privileged QA reference and are absent from both the
+Teacher request and Student input, matching the current ``LLMUserSimulationEnv``
+observation contract.
 """
 
 from __future__ import annotations
@@ -143,6 +144,15 @@ def build_cases_from_historical_rows(
                 student_messages.append({"role": "user", "content": content})
                 continue
             if role != "user" or not content:
+                continue
+
+            # The current runtime asks the simulator for a customer turn only after
+            # reset (the fixed greeting) or after an Agent text response. Historical
+            # trajectories occasionally contain a customer message after tool-only
+            # turns, so the last visible student message is already an assistant
+            # customer turn. Training on that state would teach the simulator to
+            # speak twice in a row and cannot occur through LLMUserSimulationEnv.step.
+            if not student_messages or student_messages[-1].get("role") != "user":
                 continue
 
             expected_decision = "stop" if STOP_TOKEN in content else "continue"

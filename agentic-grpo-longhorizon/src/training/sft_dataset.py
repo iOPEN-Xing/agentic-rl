@@ -7,15 +7,15 @@ SFT Dataset: 把 OpenAI 格式的 multi-turn trajectory 转成 Qwen2.5 训练样
 - 不能简单按 token "user/assistant/system" 字符串切分，因为 Qwen2.5 chat template
   会加各种 special token 和换行，手切容易 off-by-one
 
-稳健做法 ("渲染两次取 diff"):
-  对每条 trajectory，遍历 messages 的 assistant turn:
-    full_ids   = tokenize(apply_chat_template(messages[:i+1], add_generation_prompt=False))
-    prefix_ids = tokenize(apply_chat_template(messages[:i],   add_generation_prompt=True))
-    # full_ids 的 [len(prefix_ids):] 部分就是这一轮 assistant 的所有 token
-    # （包括可能的 tool_calls 渲染），这部分给 label，其他部分 mask 成 -100
-  这样不管 Qwen 模板怎么变，loss mask 都对得上。
+稳健做法按 supervision 目标拆分：
+  - all_assistant：保留原有 prefix/full 双渲染，覆盖主 Agent 的 tool-call SFT；
+  - last_assistant：把最后一轮分别渲染为真实 content 与空 content，取 token-level
+    common prefix 定位 target 起点，避免 Qwen3 generation prompt 的空 think block 让
+    prefix length 越过真实答案。User Simulator 只监督最后一个新 Teacher target。
 """
 from __future__ import annotations
+
+import copy
 import json
 from pathlib import Path
 from typing import Optional
@@ -28,6 +28,15 @@ from src.training.loss_mask import select_assistant_indices
 
 
 IGNORE_INDEX = -100
+
+
+def _common_prefix_length(left: list[int], right: list[int]) -> int:
+    length = 0
+    for left_token, right_token in zip(left, right):
+        if left_token != right_token:
+            break
+        length += 1
+    return length
 
 
 def build_supervised_example(
@@ -78,8 +87,54 @@ def build_supervised_example(
 
     labels = [IGNORE_INDEX] * len(full_ids)
 
+    # Qwen3 with enable_thinking=false may add an empty <think> block only when
+    # add_generation_prompt=True. Therefore the historical "render prefix with a
+    # generation prompt and take its length" method can overshoot the real target
+    # start. User-simulator SFT supervises only the final plain assistant message, so
+    # locate it by rendering the same message once with empty content and taking the
+    # token-level common prefix. This keeps the runtime chat template exact and also
+    # retains the assistant end-of-turn suffix in the labels.
+    if loss_mask_mode == "last_assistant":
+        ai = assistant_indices[0]
+        try:
+            with_assistant_text = tokenizer.apply_chat_template(
+                messages[:ai + 1],
+                tools=tools,
+                tokenize=False,
+                add_generation_prompt=False,
+                **chat_template_kwargs,
+            )
+            blank_messages = copy.deepcopy(messages[:ai + 1])
+            blank_messages[-1]["content"] = ""
+            blank_assistant_text = tokenizer.apply_chat_template(
+                blank_messages,
+                tools=tools,
+                tokenize=False,
+                add_generation_prompt=False,
+                **chat_template_kwargs,
+            )
+        except Exception as e:
+            print(f"[skip] last-assistant 渲染失败 ai={ai}: {type(e).__name__}: {e}")
+            return None
+        with_assistant_ids = tokenizer(
+            with_assistant_text, add_special_tokens=False
+        )["input_ids"]
+        blank_assistant_ids = tokenizer(
+            blank_assistant_text, add_special_tokens=False
+        )["input_ids"]
+        if full_ids[: len(with_assistant_ids)] != with_assistant_ids:
+            print(f"[skip] last-assistant 与 full trajectory 前缀不一致 ai={ai}")
+            return None
+        start = _common_prefix_length(with_assistant_ids, blank_assistant_ids)
+        end = len(with_assistant_ids)
+        if start >= end:
+            return None
+        for j in range(start, end):
+            labels[j] = full_ids[j]
+
     # 3. 对每个 assistant turn 算 prefix，定位 label 区间
-    for ai in assistant_indices:
+    indices_to_render = assistant_indices if loss_mask_mode == "all_assistant" else []
+    for ai in indices_to_render:
         try:
             prefix_text = tokenizer.apply_chat_template(
                 messages[:ai],
@@ -123,7 +178,8 @@ def build_supervised_example(
 
     # 4. sanity check: labels 至少要有一些非 IGNORE_INDEX 的 token
     n_label_tokens = sum(1 for x in labels if x != IGNORE_INDEX)
-    if n_label_tokens < 5:
+    minimum_label_tokens = 1 if loss_mask_mode == "last_assistant" else 5
+    if n_label_tokens < minimum_label_tokens:
         return None  # 几乎没东西学，丢
 
     return {

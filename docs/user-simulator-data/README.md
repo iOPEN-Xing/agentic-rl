@@ -100,8 +100,10 @@ flowchart LR
 按当前 [`split.json`](../../agentic-grpo-longhorizon/experiments/sft_collect_airline/split.json) 去重后，本管线得到：
 
 - 16 条人工 curated pilot：12 CONTINUE + 4 STOP；
-- 1,527 条 seen-task teacher generation cases；
-- 424 条 unseen benchmark holdout audit cases，代码强制禁止发给 teacher 或进入微调。
+- 1,513 条 runtime-reachable seen-task teacher generation cases；
+- 420 条 unseen benchmark holdout audit cases，代码强制禁止发给 teacher 或进入微调。
+
+早期的 1,527/424 统计还包含 18 个 tool-only turn 之后的历史 Customer 消息；这些状态在当前 runtime 不会触发 User Simulator，role flip 后还会形成连续两个 `assistant` turn，因此已过滤为 1,513/420。完整全量结果见 [`FULL_GENERATION_AUDIT.md`](FULL_GENERATION_AUDIT.md)。
 
 ### 3.3 为什么第一版不混入通用 TOD 数据
 
@@ -177,12 +179,9 @@ DeepSeek teacher 输出严格 JSON：
 
 ### 5.1 Observable 与 privileged 严格隔离
 
-Teacher 可以看到两段数据：
+DeepSeek Teacher 请求只包含 `OBSERVABLE_CONTEXT`：Student 运行时真实可见的 scenario 与对话。gold actions、outputs、tool trace、trajectory reward 和 hidden identifiers 不进入模型请求，只留在本地 deterministic QA 中做实体泄漏检查。
 
-- `OBSERVABLE_CONTEXT`：student 运行时真实可见的 scenario 与对话；
-- `PRIVILEGED_AUDIT_REFERENCE`：gold actions、outputs、tool trace、trajectory reward。
-
-privileged reference 只用于审计，不得决定现实用户无法知道的回复内容。校验器会检测 reservation ID、flight/payment ID 等 privileged entity leakage。
+这是信息架构约束，不只是 prompt 禁令。v1.4 全量试跑证明：只要 Teacher 实际看到了 privileged block，即使文字要求“不使用”，仍会产生 hidden reservation/payment ID 泄漏；v1.5 物理移除该块后，全量 1,513 条的 privileged entity leak 为 0。
 
 ### 5.2 为什么只训练最后一个 assistant turn
 
@@ -230,7 +229,7 @@ airline 场景必须增加五个专用判断：
 
 ### 7.2 Full batch gates
 
-- accepted rate ≥ 98%；
+- export-ready batch accepted rate = 100%；
 - STOP exact format = 100%；
 - hidden entity leakage = 0；
 - exact user repetition < 0.5%；
@@ -277,27 +276,45 @@ python3 scripts/train/user_simulator/generate.py \
 ```bash
 python3 scripts/train/user_simulator/generate.py \
   --input outputs/user_simulator_data/cases/seen_train.jsonl \
-  --output outputs/user_simulator_data/full/v1.jsonl \
+  --output outputs/user_simulator_data/full/v1.2.jsonl \
+  --report outputs/user_simulator_data/full/v1.2.report.json \
   --model deepseek-v4-flash \
   --samples-per-case 1 \
-  --workers 16
+  --workers 16 \
+  --max-case-attempts 12
 ```
 
 代码会拒绝 `benchmark_holdout_DO_NOT_GENERATE.jsonl`。不要通过改文件名绕过；那 10 个 task 是主模型 unseen evaluation contract 的一部分。
 
-### 8.5 导出 SFT train/eval
+### 8.5 应用全量语义分歧审计
+
+```bash
+python3 scripts/train/user_simulator/apply_full_batch_audit.py \
+  --input outputs/user_simulator_data/full/v1.2.jsonl \
+  --cases outputs/user_simulator_data/cases/seen_train.jsonl \
+  --output outputs/user_simulator_data/full/v1.2_audited.jsonl \
+  --report outputs/user_simulator_data/full/v1.2_audited.report.json
+```
+
+该步骤只修改已经逐条复核并固化理由的 semantic tail，所有修改写入 target provenance；原始 DeepSeek 文件不被覆盖。
+
+### 8.6 导出 SFT train/eval
 
 ```bash
 python3 scripts/train/user_simulator/export_sft.py \
-  --input outputs/user_simulator_data/full/v1.jsonl \
+  --input outputs/user_simulator_data/full/v1.2_audited.jsonl \
+  --cases outputs/user_simulator_data/cases/seen_train.jsonl \
   --output outputs/user_simulator_data/sft/train.jsonl \
   --eval-output outputs/user_simulator_data/sft/eval.jsonl \
+  --trl-output outputs/user_simulator_data/sft/train_trl.jsonl \
+  --trl-eval-output outputs/user_simulator_data/sft/eval_trl.jsonl \
+  --manifest-output outputs/user_simulator_data/sft/manifest.json \
   --stop-repeat 3
 ```
 
 trial 07 作为自然分布 eval，其余 trial 进入 train；STOP 只在 train 中重复，避免 eval 分布被人工改变。
 
-### 8.6 两个 epoch 的 4×H200 LoRA 起点
+### 8.7 两个 epoch 的 4×H200 LoRA 起点
 
 ```bash
 bash scripts/train/user_simulator/train_h200_4gpu.sh
@@ -379,7 +396,7 @@ flowchart TD
     A["Pilot 48 generations"] --> B{"100% boundary gate?"}
     B -->|"No"| C["按失败 category 修 Prompt / contract"]
     C --> A
-    B -->|"Yes"| D["Generate 1,527 seen cases"]
+    B -->|"Yes"| D["Generate 1,513 runtime-reachable seen cases"]
     D --> E["Deterministic QA + human boundary audit"]
     E --> F["Qwen3-14B LoRA, 2 epochs"]
     F --> G["Frozen-policy online A/B"]
@@ -411,6 +428,9 @@ flowchart TD
 - 标准库单测：20 个通过（17 个 synthesis + 3 个 loss-mask）；
 - DeepSeek real pilot：完成，最终 `v1.7` 为 48/48 accepted、48/48 decision match、0 leak、`quality_gate_passed=true`；
 - 多样性：36 条 CONTINUE 中有 25 条不同的规范化文本；排除必须固定回答的 ID 后，11 个可变组中 9 个有多种表达；
-- full batch：按当前阶段要求未执行。
+- DeepSeek full batch：完成；v1.5 为 1,513/1,513 accepted、0 leak、`export_gate_passed=true`；
+- 全量决策分歧审计：完成；70 个历史/Teacher decision disagreement 逐条复核，46 条保留显式 audit provenance；
+- SFT/TRL 导出：完成；train 1,693、eval 168，1,513/1,513 runtime prompt/prefix 精确对齐；
+- Qwen3-14B LoRA、在线 User A/B 与主 Policy RL：尚未执行，不能宣称收益。
 
 API key 没有写入源码、配置、测试、生成结果或 Git；每条结果只记录不敏感的 model、usage 与 request sampling config。
