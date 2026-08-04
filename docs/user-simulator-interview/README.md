@@ -860,6 +860,82 @@ total  = $1,016
 
 > Teacher pilot 既是在测模型，也是在测人造数据；模型与标签冲突时，先审计事实，不能默认标签永远正确。
 
+### 6.6 一条真实多轮 SFT 数据：Task 34 / trial06 / u021
+
+下面不是重新编写的教学例子，而是最终 audited JSONL 中真实存在的
+`historical-airline-t0034-trial06-u021`。它属于 `trial06`，因此进入 train；decision
+是 CONTINUE，所以不会做 STOP ×3 复制，只在训练集中出现一次。
+
+首先要注意 User Simulator 视角下的 role flip：
+
+| SFT role | 真实业务说话人 | 作用 |
+|---|---|---|
+| `system` | User Simulator 行为合同 | scenario、persona、目标、STOP 规则 |
+| `user` | Agent | User Simulator 在线能够看到的 Agent 文本 |
+| `assistant` | Customer | 模拟用户历史回复，最后一条是本样本 target |
+
+System scenario 翻译为：
+
+> 你是 `daiki_muller_1116`。目标是取消 `XEHM4B` 与 `59XX6W`；若其中有
+> basic economy，先升级为 economy，再取消。你坚持、简短但表达清楚。对话进行到
+> 第三条 Agent 消息之后，还要询问是否有其他 upcoming flights 及其总价。每轮只回复
+> 一条，不提前披露全部目标，不虚构缺失事实；目标全部完成时只能输出 `###STOP###`。
+
+完整 prefix 与 target 的中文阅读版如下。Agent 的长回复按原始事实忠实压缩，ID、日期、
+金额和最后 target 保持不变：
+
+| 顺序 | SFT role | 业务说话人 | 中文内容 | 是否计算 loss |
+|---:|---|---|---|---|
+| 1 | `user` | Agent | 你好！今天有什么可以帮你？ | 否 |
+| 2 | `assistant` | Customer | 我需要取消预订号 `XEHM4B` 和 `59XX6W` 下的航班。 | 否，历史 Customer |
+| 3 | `user` | Agent | `XEHM4B` 是 basic economy、无保险、5 月 1 日预订、首航 5 月 20 日；`59XX6W` 是 economy、有保险、5 月 12 日预订、首航 5 月 19 日。取消原因会影响退款资格，请说明原因。 | 否 |
+| 4 | `assistant` | Customer | 我看到 `XEHM4B` 是 basic economy。能先升到普通 economy 吗？然后我再取消两笔航班。 | 否，历史 Customer |
+| 5 | `user` | Agent | `HAT005` 差价 101 美元、`HAT178` 差价 43 美元；每位乘客 144 美元，两位共 288 美元。请确认使用尾号 `2135` 或 `5541` 的卡。 | 否 |
+| 6 | `assistant` | Customer | 可以，升舱使用尾号 `2135` 的卡。 | 否，历史 Customer |
+| 7 | `user` | Agent | 升舱已经完成。为继续取消两笔预订，请说明取消原因。 | 否，最新 observation |
+| 8 | `assistant` | Customer target | 因为家里有急事，我需要取消。另外，我还有其他即将出发的航班吗？这些航班的总价是多少？ | **是，唯一监督 target** |
+
+对应英文 target 原文是：
+
+```text
+I need to cancel because of a family emergency. Also, do I have any
+other upcoming flights? What would be the total cost?
+```
+
+Teacher 富元数据不进入 Student target，只用于审计：
+
+```json
+{
+  "decision": "continue",
+  "is_over": false,
+  "goal_status": "in_progress",
+  "communication_status": "partial",
+  "resolved_goals": [
+    "Upgrade XEHM4B to economy"
+  ],
+  "unresolved_goals": [
+    "Provide cancellation reason",
+    "Cancel both reservations",
+    "Check other upcoming flights and total cost"
+  ],
+  "quality_issues": [],
+  "target_provenance": "deepseek_v1.5"
+}
+```
+
+这条数据的 `loss_mask_mode=last_assistant`：前面的 system、Agent 文本和历史 Customer
+回复都只作为条件，label 为 `-100`；只监督最后一句新 Customer target 和 assistant
+end-of-turn suffix。它实际训练的是：
+
+1. basic-economy 条件出现后激活升舱 fallback；
+2. 升舱完成不等于两个 cancellation goal 已完成，不能提前 STOP；
+3. 只复用 Agent 已提供的卡尾号，不虚构 payment ID；
+4. 到达指定对话阶段后，再激活“查询其他 upcoming flights 与总价”的延迟目标；
+5. 把取消原因和新查询合并成一条自然但不丢目标的下一轮回复。
+
+它仍不能单独证明微调后的 Student 下一轮会继续记住所有目标。训练样本只证明 one-step
+conditional target 正确；多轮记忆与事实一致性仍必须通过 Student-prefix free rollout 验证。
+
 ---
 
 ## 7. Prompt Engineering：从参考模板到可训练合同

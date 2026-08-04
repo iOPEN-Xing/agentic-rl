@@ -478,6 +478,126 @@
       font-weight: 700;
     }
 
+    .sft-sample {
+      margin: 1.25rem 0;
+      overflow: hidden;
+      border: 1px solid #c8dcd0;
+      border-radius: 15px;
+      background: #fbfdfb;
+    }
+
+    .sft-sample-header {
+      display: flex;
+      gap: 10px;
+      align-items: center;
+      justify-content: space-between;
+      flex-wrap: wrap;
+      padding: 16px 18px;
+      border-bottom: 1px solid var(--line);
+      background: linear-gradient(135deg, #eaf5ed, #f7fbf8);
+    }
+
+    .sft-sample-header code {
+      overflow-wrap: anywhere;
+      font-size: 0.84rem;
+    }
+
+    .sample-badges {
+      display: flex;
+      gap: 7px;
+      flex-wrap: wrap;
+    }
+
+    .sample-badges span,
+    .role-chip {
+      display: inline-block;
+      padding: 3px 8px;
+      border: 1px solid #bdd3c5;
+      border-radius: 999px;
+      color: #28513f;
+      background: #f8fcf9;
+      font-size: 0.72rem;
+      font-weight: 750;
+    }
+
+    .scenario-contract {
+      margin: 16px;
+      padding: 14px 16px;
+      border-left: 4px solid var(--blue);
+      border-radius: 0 11px 11px 0;
+      background: var(--blue-soft);
+    }
+
+    .scenario-contract p:last-child {
+      margin-bottom: 0;
+    }
+
+    .turn-stack {
+      display: grid;
+      gap: 10px;
+      padding: 0 16px 16px;
+    }
+
+    .turn-row {
+      display: grid;
+      grid-template-columns: 150px minmax(0, 1fr);
+      gap: 14px;
+      padding: 14px;
+      border: 1px solid var(--line);
+      border-left: 4px solid var(--blue);
+      border-radius: 11px;
+      background: #f7fafc;
+    }
+
+    .turn-row.customer {
+      border-left-color: var(--brand);
+      background: #f4faf6;
+    }
+
+    .turn-row.target {
+      border-color: #7eb293;
+      border-left: 6px solid var(--brand);
+      background: #e8f6ec;
+      box-shadow: 0 9px 24px rgba(21, 100, 67, 0.09);
+    }
+
+    .turn-meta {
+      color: var(--muted);
+      font-size: 0.78rem;
+      line-height: 1.55;
+    }
+
+    .turn-meta strong,
+    .turn-copy strong {
+      display: block;
+      color: var(--ink);
+    }
+
+    .turn-copy p {
+      margin: 0.35rem 0;
+    }
+
+    .turn-copy .en {
+      color: var(--muted);
+      font-size: 0.82rem;
+    }
+
+    .loss-strip {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 18px;
+      align-items: center;
+      margin: 0 16px 16px;
+      padding: 14px 16px;
+      border: 1px dashed #88b49a;
+      border-radius: 11px;
+      background: #edf8f0;
+    }
+
+    .loss-strip p {
+      margin: 0;
+    }
+
     .quote {
       margin: 1.15rem 0;
       padding: 18px 20px;
@@ -547,6 +667,11 @@
       }
 
       .status-line {
+        grid-template-columns: 1fr;
+      }
+
+      .turn-row,
+      .loss-strip {
         grid-template-columns: 1fr;
       }
     }
@@ -1254,6 +1379,186 @@ flowchart LR
               <h3>DB 已完成，但精确总价未向用户可读地告知</h3>
               <p>若 Agent 输出 malformed total，persistent 用户继续要求一个明确数字是正确行为。</p>
               <p>完整事实是 402 + 306 + 308 = 1,016 美元；只有三条 upcoming reservation 和总额全部告知后才 STOP。</p>
+            </article>
+          </div>
+
+          <h3 id="sft-sample">一条真实的多轮 SFT 样本：模型究竟看见什么、学习什么</h3>
+          <p>
+            以下记录直接来自最终 audited JSONL，而不是为了报告重新编写的示例。为方便阅读，Agent 长回复在中文栏中按原始事实忠实压缩，
+            ID、金额、日期、目标和最后 target 均保持不变。该 case 属于 <code>trial06</code>，因此进入 train；它是 CONTINUE，
+            不参与 STOP ×3 复制，只出现一次。
+          </p>
+
+          <div class="sft-sample">
+            <div class="sft-sample-header">
+              <div>
+                <strong>Case ID</strong><br />
+                <code>historical-airline-t0034-trial06-u021</code>
+              </div>
+              <div class="sample-badges">
+                <span>train</span>
+                <span>9 messages</span>
+                <span>CONTINUE</span>
+                <span>DeepSeek v1.5</span>
+              </div>
+            </div>
+
+            <div class="scenario-contract">
+              <strong><code>role=system</code> · 中文业务合同</strong>
+              <p>
+                你是 <code>daiki_muller_1116</code>。目标是取消 <code>XEHM4B</code> 与 <code>59XX6W</code>；
+                若其中有 basic economy，先升级为 economy，再取消。Persona 是坚持、简短但表达清楚。
+                对话进行到第三条 Agent 消息之后，还要询问是否有其他 upcoming flights 及其总价。
+                每轮只回复一句，不一次性泄露全部目标，不虚构缺失信息；全部目标完成时只能输出 <code>###STOP###</code>。
+              </p>
+            </div>
+
+            <div class="turn-stack">
+              <div class="turn-row agent">
+                <div class="turn-meta">
+                  <strong>历史轮 1 · Agent</strong>
+                  <span class="role-chip">SFT role=user</span><br />
+                  只作为条件输入
+                </div>
+                <div class="turn-copy">
+                  <strong>你好！今天有什么可以帮你？</strong>
+                  <p class="en">Hi! How can I help you today?</p>
+                </div>
+              </div>
+
+              <div class="turn-row customer">
+                <div class="turn-meta">
+                  <strong>历史轮 2 · Customer</strong>
+                  <span class="role-chip">SFT role=assistant</span><br />
+                  历史回复，不计算 loss
+                </div>
+                <div class="turn-copy">
+                  <strong>我需要取消预订号 XEHM4B 和 59XX6W 下的航班。</strong>
+                  <p class="en">I need to cancel my flights under reservation IDs XEHM4B and 59XX6W.</p>
+                </div>
+              </div>
+
+              <div class="turn-row agent">
+                <div class="turn-meta">
+                  <strong>历史轮 3 · Agent</strong>
+                  <span class="role-chip">SFT role=user</span><br />
+                  Agent 可见文本
+                </div>
+                <div class="turn-copy">
+                  <strong>Agent 核查两笔预订并询问取消原因。</strong>
+                  <p>
+                    <code>XEHM4B</code>：basic economy、无保险、5 月 1 日预订、首航 5 月 20 日；
+                    <code>59XX6W</code>：economy、有保险、5 月 12 日预订、首航 5 月 19 日。
+                    取消原因会影响退款资格。
+                  </p>
+                  <p class="en">Before proceeding with the cancellations, let me analyze each reservation ... Could you please tell me why you need to cancel these reservations?</p>
+                </div>
+              </div>
+
+              <div class="turn-row customer">
+                <div class="turn-meta">
+                  <strong>历史轮 4 · Customer</strong>
+                  <span class="role-chip">SFT role=assistant</span><br />
+                  条件 fallback
+                </div>
+                <div class="turn-copy">
+                  <strong>我看到 XEHM4B 是 basic economy。能先升到普通 economy 吗？然后我再取消两笔航班。</strong>
+                  <p class="en">I see XEHM4B is basic economy. Can you upgrade it to regular economy first? Then I'll cancel both flights.</p>
+                </div>
+              </div>
+
+              <div class="turn-row agent">
+                <div class="turn-meta">
+                  <strong>历史轮 5 · Agent</strong>
+                  <span class="role-chip">SFT role=user</span><br />
+                  第三条业务 Agent 回复
+                </div>
+                <div class="turn-copy">
+                  <strong>Agent 给出升舱差价并请求支付确认。</strong>
+                  <p>
+                    <code>HAT005</code> economy 价格 166 美元、差价 101 美元；<code>HAT178</code> economy
+                    价格 126 美元、差价 43 美元。每位乘客差价 144 美元，两位共 288 美元；可选尾号
+                    <code>2135</code> 或 <code>5541</code> 的信用卡。
+                  </p>
+                  <p class="en">Would you like to proceed with the cabin upgrade? If yes, please confirm which payment method you'd like to use.</p>
+                </div>
+              </div>
+
+              <div class="turn-row customer">
+                <div class="turn-meta">
+                  <strong>历史轮 6 · Customer</strong>
+                  <span class="role-chip">SFT role=assistant</span><br />
+                  合法已披露信息
+                </div>
+                <div class="turn-copy">
+                  <strong>可以，升舱使用尾号 2135 的卡。</strong>
+                  <p class="en">Yes, use the card ending in 2135 for the upgrade.</p>
+                </div>
+              </div>
+
+              <div class="turn-row agent">
+                <div class="turn-meta">
+                  <strong>历史轮 7 · Agent</strong>
+                  <span class="role-chip">SFT role=user</span><br />
+                  最新 observation
+                </div>
+                <div class="turn-copy">
+                  <strong>升舱已经成功；为继续取消两笔预订，Agent 再次询问取消原因。</strong>
+                  <p class="en">The upgrade has been completed successfully ... I still need to know the reason for cancellation.</p>
+                </div>
+              </div>
+
+              <div class="turn-row customer target">
+                <div class="turn-meta">
+                  <strong>新 target · Customer</strong>
+                  <span class="role-chip">SFT role=assistant</span><br />
+                  唯一计算 loss 的回复
+                </div>
+                <div class="turn-copy">
+                  <strong>因为家里有急事，我需要取消。另外，我还有其他即将出发的航班吗？这些航班的总价是多少？</strong>
+                  <p class="en">I need to cancel because of a family emergency. Also, do I have any other upcoming flights? What would be the total cost?</p>
+                </div>
+              </div>
+            </div>
+
+            <div class="loss-strip">
+              <p>
+                <strong>Loss mask：</strong>前 8 条 message 的 label 全是 <code>-100</code>；只监督最后一条
+                Customer target 及 assistant end-of-turn suffix。Student 不学习上面的历史 Customer 原话，也不学习 Teacher JSON。
+              </p>
+              <code>loss_mask_mode=last_assistant</code>
+            </div>
+          </div>
+
+          <div class="two-col">
+            <article class="card">
+              <h3>Teacher 审计元数据</h3>
+              <pre><code>{
+  "decision": "continue",
+  "is_over": false,
+  "goal_status": "in_progress",
+  "communication_status": "partial",
+  "resolved_goals": [
+    "Upgrade XEHM4B to economy"
+  ],
+  "unresolved_goals": [
+    "Provide cancellation reason",
+    "Cancel both reservations",
+    "Check other upcoming flights and total cost"
+  ],
+  "quality_issues": []
+}</code></pre>
+            </article>
+            <article class="card">
+              <h3>这条样本教会模型什么</h3>
+              <ol>
+                <li>识别 basic-economy 条件后激活升级 fallback；</li>
+                <li>保留两笔取消目标，不能因升舱完成就 STOP；</li>
+                <li>只使用 Agent 已提供的卡尾号，不虚构 payment ID；</li>
+                <li>到达时序边界后才激活“其他 upcoming flights + 总价”；</li>
+                <li>把取消原因和新查询合并为一条简洁、自然的下一轮回复。</li>
+              </ol>
+              <p><strong>它没有证明：</strong>Student 下一轮还能稳定记住这些目标；这必须由 Student-prefix rollout 验证。</p>
             </article>
           </div>
 
