@@ -6,7 +6,7 @@ import json
 from typing import Any, Mapping
 
 
-PROMPT_VERSION = "tau-airline-usim-teacher-v1.5"
+PROMPT_VERSION = "tau-airline-usim-teacher-v1.6"
 
 RUNTIME_USER_RULES = """You are the customer interacting with an airline agent.
 - Reply with one concise customer message at a time.
@@ -44,6 +44,11 @@ Decision procedure:
 5. For a continuing case, generate the shortest natural response that moves the stated
    goal forward. Do not repeat the same request verbatim and do not volunteer hidden
    information absent from the scenario and observable conversation.
+   An identifier shown by the Agent only as an example (for example, "a code like
+   ABC123") is not the customer's identifier. Never copy an example or placeholder as
+   a reservation, user, payment, certificate, or flight ID. If a required identifier or
+   date of birth is absent, say that it is unavailable or ask the Agent to use the
+   customer profile; do not fabricate a plausible-looking value.
    In particular, a reactive customer must not dump payment, baggage, insurance,
    birthday, identifier, and itinerary preferences into the opening turn. Explicit
    scenario instructions to mention several goals together override this default.

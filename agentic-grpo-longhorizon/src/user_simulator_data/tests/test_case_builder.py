@@ -113,6 +113,51 @@ class CaseBuilderTests(unittest.TestCase):
         )
         self.assertEqual(target_case["reference_response"], "After 11am.")
 
+    def test_historical_case_builder_cuts_downstream_after_ungrounded_reply(self):
+        rows = [
+            {
+                "task_id": 1,
+                "reward": 0.0,
+                "info": {
+                    "task": {
+                        "instruction": (
+                            "You are olivia_gonzalez_2305 and do not remember "
+                            "the reservation ID."
+                        ),
+                        "actions": [],
+                        "outputs": [],
+                    }
+                },
+                "traj": [
+                    {"role": "user", "content": "I need help with my booking."},
+                    {
+                        "role": "assistant",
+                        "content": "Please check your email for the reservation ID.",
+                    },
+                    {
+                        "role": "user",
+                        "content": "I found it. My reservation ID is FAKE123.",
+                    },
+                    {
+                        "role": "assistant",
+                        "content": "I cannot find reservation FAKE123.",
+                    },
+                    {"role": "user", "content": "Please try again."},
+                ],
+                "trial": 0,
+            }
+        ]
+
+        cases = build_cases_from_historical_rows(rows)
+
+        self.assertEqual(len(cases), 2)
+        self.assertEqual(cases[-1]["reference_response"], "I found it. My reservation ID is FAKE123.")
+        self.assertIn(
+            "unsupported_reservation_id:FAKE123",
+            cases[-1]["reference_grounding_issues"],
+        )
+        self.assertTrue(all(case["reference_response"] != "Please try again." for case in cases))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -86,6 +86,15 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--manifest-output", type=Path, default=None)
     parser.add_argument(
+        "--expected-prompt-version",
+        default=PROMPT_VERSION,
+        help=(
+            "Exact Teacher prompt provenance required in the audited input. "
+            "Use v1.5 for the immutable DeepSeek batch audited by audit-v2; new "
+            "generation defaults to the current prompt version."
+        ),
+    )
+    parser.add_argument(
         "--stop-repeat",
         type=int,
         default=3,
@@ -94,13 +103,13 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def _validate_record(row: dict[str, Any]) -> None:
+def _validate_record(row: dict[str, Any], *, expected_prompt_version: str) -> None:
     case_id = str(row.get("case_id", "<missing>"))
     if row.get("status") != "accepted":
         raise RuntimeError(f"case is not accepted: {case_id}")
     if row.get("quality_issues"):
         raise RuntimeError(f"accepted case still has quality issues: {case_id}")
-    if row.get("prompt_version") != PROMPT_VERSION:
+    if row.get("prompt_version") != expected_prompt_version:
         raise RuntimeError(f"top-level prompt version mismatch: {case_id}")
     record = row.get("sft_record")
     if not isinstance(record, dict):
@@ -134,10 +143,10 @@ def _validate_record(row: dict[str, Any]) -> None:
         raise RuntimeError(f"case has an empty assistant target: {case_id}")
     if bool(metadata.get("is_over")) != (target == STOP_TOKEN):
         raise RuntimeError(f"STOP/is_over mismatch: {case_id}")
-    if metadata.get("prompt_version") != PROMPT_VERSION:
+    if metadata.get("prompt_version") != expected_prompt_version:
         raise RuntimeError(
             f"prompt version mismatch for {case_id}: "
-            f"{metadata.get('prompt_version')} != {PROMPT_VERSION}"
+            f"{metadata.get('prompt_version')} != {expected_prompt_version}"
         )
     teacher_response = row.get("teacher_decision", {}).get("response")
     if target != teacher_response:
@@ -197,7 +206,10 @@ def main() -> None:
     if len(set(case_ids)) != len(case_ids):
         raise RuntimeError("input contains duplicate case_id values")
     for row in rows:
-        _validate_record(row)
+        _validate_record(
+            row,
+            expected_prompt_version=args.expected_prompt_version,
+        )
 
     alignment = {
         "runtime_system_prompt_checks": 0,
@@ -286,7 +298,8 @@ def main() -> None:
             "generations_sha256": _sha256(args.input),
             "cases": str(args.cases.resolve()) if args.cases else None,
             "cases_sha256": _sha256(args.cases) if args.cases else None,
-            "prompt_version": PROMPT_VERSION,
+            "prompt_version": args.expected_prompt_version,
+            "current_teacher_prompt_version": PROMPT_VERSION,
         },
         "alignment": {
             **alignment,

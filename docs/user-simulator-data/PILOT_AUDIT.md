@@ -1,6 +1,6 @@
 # DeepSeek V4 Flash User Simulator Pilot 审计
 
-> 状态：通过。本文只记录 16 个 curated case × 3 次采样的真实 pilot；后续 1,513-case full generation 已完成，结果见 [`FULL_GENERATION_AUDIT.md`](FULL_GENERATION_AUDIT.md)，Qwen3-14B 微调尚未启动。
+> 状态：通过。本文只记录 16 个 curated case × 3 次采样的真实 pilot；后续 DeepSeek v1.5 原始 1,513-case full generation 已完成，audit-v2 在排除 50 个硬事实污染下游状态后形成 1,463 条最终自然训练源，结果见 [`FULL_GENERATION_AUDIT.md`](FULL_GENERATION_AUDIT.md)，Qwen3-14B 微调尚未启动。
 
 ## 1. 最终结论
 
@@ -16,6 +16,11 @@
   "prompt_version": "tau-airline-usim-teacher-v1.4"
 }
 ```
+
+这里的 `v1.0`–`v1.7` 是 pilot 输出文件/实验轮次，不等同于 JSON 中的
+`prompt_version`：最终 `v1.7` pilot 使用的是 `tau-airline-usim-teacher-v1.4`
+Prompt schema；随后 observable-only full batch 使用 v1.5，当前源码在二次事实接地
+审计后升级到 v1.6。三者分别表示“实验轮次、生成 provenance、当前模板”，不能混写。
 
 `v1.7` 的 48 次真实请求结果：
 
@@ -57,7 +62,7 @@ API key、provider reasoning、Authorization header 和原始私有推理均不�
 - 已完整完成 fallback/cancellation 后仍输出感谢或再次确认，而不是 STOP；
 - compound task 已给出结果后仍重复询问。
 
-当前数据的目标不是生成客服文案，而是训练一个稳定的 RL 环境。对 User Simulator 来说，STOP precision、STOP recall、目标坚持和不泄漏必须优先于表面措辞变化。因此最终使用 `temperature=0.3, top_p=0.9`，多样性主要来自 1,513 个 runtime-reachable seen-task 对话状态、不同 persona、不同未完成子目标和自然历史，而不是让同一个决策边界高温漂移。
+当前数据的目标不是生成客服文案，而是训练一个稳定的 RL 环境。对 User Simulator 来说，STOP precision、STOP recall、目标坚持和不泄漏必须优先于表面措辞变化。因此最终使用 `temperature=0.3, top_p=0.9`，多样性主要来自 1,513 个原始 runtime-reachable Teacher 状态（最终训练源 1,463 条）、不同 persona、不同未完成子目标和自然历史，而不是让同一个决策边界高温漂移。
 
 ## 4. 多样性不是“每句话必须不同”
 
@@ -165,4 +170,4 @@ total  = $1,016
 - 主 Agent terminal success 一定提升；
 - unseen 10-task benchmark 的泛化已经成立。
 
-后续 full generation 已按这些条件执行：1,513/1,513 自动门禁通过、0 privileged leak，并完成 70 个决策分歧的逐条语义审计。该结果不反向改变本页的 pilot 统计；微调后的同 simulator / cross-simulator 在线评估仍待执行。
+后续 full generation 已按这些条件执行：DeepSeek v1.5 原始批次 1,513/1,513 通过当时门禁、0 privileged leak，并完成 70 个决策分歧的逐条语义审计。更严格的 audit-v2 又发现“Teacher 自造新 ID 不属于 privileged leak”这一盲区，并继续覆盖 Agent example copying、route/city 幻觉、实体类型混淆、占位符和同 decision 业务错误。最终 69 个 raw target 命中 typed grounding issue，57 条 same-decision target 被显式重写，50 个被历史硬事实污染的 seen 下游状态被切断，得到 1,463 条最终训练源。该结果不反向改变本页的 pilot 统计；微调后的 Student-prefix / cross-simulator 在线评估仍待执行。

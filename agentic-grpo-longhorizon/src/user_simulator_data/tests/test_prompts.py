@@ -39,6 +39,8 @@ class PromptTests(unittest.TestCase):
         self.assertIn("reactive customer", rendered.lower())
         self.assertIn("courtesy acknowledgement", rendered.lower())
         self.assertIn("conversation is empty", rendered.lower())
+        self.assertIn("shown by the agent only as an example", rendered.lower())
+        self.assertIn("do not fabricate", rendered.lower())
 
     def test_teacher_prompt_says_state_success_alone_is_not_user_visible_completion(self):
         case = {

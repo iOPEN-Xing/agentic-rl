@@ -130,7 +130,7 @@ def main() -> None:
         }.items()
     }
     manifest = {
-        "version": "tau-airline-usim-cases-v1",
+        "version": "tau-airline-usim-cases-v2",
         "inputs": {
             "historical": str(args.historical.resolve()),
             "historical_sha256": _sha256(args.historical),
@@ -141,11 +141,29 @@ def main() -> None:
         },
         "counts": counts,
         "reference_decision_counts": decision_counts,
+        "historical_reference_context_cuts": {
+            label: [
+                {
+                    "case_id": case["case_id"],
+                    "issues": case.get("reference_grounding_issues", []),
+                }
+                for case in cases
+                if case.get("reference_grounding_issues")
+            ]
+            for label, cases in {
+                "seen_train": seen_cases,
+                "benchmark_holdout": unseen_cases,
+            }.items()
+        },
         "seen_task_ids": sorted(seen_ids),
         "benchmark_holdout_task_ids": sorted(unseen_ids),
         "leakage_rule": (
             "benchmark_holdout_DO_NOT_GENERATE.jsonl is audit-only and must never be sent "
             "to the teacher or used for user-simulator fine-tuning"
+        ),
+        "context_cut_rule": (
+            "retain the current repairable state, then exclude every downstream state "
+            "whose historical Customer prefix would contain an unsupported hard fact"
         ),
         "outputs": {key: str(path.resolve()) for key, path in output_paths.items()},
     }

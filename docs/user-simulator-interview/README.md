@@ -4,7 +4,7 @@
 > - 主 Policy：Qwen3-8B
 > - User Simulator：Qwen3-14B
 > - Teacher：DeepSeek V4 Flash
-> - 当前状态：16 个关键边界 case × 3 次真实采样的 pilot 已 48/48 通过；1,513-case 全量生成、70 个分歧审计和 TRL 导出已完成，Qwen3-14B 微调与在线 A/B 尚未执行。
+> - 当前状态：16 个关键边界 case × 3 次真实采样的 pilot 已 48/48 通过；1,513 条 raw full batch 已完成。二次事实接地与上下文污染审计后，最终自然训练源为 1,463 条，train/eval 为 1,635/164；Qwen3-14B 微调、Student-prefix rollout 与在线 A/B 尚未执行。
 
 这份 README 不是把一次 Prompt 调优包装成算法工作，而是说明：在多轮 Agentic RL 中，User Simulator 为什么是环境动力学的一部分，它会怎样决定训练上限，以及如何从真实坏例、数据合同、Prompt Engineering、可执行门禁和在线评估五个层面把它做对。
 
@@ -29,6 +29,8 @@
 > 我把错误分成五类：真正的 delayed STOP、Agent 漏报 user-facing output、Agent malformed/重复、task/verifier coverage gap、以及正常的 conditional fallback。然后从 seen task 中设计 16 个最小边界 case，覆盖 task 0 的 reactive disclosure、task 1 的 unknown ID 和 cancellation fallback、task 2 的五个 reservation 与 total savings、task 4 的 baggage 漏项、task 34 的 temporal trigger、malformed total 和 persistent persona。
 >
 > Teacher 输出富 JSON 做审计，但 Student target 只有一句自然用户回复或精确 `###STOP###`。Prompt 使用 runtime-observable context，gold action/tool trace 只做 privileged audit，并由校验器防止实体泄漏。真实 pilot 里 high thinking 首版只有 30/48 accepted，根因是 reasoning 挤占 1,600 output token；关闭 thinking 后解决格式问题，但 temperature=0.8 又引入过度披露和 delayed STOP。最终使用 thinking off、temperature=0.3、top-p=0.9，再加可执行语义门禁，得到 48/48 decision match、12/12 精确 STOP、36/36 合理 CONTINUE、0 泄漏。
+>
+> Full batch 后我又做了反向审计，发现“0 privileged leak”并不等于“0 hallucination”：Teacher 会自己创造 `OMAR1234`，把 Agent 的格式示例 `ABC123` 当成真实预订号，把 user ID 误称 reservation ID，或补出 scenario 从未提供的 LAX/Chicago。新增 typed observable-grounding gate 后，共定位 69 个受影响 target；57 条同 decision 但业务语义错误的回复被显式重写，22 条采用逐条复核的历史 reference，50 个已被错误历史 Customer 事实污染的下游状态被切断。最终 1,463/1,463 条通过 runtime prompt、prefix、事实接地和 holdout 隔离审计。
 >
 > 最后我不会只看 User Simulator 的离线 F1。真正放行要固定 Policy checkpoint 做在线 A/B，同时看 premature STOP、late-STOP latency、post-tool loop、terminal success、pass@k/pass^k 和 cross-simulator robustness。否则 Policy 可能只是在适应一个更容易的模拟用户，而不是 Agent 能力真正提升。
 
@@ -407,8 +409,9 @@ flowchart LR
 - 官方 `sonnet-35-new-airline.json`：400 条历史 trajectory；
 - 16 条人工 curated pilot；
 - 当前固定 split：40 seen task、10 unseen task；
-- 去重并过滤 runtime 不可达的连续 Customer 状态后：1,513 个 seen teacher-generation case；
-- 420 个 unseen audit case，程序强制禁止发给 teacher 或进入微调。
+- 去重并过滤 runtime 不可达的连续 Customer 状态后：1,513 个 seen raw teacher-generation case；
+- typed grounding audit 切断 50 个已包含错误历史 Customer 事实的 seen 下游 prefix，最终自然训练源为 1,463 条；
+- 353 个 unseen audit case，程序强制禁止发给 Teacher 或进入微调。
 
 为什么不先混 MultiWOZ/Schema-Guided Dialogue？
 
@@ -511,11 +514,24 @@ Privileged reference 只帮助本地 QA 审计：
 - trajectory reward；
 - hidden entity list。
 
-DeepSeek Teacher 和 Student 都只能使用 observable information。校验器会拦截未在 scenario/history 出现的 reservation、flight、payment 等实体；v1.5 不再依赖“模型看见但别使用”的软约束。
+DeepSeek Teacher 和 Student 都只能使用 observable information。v1.5 不再依赖“模型看见但别使用”的软约束；v1.6 又明确规定 Agent 用来解释格式的 example ID 不能被当成用户事实。typed validator 不只查字符串是否见过，还检查 reservation/user/payment/flight/DOB 的实体类型，避免把 user ID 合法出现误判成可用 reservation ID。
 
 面试时可以这样解释：
 
 > Privileged reference 类似训练时 critic 可以使用的额外信号，但不能进入 actor observation；否则不是提升 Simulator，而是改变 benchmark 可观测性。
+
+### 5.5 Full batch 反向穿刺：合法 JSON 和 decision-match 仍然不够
+
+第一次自动门禁主要回答“是否复制了本地 privileged entity”，第二次穿刺回答“回复中的事实是否能由 runtime observation 支撑”。它发现四类第一版 gate 看不到的问题：
+
+1. Teacher 自己创造新的 reservation/payment/flight/DOB；
+2. 把 Agent 给出的 example `ABC123`、`ZFA04Y` 复制成真实 reservation；
+3. 把 observable user ID 换类型称为 reservation ID；
+4. decision 仍是 CONTINUE，但业务语义错误，例如把 `$125 > $100` 判断反了，或把 second-cheapest 选成 cheapest。
+
+最终可审计 raw population 中有 69 个 target 命中 typed grounding issue，覆盖虚构 ID、Agent example copying、airport/city 幻觉、实体类型混淆和占位符。处理时不做无来源的“自动润色”：22 条采用逐条复核且通过新 gate 的 historical Customer reference，57 条由显式 case-level audit 修正同 decision 语义，103 条保留 `human_semantic_audit` provenance；若一个错误历史 Customer turn 已经进入后续 prefix，则保留当前可修复状态并切断其后状态，最终排除 50 条 seen 下游 prefix。
+
+最终 1,463 条的事实接地、runtime system prompt、role-flipped prefix 和最后一轮 target 全部通过离线检查；但这仍只证明 one-step 条件分布合同正确。1,148 个能链接下一历史状态的 case 中，只有 46 个新 target 能逐字重建下一历史 prefix，说明 Student 部署时会进入训练未直接覆盖的自生成 prefix。真实多轮一致性必须由 Student-prefix free rollout 验证。
 
 ---
 
@@ -955,6 +971,11 @@ flowchart TD
     V7 --> P["48/48 accepted; 0 leak; final pilot passed"]
 ```
 
+图中的 `v1.0`–`v1.7` 是 pilot 输出文件/实验轮次，不是 Prompt schema 的单一版本号。
+最终 `v1.7` pilot 的记录仍是 `prompt_version=tau-airline-usim-teacher-v1.4`；后续
+observable-only full batch 使用 v1.5，当前源码在 typed grounding 规则加入后升级为
+v1.6。这样区分能保留真实生成 provenance，避免把旧数据伪装成由新 Prompt 重新生成。
+
 ### 8.1 v1.0：不是判断错，而是输出预算错
 
 配置：
@@ -1319,7 +1340,7 @@ vs
 
 ### 13.1 错误会被批量放大
 
-如果 Prompt 在 5% case 上 premature STOP，1,513 条数据可能产生约 76 个错误边界；再对 STOP oversample，会进一步放大。
+如果 Prompt 在 5% case 上 premature STOP，1,463 条最终自然数据可能产生约 73 个错误边界；再对 STOP oversample，会进一步放大。
 
 ### 13.2 Pilot 要覆盖“最危险边界”，不是随机抽 16 条
 
@@ -1417,7 +1438,9 @@ Pilot 必须：
 
 ### 追问 7：为什么最终不让 Teacher 看 privileged reference？
 
-> v1.4 full run 给出了直接证据：即使 Prompt 明确禁止使用，Teacher 只要实际看到 gold/tool block，仍会在 58 个 case 中泄漏 hidden reservation/payment entity。这里不能只依赖语言约束，必须做 information-flow control。v1.5 请求只发送 runtime-observable scenario/history；privileged action、tool trace 和 hidden entity 留在本地 QA 检查，最终 1,513 条 leak 为 0。训练期额外信息可以用于独立 verifier，但不能进入生成 target 的模型上下文。
+> v1.4 full run 给出了直接证据：即使 Prompt 明确禁止使用，Teacher 只要实际看到 gold/tool block，仍会在 58 个 case 中泄漏 hidden reservation/payment entity。这里不能只依赖语言约束，必须做 information-flow control。v1.5 请求只发送 runtime-observable scenario/history；privileged action、tool trace 和 hidden entity 留在本地 QA 检查，原始 1,513 条 privileged leak 为 0。训练期额外信息可以用于独立 verifier，但不能进入生成 target 的模型上下文。
+
+> 我还会补一句：0 privileged leak 只证明 Teacher 没复制本地隐藏信息，不证明它不会自己编造新 ID 或路线。第二轮 typed grounding audit 发现了 69 个受影响 target，包括虚构 ID、复制 Agent example、ID 类型混淆、DOB、airport/city 幻觉和占位符；所以信息流控制与输出事实接地是两道独立防线。
 
 ### 追问 8：为什么不直接复制 historical User 回复？
 
@@ -1451,6 +1474,10 @@ Pilot 必须：
 
 > 先 precision。premature STOP 会直接截断可完成任务，并改变状态访问分布；late STOP 主要增加成本和退化风险。precision 稳定后再通过 complete-boundary 样本提高 recall，并优化 latency。
 
+### 追问 16：离线逐条对齐后，为什么还不能保证微调模型的多轮信息一致？
+
+> 因为当前 SFT 是 one-step teacher forcing：每条 target 是在真实历史 prefix 上生成的，而线上第 (t+1) 轮 prefix 会包含 Student 自己在第 (t) 轮的输出。只要 Student 的措辞或事实选择与历史 Customer 不同，就可能进入训练中没有直接出现过的状态。离线统计中，1,148 个可链接状态只有 46 个新 target 能逐字重建下一历史 prefix。这不是在说其余标签错误，而是在量化 exposure bias。解决它要靠 Student-prefix rollout、轨迹级事实 ledger、一致性指标和 frozen-policy A/B，不能再做一次单轮 JSONL 检查就宣称解决。
+
 ---
 
 ## 15. 一场完整的模拟面试：从现象一直追到 RL 本质
@@ -1465,7 +1492,7 @@ Pilot 必须：
 >
 > 数据上，现有 80 条成功 Policy SFT 没有 terminal User turn，官方 400 条历史轨迹里 STOP 和 reward 又明显不等价，所以不能直接反转或复制标签。我把错误拆成 delayed STOP、premature STOP、partial goal、fallback、false-complete、malformed recovery 和 evaluator gap，基于 task 0/1/2/4/34 构造 16 类边界 case。
 >
-> 实现上让 DeepSeek V4 Flash Teacher 输出富 JSON，Student 只学一条自然回复或精确 STOP；Teacher 请求只含 observable context，privileged 信息留在独立 QA。真实 pilot 经七轮迭代达到 48/48，随后 v1.5 full batch 达到 1,513/1,513 accepted、0 leak。对 70 个历史/Teacher 决策分歧逐条复核后，保留 1,467 条 DeepSeek 原始 target，显式修订 46 条 semantic tail，并导出 train 1,693 / eval 168。这里仍不把未执行的 LoRA、在线 A/B 或主 Policy 收益包装成结果。
+> 实现上让 DeepSeek V4 Flash Teacher 输出富 JSON，Student 只学一条自然回复或精确 STOP；Teacher 请求只含 observable context，privileged 信息留在独立 QA。真实 pilot 经七轮迭代达到 48/48，随后 v1.5 raw full batch 达到 1,513/1,513 accepted、0 privileged leak。第二轮穿刺又发现第一版 gate 没覆盖 Teacher 自造 ID、复制 Agent exemplar、实体类型混淆、route/city 与同 decision 语义错误；最终切断 50 个污染下游 prefix，得到 1,463 条自然训练源，其中 1,338 条保留 DeepSeek v1.5、103 条 human semantic audit、22 条 reviewed historical reference，导出 train 1,635 / eval 164。这里仍不把未执行的 LoRA、Student-prefix rollout、在线 A/B 或主 Policy 收益包装成结果。
 
 ### 15.2 面试官：这不就是调了一个 Prompt 吗？算法含量在哪里？
 
@@ -1529,6 +1556,8 @@ assistant = 模拟用户的下一条回复
 >
 > 第二层再分别训练 Policy，做 train-simulator × eval-simulator 的交叉矩阵：原 User、新 User、强外部 User，最好再加真人边界小样本。只有新 Policy 在 unseen task 和 holdout Simulator 上仍提升，才能说主 Agent 能力提高；只在新 User 下提升，可能只是 co-adaptation 或 benchmark 被变简单。
 
+> 在这两层之前还要加一个 Student-prefix consistency gate。当前 1,463 条数据能证明单步 runtime contract，但不能证明多轮自生成 history。我要让微调后的 Qwen3-14B 在固定 Agent script 与自己的前序回复上连续 rollout，检查 reservation、payment、persona、fallback 与已披露信息是否跨轮保持一致，并分别统计事实漂移、重复索要、premature STOP 和 delayed STOP。
+
 ### 15.9 面试官：整个过程中最有价值的一次失败是什么？
 
 > 不是模型判断错，而是我们人工写的 task 34 complete case 漏了一条 upcoming reservation。原 case 给出两条航班但 total 写成 `$1,016`，Teacher 一直 CONTINUE。继续核对数据库才发现真实是 `$402 + $306 + $308 = $1,016`，遗漏的是 `A90KR2`。
@@ -1570,7 +1599,7 @@ assistant = 模拟用户的下一条回复
 
 ### 16.3 当前结果
 
-> 最终 v1.7 pilot 达到 48/48 accepted、48/48 decision match、12/12 精确 STOP、36/36 合理 CONTINUE、0 privileged leak。36 条 CONTINUE 中有 25 条不同规范化文本，说明在语义稳定的前提下仍有适度表达变化。现在只证明 pilot 合同可放行，尚未宣称全量数据、Qwen3-14B 微调或主 Agent reward 已提升；下一步必须经过 full-batch quarantine、离线终止指标和 cross-simulator 在线 A/B。
+> 最终 v1.7 pilot 达到 48/48 accepted、48/48 decision match、12/12 精确 STOP、36/36 合理 CONTINUE、0 privileged leak。raw full batch 为 1,513 条；经过 70 个 decision disagreement 复核、typed grounding、57 条同 decision semantic rewrite 和历史污染 prefix 切断后，最终自然训练源为 1,463 条。离线审计达到 1,463/1,463 runtime prompt/prefix exact、0 observable-grounding issue、0 privileged leak、0 holdout contamination，导出 train 1,635 / eval 164。尚未宣称 Qwen3-14B 微调或主 Agent reward 已提升；下一步必须做 Student-prefix consistency、frozen-policy 和 cross-simulator online A/B。
 
 ### 16.4 STAR 版本
 
@@ -1579,12 +1608,12 @@ assistant = 模拟用户的下一条回复
 | Situation | 多轮 airline RL 中出现 delayed STOP、post-tool loop 和 malformed tail |
 | Task | 构建服务主 Policy 的高质量 User Simulator 数据，不掩盖 Agent failure |
 | Action | 环境穿刺、数据审计、边界分类、Teacher contract、16-case pilot、七轮真实迭代、semantic gate、task 34 事实修复 |
-| Result | pilot 48/48；full 1,513/1,513、0 leak；70 个分歧全审计并导出 TRL；LoRA/在线收益保持未执行 |
+| Result | pilot 48/48；raw full 1,513；最终训练源 1,463/1,463 离线合同通过、0 grounding/leak；train/eval 1,635/164；LoRA/在线收益保持未执行 |
 
 ### 16.5 当前阶段可直接放进简历的两条表述
 
-> - 面向 τ-bench Airline 多轮 Agentic RL，穿刺 User Simulator 的可观测性、STOP/reward 语义与 Policy–Verifier 边界；审计 400 条历史轨迹并构建 40-seen/10-unseen、1,513/420 隔离的数据方案，覆盖 compound goal、fallback、temporal trigger 与 communication-completeness 难例。
-> - 设计 DeepSeek V4 Flash Teacher → Qwen3-14B Student 的可审计 SFT 管线，落地 observable-only generation、last-assistant loss mask、entity/semantic gates；pilot 48/48 后完成 full 1,513/1,513、0 leak 与 70-case 分歧审计，导出 train 1,693 / eval 168 的 TRL 数据，并保留 frozen-policy 与 cross-simulator 评估边界。
+> - 面向 τ-bench Airline 多轮 Agentic RL，穿刺 User Simulator 的可观测性、STOP/reward 语义与 Policy–Verifier 边界；审计 400 条历史轨迹并构建 40-seen/10-unseen、1,463/353 隔离的数据方案，覆盖 compound goal、fallback、temporal trigger 与 communication-completeness 难例。
+> - 设计 DeepSeek V4 Flash Teacher → Qwen3-14B Student 的可审计 SFT 管线，落地 observable-only generation、typed grounding、历史污染 prefix cut 与 last-assistant loss mask；pilot 48/48 后完成 raw 1,513 条生成、70-case 分歧审计和 1,463 条最终训练源对齐，导出 train 1,635 / eval 164，并保留 Student-prefix、frozen-policy 与 cross-simulator 评估边界。
 
 当前不能写成：
 
@@ -1603,7 +1632,10 @@ assistant = 模拟用户的下一条回复
 | Premature STOP | unresolved goal 非空却 STOP | 截断可成功轨迹 | STOP precision、boundary pair |
 | Delayed STOP | complete 后继续多轮 | reward 延迟、退化循环 | STOP recall、latency、courtesy gate |
 | Eager disclosure | 首轮倾倒 ID/payment/profile | 任务变简单 | reactive case constraints |
-| Hallucinated entity | 编造 reservation/payment | 错误环境反馈 | entity validator |
+| Hallucinated entity | 编造 reservation/payment/flight/DOB | 错误环境反馈 | typed grounding validator |
+| Agent-example copying | 把 `ABC123` 当真实 reservation | 构造虚假 world state | exemplar-aware validator |
+| ID type confusion | 把 user ID 当 reservation ID | 可见字符串被错误复用 | typed entity source check |
+| Historical-prefix contamination | 错误 Customer turn 进入后续 prefix | teacher-forced 错误事实扩散 | retain current state + cut downstream |
 | Privileged leakage | 输出 gold-only ID | benchmark 泄漏 | observable/privileged separation |
 | False-complete trust | Agent 说 done 就 STOP | 漏项不可见 | goal ledger、task 4 |
 | Missing-output blindness | DB success 即 STOP | Policy 不学最终沟通 | task 2/34 boundary |
@@ -1631,15 +1663,17 @@ assistant = 模拟用户的下一条回复
 - quarantine/resume/manifest；
 - `last_assistant` loss mask；
 - 4×H200 Qwen3-14B LoRA 配置；
-- 20 个相关单元测试；
+- 25 个相关标准库单元测试（22 个 data/contract + 3 个 loss-mask）；
 - 真实 v1.7 pilot：48/48；
-- v1.5 full batch：1,513/1,513、0 leak；
-- 70 个历史/Teacher decision disagreement 全量语义复核；
-- rich + TRL train/eval 导出与 1,513/1,513 runtime prompt 对齐。
+- v1.5 raw full batch：1,513/1,513 自动门禁通过、0 privileged leak；
+- 70 个历史/Teacher decision disagreement、69 个 grounding-affected target 与 57 个 same-decision semantic rewrite 全量复核；
+- 历史污染切断后最终自然训练源 1,463，holdout 353；
+- rich + TRL train/eval 导出为 1,635/164，且 1,463/1,463 runtime prompt/prefix、grounding 和 role contract 通过。
 
 ### 尚未执行，不能虚构结果
 
 - Qwen3-14B User Simulator LoRA；
+- Student-prefix free rollout 与多轮事实一致性验证；
 - frozen-policy online User A/B；
 - W&B 微调曲线；
 - 主 Policy 重新训练；
@@ -1648,7 +1682,7 @@ assistant = 模拟用户的下一条回复
 
 因此当前最准确的项目结论是：
 
-> User Simulator 的全量 seen SFT 数据、Prompt、合同、语义审计和 TRL 导出已验证可用；是否能提高主 Agentic RL 上限，仍需 Simulator 微调和在线交叉评估证明。
+> User Simulator 的最终 seen SFT 数据、Prompt、单步 runtime 合同、事实接地审计和 TRL 导出已验证可用；是否能在自生成 prefix 上保持多轮信息一致、并提高主 Agentic RL 上限，仍需 Simulator 微调、Student-prefix rollout 和在线交叉评估证明。
 
 ---
 

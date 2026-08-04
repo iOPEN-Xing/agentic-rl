@@ -97,13 +97,14 @@ flowchart LR
 
 这张表再次证明：不能把“历史 STOP”自动翻译为“goal satisfied”，也不能把“reward=1”自动翻译为“最后一轮应该 STOP”。历史回复只作为覆盖与参考，新的 teacher 必须重新判断。
 
-按当前 [`split.json`](../../agentic-grpo-longhorizon/experiments/sft_collect_airline/split.json) 去重后，本管线得到：
+按当前 [`split.json`](../../agentic-grpo-longhorizon/experiments/sft_collect_airline/split.json) 去重并做两阶段 prefix 清洗后，本管线得到：
 
 - 16 条人工 curated pilot：12 CONTINUE + 4 STOP；
-- 1,513 条 runtime-reachable seen-task teacher generation cases；
-- 420 条 unseen benchmark holdout audit cases，代码强制禁止发给 teacher 或进入微调。
+- 1,513 条 runtime-reachable seen-task 原始 Teacher generation cases；
+- 二次事实接地审计切断 50 个已被错误历史 Customer 回复污染的 seen 下游 prefix，最终自然训练源为 1,463 条；
+- 353 条 unseen benchmark holdout audit cases，代码强制禁止发给 Teacher 或进入微调。
 
-早期的 1,527/424 统计还包含 18 个 tool-only turn 之后的历史 Customer 消息；这些状态在当前 runtime 不会触发 User Simulator，role flip 后还会形成连续两个 `assistant` turn，因此已过滤为 1,513/420。完整全量结果见 [`FULL_GENERATION_AUDIT.md`](FULL_GENERATION_AUDIT.md)。
+早期的 1,527/424 统计还包含 18 个 tool-only turn 之后的历史 Customer 消息；这些状态在当前 runtime 不会触发 User Simulator，role flip 后还会形成连续两个 `assistant` turn，因此第一阶段过滤为 1,513/420。第二阶段保留 15 个可修复的 seen 污染点当前状态，但切断其后 50 个已把虚构 ID/DOB、错误 route/city 或错误 second-cheapest 写入历史的状态；holdout 从 2 个污染根后切断 67 个下游状态，最终为 1,463/353。完整全量结果见 [`FULL_GENERATION_AUDIT.md`](FULL_GENERATION_AUDIT.md)。
 
 ### 3.3 为什么第一版不混入通用 TOD 数据
 
@@ -181,7 +182,9 @@ DeepSeek teacher 输出严格 JSON：
 
 DeepSeek Teacher 请求只包含 `OBSERVABLE_CONTEXT`：Student 运行时真实可见的 scenario 与对话。gold actions、outputs、tool trace、trajectory reward 和 hidden identifiers 不进入模型请求，只留在本地 deterministic QA 中做实体泄漏检查。
 
-这是信息架构约束，不只是 prompt 禁令。v1.4 全量试跑证明：只要 Teacher 实际看到了 privileged block，即使文字要求“不使用”，仍会产生 hidden reservation/payment ID 泄漏；v1.5 物理移除该块后，全量 1,513 条的 privileged entity leak 为 0。
+这是信息架构约束，不只是 prompt 禁令。v1.4 全量试跑证明：只要 Teacher 实际看到了 privileged block，即使文字要求“不使用”，仍会产生 hidden reservation/payment ID 泄漏；v1.5 物理移除该块后，原始 1,513 条的 privileged entity leak 为 0。
+
+但“0 privileged leak”不等于“0 hallucination”。第二轮审计发现 Teacher 仍可能凭空创造 `OMAR1234`，把 Agent 用来解释格式的 `ABC123` 当作真实 reservation ID，把 user ID 误称为 reservation ID，或补出 instruction 从未提供的 LAX/Chicago。当前 v1.6 Prompt 明确禁止复制 Agent exemplar；typed observable-grounding gate 同时校验 reservation/user/payment/flight/DOB、airport/city alias、实体类型和来源。最终 1,463 条训练源的 observable-grounding issue 为 0。
 
 ### 5.2 为什么只训练最后一个 assistant turn
 
@@ -397,7 +400,7 @@ flowchart TD
     B -->|"No"| C["按失败 category 修 Prompt / contract"]
     C --> A
     B -->|"Yes"| D["Generate 1,513 runtime-reachable seen cases"]
-    D --> E["Deterministic QA + human boundary audit"]
+    D --> E["Typed grounding + semantic audit; final 1,463"]
     E --> F["Qwen3-14B LoRA, 2 epochs"]
     F --> G["Frozen-policy online A/B"]
     G --> H{"STOP、reward、跨 simulator 都改善?"}
@@ -425,12 +428,13 @@ flowchart TD
 - DeepSeek V4 Flash JSON/Thinking client：完成；
 - seen/holdout 防泄漏、resume、quarantine、export：完成；
 - `last_assistant` loss mask 与 4×H200 LoRA 配置：完成；
-- 标准库单测：20 个通过（17 个 synthesis + 3 个 loss-mask）；
+- 标准库单测：25 个通过（22 个 user-simulator data/contract + 3 个 loss-mask）；
 - DeepSeek real pilot：完成，最终 `v1.7` 为 48/48 accepted、48/48 decision match、0 leak、`quality_gate_passed=true`；
 - 多样性：36 条 CONTINUE 中有 25 条不同的规范化文本；排除必须固定回答的 ID 后，11 个可变组中 9 个有多种表达；
-- DeepSeek full batch：完成；v1.5 为 1,513/1,513 accepted、0 leak、`export_gate_passed=true`；
-- 全量决策分歧审计：完成；70 个历史/Teacher decision disagreement 逐条复核，46 条保留显式 audit provenance；
-- SFT/TRL 导出：完成；train 1,693、eval 168，1,513/1,513 runtime prompt/prefix 精确对齐；
+- DeepSeek raw full batch：完成；v1.5 为 1,513/1,513 accepted、0 privileged leak、`export_gate_passed=true`；
+- 全量二次审计：完成；70 个历史/Teacher decision disagreement 逐条复核，并补充 typed observable-grounding 与同 decision 语义检查；50 个污染下游 prefix 被切断，最终自然训练源 1,463 条；
+- SFT/TRL 导出：完成；train 1,635、eval 164，1,463/1,463 runtime prompt/prefix 精确对齐，353 个 holdout 有 0 个进入 SFT；
+- 剩余风险：1,148 个可链接历史状态中只有 46 个 Teacher target 能逐字重建下一历史 prefix；这属于 one-step teacher forcing 的分布偏移，必须通过 Student-prefix rollout 与 frozen-policy online A/B 验证；
 - Qwen3-14B LoRA、在线 User A/B 与主 Policy RL：尚未执行，不能宣称收益。
 
 API key 没有写入源码、配置、测试、生成结果或 Git；每条结果只记录不敏感的 model、usage 与 request sampling config。

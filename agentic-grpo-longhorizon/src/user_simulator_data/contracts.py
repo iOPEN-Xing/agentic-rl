@@ -24,6 +24,183 @@ TERMINATION_REASONS = {
 GOAL_STATUSES = {"in_progress", "satisfied", "failed", "blocked", "unknown"}
 COMMUNICATION_STATUSES = {"none", "partial", "complete", "contradictory"}
 
+_LABELED_IDENTIFIER_CLAIM = re.compile(
+    r"\b(?P<label>reservation|booking|confirmation|user|payment|certificate|"
+    r"gift\s+card|credit\s+card)\s*(?:id|code)\s*(?:is|:)\s*"
+    r"(?:it(?:'s| is)\s*)?[\"']?(?P<value>[*A-Za-z0-9][*A-Za-z0-9_-]{2,}|\.\.\.)",
+    flags=re.IGNORECASE,
+)
+_FLIGHT_CODE = re.compile(r"\bHAT\d{2,4}\b", flags=re.IGNORECASE)
+_USER_ID_IN_SCENARIO = re.compile(
+    r"\byou are\s+([a-z][a-z0-9_]+)|"
+    r"\buser id is\s+([a-z][a-z0-9_]+)|"
+    r"\bwith id:\s*([a-z][a-z0-9_]+)",
+    flags=re.IGNORECASE,
+)
+_NON_VALUE_IDENTIFIER_WORDS = {
+    "in",
+    "missing",
+    "none",
+    "not",
+    "on",
+    "the",
+    "unavailable",
+    "unknown",
+}
+_AIRPORTS = {
+    "SFO": "San Francisco",
+    "JFK": "New York",
+    "LAX": "Los Angeles",
+    "ORD": "Chicago",
+    "DFW": "Dallas",
+    "DEN": "Denver",
+    "SEA": "Seattle",
+    "ATL": "Atlanta",
+    "MIA": "Miami",
+    "BOS": "Boston",
+    "PHX": "Phoenix",
+    "IAH": "Houston",
+    "LAS": "Las Vegas",
+    "MCO": "Orlando",
+    "EWR": "Newark",
+    "CLT": "Charlotte",
+    "MSP": "Minneapolis",
+    "DTW": "Detroit",
+    "PHL": "Philadelphia",
+    "LGA": "LaGuardia",
+}
+
+
+def _scenario_user_ids(scenario: str) -> set[str]:
+    values: set[str] = set()
+    for match in _USER_ID_IN_SCENARIO.finditer(scenario):
+        values.add(next(group for group in match.groups() if group).casefold())
+    return values
+
+
+def _agent_presented_as_example(token: str, agent_text: str) -> bool:
+    """Return whether an Agent mentioned ``token`` only as an identifier example.
+
+    A generic phrase such as ``would you like HAT123`` is not an example.  We require
+    explicit exemplar language near the token so a real offered flight remains usable.
+    """
+
+    escaped = re.escape(token)
+    return bool(
+        re.search(
+            rf"(?:for\s+example|e\.g\.|such\s+as|"
+            rf"(?:code|identifier|\bid\b)[^\n]{{0,20}}\blike\b)"
+            rf"[^\n]{{0,45}}[\"']?{escaped}\b",
+            agent_text,
+            flags=re.IGNORECASE,
+        )
+    )
+
+
+def validate_observable_grounding_text(
+    response: str,
+    *,
+    scenario: str = "",
+    observable_history: Sequence[Mapping[str, Any]] = (),
+) -> list[str]:
+    """Flag hard facts that a runtime User Simulator cannot legitimately know.
+
+    The simulator observes the scenario plus natural-language conversation, not tool
+    state.  Merely checking known privileged IDs is insufficient: a Teacher can invent
+    a *new* placeholder such as ``ABC123`` that is absent from both observable and gold
+    data.  This gate therefore validates typed identifier claims, flight codes, and
+    explicit dates of birth against the actual observable prefix.  It deliberately does
+    not reject derived arithmetic (for example ``$192 - $152 = $40``).
+    """
+
+    visible_source = f"{scenario}\n{_history_text(observable_history)}"
+    visible_text = visible_source.casefold()
+    agent_text = "\n".join(
+        str(item.get("content", ""))
+        for item in observable_history
+        if str(item.get("role", "")).lower() == "agent"
+    )
+    scenario_user_ids = _scenario_user_ids(scenario)
+    issues: list[str] = []
+
+    for match in _LABELED_IDENTIFIER_CLAIM.finditer(response):
+        label = re.sub(r"\s+", "_", match.group("label").casefold())
+        value = match.group("value").strip()
+        folded = value.casefold()
+        if value == "...":
+            issues.append(f"placeholder_identifier:{label}")
+            continue
+        if folded in _NON_VALUE_IDENTIFIER_WORDS:
+            continue
+        if label in {"reservation", "booking", "confirmation"} and (
+            folded in scenario_user_ids
+            or any(
+                folded == user_id.rsplit("_", 1)[-1]
+                for user_id in scenario_user_ids
+            )
+        ):
+            issues.append(f"user_id_mislabeled_as_{label}_id:{value}")
+            continue
+        if folded not in visible_text:
+            issues.append(f"unsupported_{label}_id:{value}")
+            continue
+        if label in {"reservation", "booking", "confirmation"} and _agent_presented_as_example(
+            value, agent_text
+        ):
+            issues.append(f"agent_example_copied_as_{label}_id:{value}")
+
+    if re.search(
+        r"reservation id is the one i mentioned earlier", response, re.IGNORECASE
+    ) and not any(
+        re.search(
+            r"(?:reservation|booking|confirmation)\s*(?:id|code)\s*(?:is|:)",
+            str(item.get("content", "")),
+            re.IGNORECASE,
+        )
+        for item in observable_history
+        if str(item.get("role", "")).lower() == "user"
+    ):
+        issues.append("unsupported_prior_reservation_id_mention")
+
+    for match in _FLIGHT_CODE.finditer(response):
+        value = match.group(0)
+        if value.casefold() not in visible_text:
+            issues.append(f"unsupported_flight_code:{value}")
+        elif _agent_presented_as_example(value, agent_text):
+            issues.append(f"agent_example_copied_as_flight_code:{value}")
+
+    # Airport code/city aliases are public equivalents (for example EWR/Newark), so
+    # either side in the observable prefix is sufficient.  If neither side is present,
+    # the response has supplied a route endpoint that the runtime simulator was never
+    # told.  This catches route drift that typed booking-ID checks cannot see.
+    for airport, city in _AIRPORTS.items():
+        response_mentions_location = bool(
+            re.search(rf"\b{re.escape(airport)}\b", response)
+            or re.search(rf"\b{re.escape(city)}\b", response, re.IGNORECASE)
+        )
+        visible_mentions_location = bool(
+            re.search(rf"\b{re.escape(airport)}\b", visible_source)
+            or re.search(rf"\b{re.escape(city)}\b", visible_source, re.IGNORECASE)
+        )
+        if response_mentions_location and not visible_mentions_location:
+            issues.append(f"unsupported_airport_or_city:{airport}")
+
+    if re.search(r"date of birth|\bdob\b|born on", response, re.IGNORECASE):
+        for year in re.findall(r"\b(?:19|20)\d{2}\b", response):
+            if year not in visible_text:
+                issues.append(f"unsupported_date_of_birth_year:{year}")
+
+    if re.search(r"\[(?:date|id|number|value)\]", response, re.IGNORECASE):
+        issues.append("template_placeholder_in_response")
+    if re.search(
+        r"\b(?:reservation|booking|confirmation|payment|user)\b[^\n]{0,60}"
+        r"\b(?:id|code)\b[^\n]{0,60}\bis\s+\.\.\.",
+        response,
+        re.IGNORECASE,
+    ):
+        issues.append("placeholder_identifier:untyped")
+    return sorted(set(issues))
+
 
 class ContractError(ValueError):
     """The teacher response cannot be made safe by deterministic cleanup."""
@@ -182,6 +359,14 @@ def validate_teacher_decision(
         issues.append("multiline_response")
     if len(decision.response) > max_response_chars:
         issues.append(f"response_too_long:{len(decision.response)}")
+
+    issues.extend(
+        validate_observable_grounding_text(
+            decision.response,
+            scenario=scenario,
+            observable_history=observable_history,
+        )
+    )
 
     visible_text = f"{scenario}\n{_history_text(observable_history)}".casefold()
     response_text = decision.response.casefold()

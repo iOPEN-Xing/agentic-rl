@@ -13,7 +13,20 @@ import re
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
-from .contracts import STOP_TOKEN
+from .contracts import STOP_TOKEN, validate_observable_grounding_text
+
+
+# These source turns contain hard facts absent from their scenario and visible prefix,
+# but are not expressible as a generic typed-ID/DOB rule.  Keep the current state so a
+# Teacher can repair its target, then cut the impossible downstream branch.
+_KNOWN_HISTORICAL_REFERENCE_GROUNDING_ISSUES = {
+    "historical-airline-t0025-trial00-u017": (
+        "incorrect_second_cheapest_selection",
+    ),
+    "historical-airline-t0040-trial07-u017": (
+        "unsupported_route_and_date_claim",
+    ),
+}
 
 
 def build_runtime_system_prompt(scenario: str) -> str:
@@ -160,6 +173,15 @@ def build_cases_from_historical_rows(
                 f"historical-airline-t{task_id:04d}-trial{trial:02d}-"
                 f"u{message_index:03d}"
             )
+            reference_grounding_issues = validate_observable_grounding_text(
+                content,
+                scenario=scenario,
+                observable_history=observable_history,
+            )
+            reference_grounding_issues.extend(
+                _KNOWN_HISTORICAL_REFERENCE_GROUNDING_ISSUES.get(case_id, ())
+            )
+            reference_grounding_issues = sorted(set(reference_grounding_issues))
             cases.append(
                 {
                     "case_id": case_id,
@@ -168,6 +190,7 @@ def build_cases_from_historical_rows(
                     "observable_history": [dict(item) for item in observable_history],
                     "student_messages": [dict(item) for item in student_messages],
                     "reference_response": content,
+                    "reference_grounding_issues": reference_grounding_issues,
                     "expected_decision": expected_decision,
                     "source": "tau-bench/sonnet-3.5-historical-airline",
                     "privileged_reference": {
@@ -183,6 +206,12 @@ def build_cases_from_historical_rows(
                     },
                 }
             )
+            # The current state is still usable because its prefix is clean and the
+            # Teacher can repair this target.  Any later state would condition on the
+            # ungrounded historical reply and is therefore excluded rather than
+            # silently rewriting history and breaking Agent/User causality.
+            if reference_grounding_issues:
+                break
             observable_history.append(
                 {"turn_index": message_index, "role": "user", "content": content}
             )

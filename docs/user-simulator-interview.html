@@ -1,0 +1,1672 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="τ-bench Airline 多轮 Agentic RL User Simulator：从 Pilot、事实接地审计到多轮在线验证的面试级技术总结。">
+  <title>User Simulator：从 Delayed STOP 到可控多轮 RL 环境</title>
+  <style>
+    :root {
+      --ink: #10231d;
+      --muted: #52645e;
+      --paper: #f4f7f3;
+      --surface: #ffffff;
+      --surface-soft: #eef5ef;
+      --line: #d7e1da;
+      --brand: #176c4a;
+      --brand-dark: #0b4430;
+      --accent: #d8f0df;
+      --amber: #9a6212;
+      --amber-soft: #fff3d9;
+      --red: #a43f39;
+      --red-soft: #fff0ee;
+      --blue: #245d86;
+      --blue-soft: #edf6fc;
+      --code: #13221d;
+      --shadow: 0 18px 48px rgba(25, 55, 43, 0.09);
+      --radius: 18px;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    html {
+      scroll-behavior: smooth;
+      scroll-padding-top: 24px;
+    }
+
+    body {
+      margin: 0;
+      color: var(--ink);
+      background:
+        radial-gradient(circle at 8% 0%, rgba(121, 196, 150, 0.18), transparent 28rem),
+        linear-gradient(180deg, #f8faf7 0, var(--paper) 34rem);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+        "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+      font-size: 16px;
+      line-height: 1.75;
+    }
+
+    a {
+      color: var(--brand);
+      text-underline-offset: 3px;
+    }
+
+    a:hover {
+      color: var(--brand-dark);
+    }
+
+    code, pre {
+      font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+    }
+
+    code {
+      padding: 0.12rem 0.36rem;
+      border-radius: 5px;
+      background: #edf2ee;
+      color: #164f39;
+      font-size: 0.92em;
+    }
+
+    pre {
+      margin: 1rem 0;
+      padding: 1.05rem 1.2rem;
+      overflow-x: auto;
+      border: 1px solid #243a31;
+      border-radius: 12px;
+      color: #edf8f1;
+      background: var(--code);
+      line-height: 1.55;
+      font-size: 0.89rem;
+    }
+
+    pre code {
+      padding: 0;
+      color: inherit;
+      background: transparent;
+    }
+
+    .page {
+      width: min(1440px, 100%);
+      margin: 0 auto;
+      padding: 30px 28px 72px;
+    }
+
+    .hero {
+      position: relative;
+      overflow: hidden;
+      padding: clamp(34px, 6vw, 76px);
+      border: 1px solid #cddbd1;
+      border-radius: 28px;
+      background:
+        linear-gradient(135deg, rgba(255, 255, 255, 0.96), rgba(234, 246, 237, 0.94)),
+        var(--surface);
+      box-shadow: var(--shadow);
+    }
+
+    .hero::after {
+      position: absolute;
+      right: -90px;
+      bottom: -130px;
+      width: 360px;
+      height: 360px;
+      border: 52px solid rgba(23, 108, 74, 0.08);
+      border-radius: 50%;
+      content: "";
+    }
+
+    .eyebrow {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      margin: 0 0 16px;
+      color: var(--brand);
+      font-size: 0.82rem;
+      font-weight: 750;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+    }
+
+    .eyebrow::before {
+      width: 26px;
+      height: 3px;
+      border-radius: 3px;
+      background: var(--brand);
+      content: "";
+    }
+
+    h1, h2, h3, h4 {
+      color: var(--ink);
+      line-height: 1.25;
+    }
+
+    h1 {
+      max-width: 980px;
+      margin: 0;
+      font-size: clamp(2.15rem, 5vw, 4.65rem);
+      letter-spacing: -0.045em;
+    }
+
+    h2 {
+      margin: 0 0 1rem;
+      font-size: clamp(1.55rem, 3vw, 2.45rem);
+      letter-spacing: -0.025em;
+    }
+
+    h3 {
+      margin: 1.85rem 0 0.65rem;
+      font-size: 1.28rem;
+    }
+
+    h4 {
+      margin: 1.2rem 0 0.45rem;
+      font-size: 1.02rem;
+    }
+
+    p {
+      margin: 0.72rem 0;
+    }
+
+    .lede {
+      max-width: 920px;
+      margin: 22px 0 0;
+      color: #334a41;
+      font-size: clamp(1.03rem, 1.7vw, 1.26rem);
+    }
+
+    .hero-meta {
+      position: relative;
+      z-index: 1;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-top: 28px;
+    }
+
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      min-height: 34px;
+      padding: 6px 12px;
+      border: 1px solid #c5dacb;
+      border-radius: 999px;
+      color: #26503f;
+      background: rgba(255, 255, 255, 0.72);
+      font-size: 0.83rem;
+      font-weight: 650;
+    }
+
+    .layout {
+      display: grid;
+      grid-template-columns: 250px minmax(0, 1fr);
+      gap: 30px;
+      align-items: start;
+      margin-top: 32px;
+    }
+
+    .toc {
+      position: sticky;
+      top: 22px;
+      max-height: calc(100vh - 44px);
+      padding: 18px;
+      overflow-y: auto;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: rgba(255, 255, 255, 0.88);
+      box-shadow: 0 10px 30px rgba(25, 55, 43, 0.05);
+      backdrop-filter: blur(12px);
+    }
+
+    .toc strong {
+      display: block;
+      margin: 0 0 9px 10px;
+      color: var(--muted);
+      font-size: 0.75rem;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+
+    .toc a {
+      display: block;
+      padding: 7px 10px;
+      border-radius: 8px;
+      color: #344a41;
+      text-decoration: none;
+      font-size: 0.86rem;
+      line-height: 1.35;
+    }
+
+    .toc a:hover {
+      color: var(--brand-dark);
+      background: var(--surface-soft);
+    }
+
+    main {
+      min-width: 0;
+    }
+
+    section {
+      margin-bottom: 26px;
+      padding: clamp(25px, 4vw, 46px);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: var(--surface);
+      box-shadow: 0 12px 34px rgba(28, 55, 45, 0.055);
+    }
+
+    section:target {
+      border-color: #8ebca1;
+      box-shadow: 0 0 0 3px rgba(23, 108, 74, 0.09), var(--shadow);
+    }
+
+    .section-kicker {
+      margin: 0 0 8px;
+      color: var(--brand);
+      font-size: 0.78rem;
+      font-weight: 760;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+
+    .summary-grid,
+    .metric-grid,
+    .case-grid,
+    .two-col {
+      display: grid;
+      gap: 16px;
+    }
+
+    .summary-grid {
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      margin-top: 20px;
+    }
+
+    .metric-grid {
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      margin: 20px 0;
+    }
+
+    .case-grid,
+    .two-col {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    .card,
+    .metric,
+    .case {
+      padding: 18px;
+      border: 1px solid var(--line);
+      border-radius: 13px;
+      background: #fbfcfb;
+    }
+
+    .card h3,
+    .case h3 {
+      margin-top: 0;
+    }
+
+    .metric {
+      display: flex;
+      min-height: 128px;
+      flex-direction: column;
+      justify-content: space-between;
+    }
+
+    .metric .value {
+      color: var(--brand-dark);
+      font-size: clamp(1.55rem, 3vw, 2.35rem);
+      font-weight: 780;
+      letter-spacing: -0.04em;
+    }
+
+    .metric .label {
+      color: var(--muted);
+      font-size: 0.84rem;
+      line-height: 1.4;
+    }
+
+    .status-line {
+      display: grid;
+      grid-template-columns: 122px 1fr;
+      gap: 14px;
+      align-items: start;
+      margin: 10px 0;
+    }
+
+    .status {
+      display: inline-flex;
+      justify-content: center;
+      padding: 4px 10px;
+      border-radius: 999px;
+      font-size: 0.78rem;
+      font-weight: 750;
+    }
+
+    .status.pass {
+      color: #0c5738;
+      background: var(--accent);
+    }
+
+    .status.pending {
+      color: #765018;
+      background: var(--amber-soft);
+    }
+
+    .callout {
+      margin: 1.2rem 0;
+      padding: 16px 18px;
+      border-left: 4px solid var(--brand);
+      border-radius: 0 12px 12px 0;
+      background: var(--surface-soft);
+    }
+
+    .callout.warn {
+      border-left-color: var(--amber);
+      background: var(--amber-soft);
+    }
+
+    .callout.danger {
+      border-left-color: var(--red);
+      background: var(--red-soft);
+    }
+
+    .callout.info {
+      border-left-color: var(--blue);
+      background: var(--blue-soft);
+    }
+
+    .callout strong {
+      display: block;
+      margin-bottom: 4px;
+    }
+
+    .table-wrap {
+      width: 100%;
+      margin: 1rem 0;
+      overflow-x: auto;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      background: var(--surface);
+      font-size: 0.91rem;
+    }
+
+    th, td {
+      padding: 12px 14px;
+      border-bottom: 1px solid var(--line);
+      text-align: left;
+      vertical-align: top;
+    }
+
+    th {
+      color: #27483b;
+      background: #edf4ef;
+      font-size: 0.8rem;
+      letter-spacing: 0.02em;
+    }
+
+    tr:last-child td {
+      border-bottom: 0;
+    }
+
+    ul, ol {
+      padding-left: 1.35rem;
+    }
+
+    li {
+      margin: 0.36rem 0;
+    }
+
+    .mermaid {
+      margin: 1.25rem 0;
+      padding: 16px;
+      overflow-x: auto;
+      border: 1px solid var(--line);
+      border-radius: 13px;
+      background: #fbfdfb;
+      text-align: center;
+    }
+
+    .formula {
+      margin: 1rem 0;
+      padding: 14px 18px;
+      overflow-x: auto;
+      border: 1px solid #d9e7df;
+      border-radius: 12px;
+      background: #f6faf7;
+    }
+
+    details {
+      margin: 12px 0;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background: #fcfdfc;
+    }
+
+    summary {
+      padding: 14px 16px;
+      cursor: pointer;
+      color: #234b3a;
+      font-weight: 720;
+    }
+
+    details > div {
+      padding: 0 16px 16px;
+    }
+
+    .case.bad {
+      border-top: 4px solid var(--red);
+    }
+
+    .case.good {
+      border-top: 4px solid var(--brand);
+    }
+
+    .case .tag {
+      display: inline-block;
+      margin-bottom: 9px;
+      padding: 2px 8px;
+      border-radius: 999px;
+      color: var(--muted);
+      background: #eaf0ec;
+      font-size: 0.74rem;
+      font-weight: 700;
+    }
+
+    .quote {
+      margin: 1.15rem 0;
+      padding: 18px 20px;
+      border: 1px solid #bfd5c6;
+      border-radius: 13px;
+      color: #193f30;
+      background: linear-gradient(135deg, #eff8f1, #f9fcf9);
+      font-size: 1.02rem;
+    }
+
+    .hash {
+      overflow-wrap: anywhere;
+      font-family: "SFMono-Regular", Consolas, monospace;
+      font-size: 0.78rem;
+    }
+
+    .footer {
+      padding: 24px 6px 0;
+      color: var(--muted);
+      text-align: center;
+      font-size: 0.86rem;
+    }
+
+    @media (max-width: 1060px) {
+      .layout {
+        grid-template-columns: 1fr;
+      }
+
+      .toc {
+        position: static;
+        max-height: none;
+        columns: 2;
+      }
+
+      .toc strong {
+        column-span: all;
+      }
+
+      .summary-grid {
+        grid-template-columns: 1fr;
+      }
+
+      .metric-grid {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+    }
+
+    @media (max-width: 700px) {
+      .page {
+        padding: 14px 12px 48px;
+      }
+
+      .hero,
+      section {
+        padding: 22px 18px;
+        border-radius: 15px;
+      }
+
+      .case-grid,
+      .two-col,
+      .metric-grid {
+        grid-template-columns: 1fr;
+      }
+
+      .toc {
+        columns: 1;
+      }
+
+      .status-line {
+        grid-template-columns: 1fr;
+      }
+    }
+
+    @media print {
+      :root {
+        --paper: #fff;
+      }
+
+      body {
+        background: #fff;
+        font-size: 10.5pt;
+      }
+
+      .page {
+        width: 100%;
+        padding: 0;
+      }
+
+      .hero,
+      section {
+        box-shadow: none;
+        break-inside: avoid-page;
+      }
+
+      .layout {
+        display: block;
+      }
+
+      .toc {
+        display: none;
+      }
+
+      a {
+        color: inherit;
+        text-decoration: none;
+      }
+
+      details > div {
+        display: block;
+      }
+    }
+  </style>
+
+  <script>
+    window.MathJax = {
+      tex: {
+        inlineMath: [['$', '$'], ['\\(', '\\)']],
+        displayMath: [['$$', '$$'], ['\\[', '\\]']],
+        processEscapes: true
+      },
+      options: {
+        skipHtmlTags: ['script', 'noscript', 'style', 'textarea', 'pre', 'code']
+      }
+    };
+  </script>
+  <script async src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
+</head>
+<body>
+  <div class="page">
+    <header class="hero">
+      <p class="eyebrow">τ-bench Airline · Agentic RL Interview Report</p>
+      <h1>从 Delayed STOP 到可控 User Simulator</h1>
+      <p class="lede">
+        一份面向算法面试与工程复盘的完整说明：为什么用户模拟器是多轮 RL 的环境动力学，
+        如何用 DeepSeek Teacher 构建 Qwen3-14B 微调数据，以及为什么单轮离线对齐通过后，
+        仍必须验证 Student 自生成对话历史上的信息一致性。
+      </p>
+      <div class="hero-meta" aria-label="项目摘要">
+        <span class="pill">主 Policy · Qwen3-8B</span>
+        <span class="pill">User Simulator · Qwen3-14B</span>
+        <span class="pill">Teacher · DeepSeek V4 Flash</span>
+        <span class="pill">Pilot · 48 / 48</span>
+        <span class="pill">最终自然训练源 · 1,463</span>
+        <span class="pill">在线效果 · 尚未验证</span>
+      </div>
+    </header>
+
+    <div class="layout">
+      <nav class="toc" aria-label="页面目录">
+        <strong>Contents</strong>
+        <a href="#executive">01 · 结论与证据边界</a>
+        <a href="#rl-model">02 · 为什么它是 RL 环境</a>
+        <a href="#runtime">03 · 真实多轮运行时</a>
+        <a href="#pilot">04 · Pilot 七轮迭代</a>
+        <a href="#data">05 · 数据从 1,527 到 1,463</a>
+        <a href="#grounding">06 · 第二轮事实接地穿刺</a>
+        <a href="#contract">07 · SFT 与 runtime 对齐</a>
+        <a href="#cases">08 · 真实 case 解剖</a>
+        <a href="#forcing">09 · Teacher forcing 风险</a>
+        <a href="#metrics">10 · 验收指标与实验</a>
+        <a href="#interview">11 · 面试回答模板</a>
+        <a href="#evidence">12 · 证据与代码入口</a>
+      </nav>
+
+      <main>
+        <section id="executive">
+          <p class="section-kicker">01 · Executive Summary</p>
+          <h2>先说清楚：什么已经证明，什么还没有</h2>
+
+          <div class="summary-grid">
+            <article class="card">
+              <h3>已证明：Pilot 边界稳定</h3>
+              <p>16 个高风险边界 case × 3 次真实采样，48/48 accepted，12/12 精确 STOP，36/36 合理 CONTINUE，0 privileged leak。</p>
+            </article>
+            <article class="card">
+              <h3>已证明：离线数据合同对齐</h3>
+              <p>最终 1,463 条自然样本全部通过真实 runtime prompt、role flip、last-assistant target、observable grounding 与 holdout 隔离审计。</p>
+            </article>
+            <article class="card">
+              <h3>尚未证明：微调后的在线上限</h3>
+              <p>Qwen3-14B LoRA、Student-prefix free rollout、frozen-policy A/B、cross-simulator 与主 Policy RL 尚未执行。</p>
+            </article>
+          </div>
+
+          <div class="metric-grid" aria-label="核心数据指标">
+            <div class="metric">
+              <span class="value">1,513</span>
+              <span class="label">DeepSeek v1.5 原始 full batch；作为不可变生成证据保留</span>
+            </div>
+            <div class="metric">
+              <span class="value">1,463</span>
+              <span class="label">切断历史硬事实污染下游 prefix 后的最终自然训练源</span>
+            </div>
+            <div class="metric">
+              <span class="value">1,635 / 164</span>
+              <span class="label">train / eval；STOP 只在 train 做 3 倍物化采样</span>
+            </div>
+            <div class="metric">
+              <span class="value">0</span>
+              <span class="label">最终 grounding issue、privileged leak 与 holdout contamination</span>
+            </div>
+          </div>
+
+          <div class="callout warn">
+            <strong>最重要的诚实边界</strong>
+            1,463/1,463 离线通过，表示每一个单步训练样本与当前 runtime 合同一致；
+            它不表示微调模型在自己的前序回复上继续多轮 rollout 时一定不遗忘、不漂移、不过早停止。
+          </div>
+
+          <div class="status-line">
+            <span class="status pass">离线已验证</span>
+            <span>Prompt、role、target、STOP 格式、事实来源、数据隔离、导出 schema、长度上界。</span>
+          </div>
+          <div class="status-line">
+            <span class="status pending">在线待验证</span>
+            <span>Student 自生成 history 一致性、真实 tokenizer truncation、STOP latency、Agent reward、跨 Simulator 泛化。</span>
+          </div>
+        </section>
+
+        <section id="rl-model">
+          <p class="section-kicker">02 · RL Formulation</p>
+          <h2>User Simulator 不是陪聊模型，而是环境转移核</h2>
+
+          <p>
+            在多轮工具 Agent 中，Policy 产生 Agent action 或自然语言 \(a_t\)，用户模拟器根据任务 instruction
+            \(I\)、对话历史 \(h_t\) 和最新 Agent 文本生成下一轮用户行为：
+          </p>
+
+          <div class="formula">
+            \[
+            u_{t+1} \sim U_{\phi}\!\left(u \mid I, h_t, a_t\right).
+            \]
+          </div>
+
+          <p>因此完整环境动力学不是只由数据库和工具决定，而可以写成：</p>
+
+          <div class="formula">
+            \[
+            P_{\phi}(s_{t+1},u_{t+1}\mid s_t,h_t,a_t)
+            =
+            P_{\text{env}}(s_{t+1}\mid s_t,a_t)\,
+            U_{\phi}(u_{t+1}\mid I,h_t,a_t).
+            \]
+          </div>
+
+          <p>
+            固定 User Simulator 参数 \(\phi\) 时，主 Policy 的优化目标实际是
+            \(J(\theta;\phi)\)。如果训练过程中随意改变 Simulator、Prompt、温度或 STOP 规则，
+            就不再是在同一个 MDP 上比较算法：
+          </p>
+
+          <div class="formula">
+            \[
+            J(\theta;\phi)
+            =
+            \mathbb{E}_{\tau\sim p_{\theta,\phi}(\tau)}
+            \left[\sum_{t=0}^{T}\gamma^t r_t\right].
+            \]
+          </div>
+
+          <div class="two-col">
+            <article class="card">
+              <h3>STOP 是 termination hazard</h3>
+              <p>它不是一句普通礼貌话，而是决定 episode 是否在当前历史结束的控制 action：</p>
+              <div class="formula">
+                \[
+                \lambda_{\phi}(h_t)
+                =
+                P_{\phi}(u_{t+1}=\texttt{STOP}\mid I,h_t,a_t).
+                \]
+              </div>
+              <p>premature STOP 截断可完成轨迹；delayed STOP 延迟 verifier、增加无意义 horizon，并可能把成功 tail 拖成 malformed。</p>
+            </article>
+            <article class="card">
+              <h3>它会污染 GRPO 相对优势</h3>
+              <p>同一 task 的组内 reward 差异同时来自 Policy 采样和 User 分支：</p>
+              <div class="formula">
+                \[
+                \operatorname{Var}(R)
+                =
+                \mathbb{E}_{a}\!\left[\operatorname{Var}_{u}(R\mid a)\right]
+                +
+                \operatorname{Var}_{a}\!\left(\mathbb{E}_{u}[R\mid a]\right).
+                \]
+              </div>
+              <p>若某条 rollout 因 User 偶然泄漏 ID 而高分，group-relative advantage 会错误奖励 Policy。</p>
+            </article>
+          </div>
+
+          <div class="callout">
+            <strong>面试核心判断</strong>
+            好的 User Simulator 不是“更配合”，而是让目标、可观测性、信息披露、fallback 和终止边界与真实业务一致，
+            从而提供稳定但不失真的 occupancy distribution。
+          </div>
+        </section>
+
+        <section id="runtime">
+          <p class="section-kicker">03 · Runtime Semantics</p>
+          <h2>先把角色、可见信息和终止时机定义对</h2>
+
+          <div class="mermaid">
+sequenceDiagram
+    participant A as Agent Policy
+    participant E as TauBenchInteraction
+    participant T as Airline Tools and DB
+    participant U as User Simulator
+    participant V as Terminal Verifier
+
+    A->>E: tool call
+    E->>T: execute action
+    T-->>E: tool result
+    Note over E,U: tool-only turn does not call User Simulator
+    E-->>A: tool observation
+    A->>E: natural-language RESPOND
+    E->>U: Agent-visible text and conversation history
+    U-->>E: next Customer reply
+    E-->>A: continue episode
+    A->>E: final natural-language RESPOND
+    E->>U: completed user-facing answer
+    U-->>E: exact STOP token
+    E->>V: terminal verification
+    V-->>E: terminal reward
+          </div>
+
+          <h3>训练视角的 role flip</h3>
+
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Chat role</th>
+                  <th>语义</th>
+                  <th>是否计算 SFT loss</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td><code>system</code></td>
+                  <td>真实 <code>LLMUserSimulationEnv.build_system_prompt(instruction)</code></td>
+                  <td>否</td>
+                </tr>
+                <tr>
+                  <td><code>user</code></td>
+                  <td>Agent 发给模拟用户的自然语言，包括初始客服问候</td>
+                  <td>否</td>
+                </tr>
+                <tr>
+                  <td>历史 <code>assistant</code></td>
+                  <td>历史 Customer 回复，只提供对话状态</td>
+                  <td>否</td>
+                </tr>
+                <tr>
+                  <td>最后 <code>assistant</code></td>
+                  <td>当前 Teacher 审核后的自然回复或精确 <code>###STOP###</code></td>
+                  <td>是，<code>last_assistant</code></td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <div class="callout danger">
+            <strong>常见误区</strong>
+            数据内容语义正确，不代表训练合同正确。若把 Agent/Customer role 放反、把 tool result 暴露给 Student，
+            或对所有历史 assistant turn 都计算 loss，模型学到的就不是线上条件分布。
+          </div>
+        </section>
+
+        <section id="pilot">
+          <p class="section-kicker">04 · Pilot Audit</p>
+          <h2>为什么先做 16 类危险边界，而不是直接全量生成</h2>
+
+          <p>
+            Pilot 不是随机抽样，而是 adversarial boundary suite：覆盖 progressive disclosure、unknown ID、
+            write confirmation、compound goal、fallback、missing user-facing output、temporal trigger、malformed recovery
+            与 persistent persona。每类采样 3 次，用来验证决策稳定性而不是自然频率。
+          </p>
+
+          <div class="mermaid">
+flowchart LR
+    V0["v1.0: high thinking; 1,600 tokens"] --> F0["30 / 48 accepted"]
+    F0 --> V1["v1.1: 4,096 tokens"]
+    V1 --> D1["格式稳定但推理成本不必要"]
+    D1 --> V2["v1.2: thinking off; temperature 0.8"]
+    V2 --> F2["语义漂移和 delayed STOP"]
+    F2 --> V3["v1.3: STOP and evidence rules"]
+    V3 --> F3["硬合同通过; 人工发现 eager disclosure"]
+    F3 --> V4["v1.4-v1.6: semantic gates and task 34 repair"]
+    V4 --> V7["v1.7: thinking off; T=0.3; top-p=0.9"]
+    V7 --> P["48 / 48; 0 leak; pilot passed"]
+          </div>
+
+          <div class="callout info">
+            <strong>版本语义不要混淆</strong>
+            图中的 v1.0–v1.7 是 pilot 输出文件/实验轮次；最终 v1.7 pilot 的
+            <code>prompt_version</code> 实际为 <code>tau-airline-usim-teacher-v1.4</code>。
+            observable-only full batch 使用 v1.5，加入 typed grounding 约束后的当前源码是 v1.6。
+            保留三者差异，是为了保证生成 provenance 可追溯，而不是把旧数据伪装成新 Prompt 产物。
+          </div>
+
+          <div class="metric-grid">
+            <div class="metric">
+              <span class="value">48 / 48</span>
+              <span class="label">JSON parse、accepted 与 expected decision match</span>
+            </div>
+            <div class="metric">
+              <span class="value">12 / 12</span>
+              <span class="label">STOP case 精确输出唯一 runtime token</span>
+            </div>
+            <div class="metric">
+              <span class="value">36 / 36</span>
+              <span class="label">CONTINUE case 推动真实未决目标</span>
+            </div>
+            <div class="metric">
+              <span class="value">25</span>
+              <span class="label">36 条 CONTINUE 中的不同规范化文本</span>
+            </div>
+          </div>
+
+          <h3>Thinking 关闭不是经验主义，而是失败归因</h3>
+          <p>
+            high thinking、1,600 output token 时，成功样本 completion P90 为 1,408、最大 1,574，
+            最终出现 12 个空 content 和 6 个截断 JSON。提高到 4,096 证明主要问题是 reasoning 挤占输出，
+            不是边界判断能力不足；但本任务只需要可审计分类与一句短回复，继续保留长 reasoning 没有收益证据。
+          </p>
+
+          <h3>低温不等于模板坍缩</h3>
+          <p>
+            temperature 从 0.8 降到 0.3，是为了固定事实和终止语义。多样性主要来自不同 state、persona、
+            active goal 与历史，而不是让同一决策边界高温漂移。STOP、本人口述 ID 和明确 confirmation 本来就应该稳定。
+          </p>
+
+          <div class="callout info">
+            <strong>Pilot 的反向价值</strong>
+            task 34 的人工 complete case 曾漏掉第三条 upcoming reservation，却写了三条票价的总额 1,016 美元。
+            Teacher 持续追问反而是正确的；回查数据库后补齐 <code>A90KR2 = 308</code>，说明 Pilot 同时在测模型、标签与 evaluator。
+          </div>
+        </section>
+
+        <section id="data">
+          <p class="section-kicker">05 · Data Lineage</p>
+          <h2>从 1,527 个候选状态到 1,463 条最终训练源</h2>
+
+          <div class="mermaid">
+flowchart TD
+    H["400 条公开 airline 历史轨迹"] --> C["重建 next-Customer 候选状态"]
+    C --> R["seen 1,527 / holdout 424"]
+    R --> U["移除 tool-only 后 runtime 不会调用 User 的状态"]
+    U --> G["raw generation pool: 1,513 / 420"]
+    G --> T["DeepSeek v1.5 observable-only generation"]
+    T --> A["decision audit and typed grounding audit"]
+    A --> K["保留当前可修复污染点"]
+    K --> X["切断已含错误 Customer 事实的下游 prefix"]
+    X --> F["final natural: 1,463 / holdout 353"]
+    F --> S["train 1,635 / eval 164"]
+          </div>
+
+          <h3>第一阶段：过滤 runtime 不可达状态</h3>
+          <p>
+            14 个 seen 与 4 个 holdout 状态发生在 tool-only turn 后。真实 runtime 此时不会调用 User Simulator；
+            role flip 后 prefix 也已以 <code>assistant</code> 结束，再追加 Customer target 会形成连续两个 assistant。
+          </p>
+
+          <h3>第二阶段：阻止错误历史沿 teacher forcing 扩散</h3>
+          <p>
+            15 个 seen 轨迹的历史 Customer 在某一轮引入了不存在的 payment ID、flight code、DOB、route/city 或错误 second-cheapest。
+            该轮当前输入仍可修复，所以保留；但后续状态已经把错误回复放进 observable history，必须切断。
+            seen 因此排除 50 个下游状态；holdout 从 2 个污染根后排除 67 个。
+          </p>
+
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>数据层</th>
+                  <th>数量</th>
+                  <th>决策分布</th>
+                  <th>用途</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td>raw full batch</td>
+                  <td>1,513</td>
+                  <td>原始 Teacher 分布</td>
+                  <td>不可变生成证据，不直接训练</td>
+                </tr>
+                <tr>
+                  <td>final natural</td>
+                  <td>1,463</td>
+                  <td>1,270 CONTINUE / 193 STOP</td>
+                  <td>审计后的自然源</td>
+                </tr>
+                <tr>
+                  <td>train</td>
+                  <td>1,635</td>
+                  <td>1,131 CONTINUE / 504 STOP</td>
+                  <td>trial00–06；STOP ×3</td>
+                </tr>
+                <tr>
+                  <td>eval</td>
+                  <td>164</td>
+                  <td>139 CONTINUE / 25 STOP</td>
+                  <td>trial07 自然分布</td>
+                </tr>
+                <tr>
+                  <td>unseen holdout</td>
+                  <td>353</td>
+                  <td>audit-only</td>
+                  <td>不发 Teacher，不进 SFT</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <h3>最终 provenance</h3>
+          <div class="metric-grid">
+            <div class="metric">
+              <span class="value">1,338</span>
+              <span class="label">DeepSeek v1.5 原样保留</span>
+            </div>
+            <div class="metric">
+              <span class="value">103</span>
+              <span class="label">human semantic audit</span>
+            </div>
+            <div class="metric">
+              <span class="value">22</span>
+              <span class="label">reviewed historical reference</span>
+            </div>
+            <div class="metric">
+              <span class="value">50</span>
+              <span class="label">切断的 seen contaminated downstream prefix</span>
+            </div>
+          </div>
+        </section>
+
+        <section id="grounding">
+          <p class="section-kicker">06 · Grounding Forensics</p>
+          <h2>0 privileged leak 为什么仍然不够</h2>
+
+          <p>
+            v1.5 做对了信息流控制：gold actions、tool results、reward 和 hidden IDs 都不进入 Teacher 请求。
+            这能阻止复制隐藏答案，但不能阻止 Teacher 自己创造一个新 ID，也不能阻止它把可见字符串换一种实体类型使用。
+          </p>
+
+          <div class="callout danger">
+            <strong>真实盲区</strong>
+            <code>OMAR1234</code>、<code>A1B2C3</code>、<code>RES12345</code> 并不在 privileged block，
+            所以旧 leak detector 不会报警；但它们同样是错误的世界状态。
+          </div>
+
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>第二轮发现</th>
+                  <th>Occurrence</th>
+                  <th>为什么普通字符串检查不够</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td>unsupported reservation ID</td>
+                  <td>24</td>
+                  <td>模型自造实体，不一定命中 privileged list</td>
+                </tr>
+                <tr>
+                  <td>Agent example copied as reservation</td>
+                  <td>11</td>
+                  <td><code>ABC123</code> 可见，但只是格式示例，不是用户事实</td>
+                </tr>
+                <tr>
+                  <td>placeholder identifier</td>
+                  <td>21</td>
+                  <td><code>...</code>、<code>[ID]</code>、<code>[date]</code> 会污染真实回复风格</td>
+                </tr>
+                <tr>
+                  <td>user ID mislabeled as reservation ID</td>
+                  <td>7</td>
+                  <td>字符串来源可见，但实体类型错误</td>
+                </tr>
+                <tr>
+                  <td>unsupported airport / city</td>
+                  <td>14</td>
+                  <td>instruction 只写 JFK 或 Texas，不能补出 LAX、Chicago、Dallas</td>
+                </tr>
+                <tr>
+                  <td>unsupported DOB year</td>
+                  <td>3</td>
+                  <td>输入没给 DOB，不能用常识补全</td>
+                </tr>
+                <tr>
+                  <td>flight/payment/other typed issue</td>
+                  <td>6</td>
+                  <td>需要按 flight、payment、user、reservation 分类型校验</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <p>
+            最终可审计 raw population 共 69 个 target 受影响、86 个 issue occurrence。当前 validator 采用
+            “observable source + entity type + exemplar semantics + route alias” 四层检查；Prompt v1.6 同时明确
+            Agent example 不是事实，缺 reservation ID 或 DOB 时必须诚实表达未知。
+          </p>
+
+          <div class="mermaid">
+flowchart LR
+    O["Observable scenario and history"] --> E["Extract typed entities"]
+    R["Teacher response"] --> C["Extract response claims"]
+    E --> M["Source and type matching"]
+    C --> M
+    X["Agent format examples"] --> M
+    M --> P{"Grounded?"}
+    P -->|"Yes"| S["Semantic and STOP gates"]
+    P -->|"No"| Q["Repair, quarantine, or context cut"]
+          </div>
+
+          <div class="callout">
+            <strong>审计原则</strong>
+            不能把人工修订伪装成纯 Teacher 结果。最终每条样本都有
+            <code>target_provenance</code>、audit version 与 semantic action，支持回溯和消融。
+          </div>
+        </section>
+
+        <section id="contract">
+          <p class="section-kicker">07 · Training Contract</p>
+          <h2>Student 学的是“下一句用户行为”，不是 Teacher 的审计 JSON</h2>
+
+          <div class="two-col">
+            <article class="card">
+              <h3>Teacher 富标签</h3>
+              <pre><code>{
+  "decision": "continue",
+  "is_over": false,
+  "termination_reason": "continue",
+  "goal_status": "in_progress",
+  "communication_status": "partial",
+  "response": "Please give me the exact total.",
+  "resolved_goals": ["both cancellations"],
+  "unresolved_goals": ["exact total cost"],
+  "evidence": [{"turn_index": 6, "fact": "..."}]
+}</code></pre>
+              <p>结构字段只用于 QA、归因、quarantine 与统计。</p>
+            </article>
+            <article class="card">
+              <h3>Student 纯文本 target</h3>
+              <pre><code>{"role": "assistant",
+ "content": "Please give me the exact total."}</code></pre>
+              <p>终止时唯一合法 target：</p>
+              <pre><code>{"role": "assistant",
+ "content": "###STOP###"}</code></pre>
+              <p>因此不需要修改现有 runtime parser。</p>
+            </article>
+          </div>
+
+          <p>只监督新生成的最后一个 assistant turn：</p>
+          <div class="formula">
+            \[
+            \mathcal{L}_{\text{SFT}}
+            =
+            -\sum_{i\in \mathcal{M}_{\text{last-assistant}}}
+            \log p_{\phi}(y_i\mid y_{&lt;i}, I, h_t, a_t).
+            \]
+          </div>
+
+          <p>
+            历史 Customer turn 没经过当前 Teacher 逐轮复核，若使用 all-assistant loss，
+            就会把旧 Simulator 的 delayed STOP、错误坚持和信息泄漏一起蒸馏进去。
+          </p>
+
+          <h3>1,463 条最终自然样本的独立离线审计</h3>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Invariant</th>
+                  <th>结果</th>
+                  <th>解释</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td>真实 runtime system prompt</td>
+                  <td>1,463 / 1,463 exact</td>
+                  <td>直接从当前运行时代码 AST 提取</td>
+                </tr>
+                <tr>
+                  <td>source role-flipped prefix</td>
+                  <td>1,463 / 1,463 exact</td>
+                  <td>训练不会漏轮或篡改历史</td>
+                </tr>
+                <tr>
+                  <td>role alternation / no tool role</td>
+                  <td>1,463 / 1,463</td>
+                  <td>符合线上 User Simulator 视角</td>
+                </tr>
+                <tr>
+                  <td>observable grounding / privileged leak</td>
+                  <td>0 / 0</td>
+                  <td>事实来源与信息权限均通过</td>
+                </tr>
+                <tr>
+                  <td>holdout in SFT</td>
+                  <td>0 / 353</td>
+                  <td>unseen task 保持隔离</td>
+                </tr>
+                <tr>
+                  <td>conservative token upper bound</td>
+                  <td>13,548 &lt; 16,384</td>
+                  <td>保守字节上界；训练时仍要记录真实 truncation</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <div class="callout info">
+            <strong>Qwen3 chat template 细节</strong>
+            关闭 thinking 后，generation prompt 仍可能渲染空 think block。实现不能简单按 prefix token 长度切 label；
+            当前通过“完整最后 assistant render”与“最后 assistant content 置空 render”的 token-level common prefix，
+            精确定位 target，并保留短 STOP 的监督 token。
+          </div>
+        </section>
+
+        <section id="cases">
+          <p class="section-kicker">08 · Case Studies</p>
+          <h2>同一个 STOP/CONTINUE 标签下，业务语义可能完全不同</h2>
+
+          <div class="case-grid">
+            <article class="case bad">
+              <span class="tag">Premature STOP · task 4</span>
+              <h3>前三项完成，不代表 gift-card payment 已完成</h3>
+              <p>Scenario 同时要求 cabin、baggage、passenger、payment。Agent 只确认前三项并问是否还需要帮助。</p>
+              <p><strong>错误：</strong><code>###STOP###</code></p>
+              <p><strong>正确：</strong>“Yes, I'd like to use my gift card for the payment.”</p>
+              <p>否则主 Policy 会学到部分 DB 动作完成即可终止。</p>
+            </article>
+
+            <article class="case good">
+              <span class="tag">Delayed STOP · task 9</span>
+              <h3>Agent 已明确给出 Mastercard 总额</h3>
+              <p>最新文本包含 “Total amount charged to your Mastercard: $2,033”。</p>
+              <p><strong>错误：</strong>再次询问已经给出的总额。</p>
+              <p><strong>正确：</strong><code>###STOP###</code></p>
+              <p>但相邻状态若没有 2,033 美元，仍必须 CONTINUE；不能按 task 粗标。</p>
+            </article>
+
+            <article class="case bad">
+              <span class="tag">Grounding · Agent exemplar</span>
+              <h3><code>ABC123</code> 是格式示例，不是 reservation</h3>
+              <p>Agent 说“reservation ID looks like ABC123”只是教用户识别格式。</p>
+              <p><strong>错误：</strong>“My reservation is ABC123.”</p>
+              <p><strong>正确：</strong>说明当前不记得 ID，请求按账户或姓名查找。</p>
+              <p>这是 observable 字符串，但不是 observable fact。</p>
+            </article>
+
+            <article class="case bad">
+              <span class="tag">Same-decision error · task 11</span>
+              <h3>CONTINUE 正确，金额阈值逻辑仍可写反</h3>
+              <p>fallback 条件要求证书金额超过 100 美元时改用其他支付方式。</p>
+              <p><strong>错误：</strong>把 125 美元解释成低于 100 美元。</p>
+              <p><strong>正确：</strong>承认超过阈值并触发指定 fallback。</p>
+              <p>decision-match 指标无法发现这种业务错误。</p>
+            </article>
+
+            <article class="case bad">
+              <span class="tag">Ranking semantics · task 25</span>
+              <h3>second-cheapest 不是 cheapest</h3>
+              <p>候选组合中，<code>HAT069 + HAT258</code> 总价 290 美元是目标 second-cheapest；错误 target 却选择 <code>HAT023</code> 的最低价。</p>
+              <p>两者都可能是 CONTINUE，但会把错误偏好写进训练环境。</p>
+            </article>
+
+            <article class="case good">
+              <span class="tag">Communication gap · task 34</span>
+              <h3>DB 已完成，但精确总价未向用户可读地告知</h3>
+              <p>若 Agent 输出 malformed total，persistent 用户继续要求一个明确数字是正确行为。</p>
+              <p>完整事实是 402 + 306 + 308 = 1,016 美元；只有三条 upcoming reservation 和总额全部告知后才 STOP。</p>
+            </article>
+          </div>
+
+          <details>
+            <summary>为什么 STOP 不等于 success？</summary>
+            <div>
+              <p>最终 193 个 STOP 中，175 个是 <code>goal_satisfied</code>，8 个是 <code>cannot_continue</code>，10 个是 <code>goal_failed</code>。用户在无法继续或 fallback 全部失败时也需要结束对话，但 terminal verifier 仍可给 0。</p>
+            </div>
+          </details>
+
+          <details>
+            <summary>为什么不能把所有长循环都标 STOP？</summary>
+            <div>
+              <p>长度只是症状。task 34 在 Agent 连续返回乱码总价时继续追问，体现了 persistent persona 和未决 communication goal。强行 STOP 会让 Policy 学会 malformed final answer 也能结束。</p>
+            </div>
+          </details>
+        </section>
+
+        <section id="forcing">
+          <p class="section-kicker">09 · Residual Risk</p>
+          <h2>单步对齐通过后，最大的剩余风险是 Student 自生成 history</h2>
+
+          <p>
+            当前 SFT 样本在历史 prefix 上学习下一轮用户回复。部署时，第 \(t+1\) 轮看到的历史包含
+            Student 自己在第 \(t\) 轮的输出，因此训练状态分布与上线 occupancy 不完全相同：
+          </p>
+
+          <div class="formula">
+            \[
+            \mathcal{D}_{\text{SFT}}(h_t)
+            \neq
+            d^{\pi_{\text{agent}},U_{\phi}}(h_t).
+            \]
+          </div>
+
+          <div class="metric-grid">
+            <div class="metric">
+              <span class="value">1,148</span>
+              <span class="label">能够链接到下一历史状态的自然样本</span>
+            </div>
+            <div class="metric">
+              <span class="value">46</span>
+              <span class="label">Teacher target 能逐字重建下一历史 prefix</span>
+            </div>
+            <div class="metric">
+              <span class="value">179</span>
+              <span class="label">自然 target 与历史 reference 完全相等</span>
+            </div>
+            <div class="metric">
+              <span class="value">待测</span>
+              <span class="label">Student-prefix trajectory consistency</span>
+            </div>
+          </div>
+
+          <p>
+            46/1,148 不是 accuracy：新 Teacher 本来就应修正旧 Simulator 的错误，因此不同并不等于错。
+            它量化的是“后续训练 prefix 大多没有由新 target 自洽地产生”，提醒我们不能从单轮合同推导多轮稳定性。
+          </p>
+
+          <div class="mermaid">
+flowchart LR
+    H["Historical prefix h_t"] --> T["Teacher target u_t"]
+    T --> L["One-step SFT loss"]
+    H --> N["Historical next prefix h_t+1"]
+    T -.->|"usually not exact reconstruction"| N
+    M["Fine-tuned Student"] --> S["Student-generated prefix"]
+    S --> R["New rollout states"]
+    R --> E["Trajectory consistency evaluation"]
+          </div>
+
+          <h3>必须补的 Student-prefix 验收</h3>
+          <ol>
+            <li><strong>固定 Agent script：</strong>控制 Agent 信息披露顺序，让 Student 连续响应多轮。</li>
+            <li><strong>事实 ledger：</strong>追踪 reservation、user/payment ID、DOB、航班、金额和已完成目标。</li>
+            <li><strong>跨轮约束：</strong>已披露信息不能漂移，未知信息不能突然变已知，完成目标不能反复索要。</li>
+            <li><strong>termination trace：</strong>分别统计 premature STOP、delayed STOP、courtesy tail 与 max-turn。</li>
+            <li><strong>分支恢复：</strong>Agent 给出错误、澄清或 fallback 时，User persona 和偏好仍应保持。</li>
+          </ol>
+
+          <div class="callout warn">
+            <strong>为什么暂时不做 history summary</strong>
+            当前样本最多 27 条 message，保守序列上界 13,548，低于 max length 16,384；核心难点不是塞不下，
+            而是总结器可能丢失 reservation、金额、fallback 条件和“已告知/未告知”状态。先验证无 summary 的多轮一致性；
+            只有真实 rollout 出现长度瓶颈，再引入结构化、可校验的 state summary，而不是自由文本压缩。
+          </div>
+        </section>
+
+        <section id="metrics">
+          <p class="section-kicker">10 · Evaluation</p>
+          <h2>离线指标只是门禁，在线交叉实验才决定是否放行</h2>
+
+          <h3>Termination 不能只看 accuracy</h3>
+          <div class="formula">
+            \[
+            \text{STOP Precision}
+            =
+            \frac{\mathrm{TP}_{\text{stop}}}
+            {\mathrm{TP}_{\text{stop}}+\mathrm{FP}_{\text{stop}}},
+            \qquad
+            \text{STOP Recall}
+            =
+            \frac{\mathrm{TP}_{\text{stop}}}
+            {\mathrm{TP}_{\text{stop}}+\mathrm{FN}_{\text{stop}}}.
+            \]
+          </div>
+
+          <p>
+            第一阶段优先 precision，因为 premature STOP 会永久截断可完成轨迹并改变状态访问分布；
+            recall 稍低主要增加成本，之后再用 complete-boundary 样本降低 late-STOP latency。
+          </p>
+
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>层级</th>
+                  <th>指标</th>
+                  <th>回答的问题</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td>单轮合同</td>
+                  <td>parse、role、grounding、STOP exact、semantic gate</td>
+                  <td>样本是否可训练且不泄漏</td>
+                </tr>
+                <tr>
+                  <td>Student-prefix 多轮</td>
+                  <td>fact drift、re-ask、persona consistency、STOP latency</td>
+                  <td>模型是否在自己的 history 上稳定</td>
+                </tr>
+                <tr>
+                  <td>Frozen-policy User A/B</td>
+                  <td>terminal success、post-tool turns、max-turn、tokens</td>
+                  <td>只替换环境后轨迹是否更干净</td>
+                </tr>
+                <tr>
+                  <td>Policy training</td>
+                  <td>reward、pass@k、pass^k、trajectory cost</td>
+                  <td>是否真的提高 Agent 学习效率和能力</td>
+                </tr>
+                <tr>
+                  <td>Cross-simulator</td>
+                  <td>原 User / 新 User / 强 User / 真人矩阵</td>
+                  <td>是否只是 co-adaptation 或任务变简单</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <div class="mermaid">
+flowchart TD
+    D["Final SFT data"] --> L["Qwen3-14B LoRA smoke test"]
+    L --> P["Student-prefix consistency gate"]
+    P --> Q{"Fact and termination gates pass?"}
+    Q -->|"No"| R["Error bucket and targeted data repair"]
+    R --> L
+    Q -->|"Yes"| A["Frozen Agent policy A/B"]
+    A --> C["Cross-simulator evaluation"]
+    C --> G{"Reward, latency, and robustness improve?"}
+    G -->|"No"| X["Diagnose Policy, User, tool context, or verifier"]
+    G -->|"Yes"| M["Freeze Simulator for main Agentic RL"]
+          </div>
+
+          <h3>可信消融</h3>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>组</th>
+                  <th>User 模型</th>
+                  <th>数据/门禁</th>
+                  <th>目的</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td>A</td>
+                  <td>原 Qwen3-14B</td>
+                  <td>无新 SFT</td>
+                  <td>runtime baseline</td>
+                </tr>
+                <tr>
+                  <td>B</td>
+                  <td>SFT Qwen3-14B</td>
+                  <td>自然历史，无 typed gate</td>
+                  <td>普通 SFT 增益</td>
+                </tr>
+                <tr>
+                  <td>C</td>
+                  <td>SFT Qwen3-14B</td>
+                  <td>curated STOP boundary</td>
+                  <td>终止边界数据价值</td>
+                </tr>
+                <tr>
+                  <td>D</td>
+                  <td>SFT Qwen3-14B</td>
+                  <td>最终 1,463 + typed/semantic gate</td>
+                  <td>完整方案</td>
+                </tr>
+                <tr>
+                  <td>E</td>
+                  <td>DeepSeek online</td>
+                  <td>Teacher contract</td>
+                  <td>环境上限参考，不作为部署环境</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <section id="interview">
+          <p class="section-kicker">11 · Interview Narrative</p>
+          <h2>面试时怎样把这项工作讲出算法与工程深度</h2>
+
+          <h3>30 秒版本</h3>
+          <div class="quote">
+            User Simulator 不是陪 Agent 聊天的辅助模型，而是多轮 RL 的 observation generator 和 termination policy。
+            它会改变 episode 长度、occupancy distribution、reward 结算时机和 GRPO 的组内方差。我先区分 DB 完成与用户可见完成，
+            再用 16 类 adversarial boundary case 校准 STOP/CONTINUE；full batch 后又通过 typed grounding 发现旧 leak gate 看不到的
+            自造 ID、Agent exemplar copying、实体类型混淆与 route/city 幻觉。最终 1,463 条数据实现单步 runtime 对齐，但我仍把 Student-prefix rollout
+            和 cross-simulator A/B 作为放行条件，没有把静态审计包装成在线收益。
+          </div>
+
+          <h3>三分钟项目闭环</h3>
+          <ol>
+            <li><strong>现象：</strong>业务完成后 User 不 STOP，或 Agent/User 在工具阶段后循环。</li>
+            <li><strong>拆因：</strong>delayed STOP、Agent communication gap、malformed answer、fallback、verifier gap 不能混为一类。</li>
+            <li><strong>环境穿刺：</strong>User 不看 tool result，只有 exact STOP 才触发 terminal verifier。</li>
+            <li><strong>数据审计：</strong>80 条主 Agent 成功 SFT 没有 STOP；400 条历史中 STOP 与 reward 不等价。</li>
+            <li><strong>Teacher 管线：</strong>observable-only DeepSeek 富标签，Student 只学自然回复；privileged 信息只供本地 QA。</li>
+            <li><strong>Pilot：</strong>从 thinking 截断、高温漂移、人工 case 错误迭代到 48/48。</li>
+            <li><strong>Full 穿刺：</strong>发现 69 个 grounding-affected target、57 条同 decision 语义重写、50 个污染下游 prefix。</li>
+            <li><strong>边界：</strong>1,463 条离线可训练；LoRA、多轮 Student-prefix 和主 Agent 收益待实验。</li>
+          </ol>
+
+          <details open>
+            <summary>追问：这不就是调 Prompt 吗？</summary>
+            <div>
+              <p>
+                Prompt 只是把环境假设表达给 Teacher。算法含量在于：区分 \(z_t^{env}\) 与 \(z_t^{comm}\)，
+                把 STOP 建模为 termination hazard，明确 Simulator 对 occupancy 和 advantage variance 的影响，
+                并把信息权限、role flip、loss mask、事实接地、prefix contamination、holdout 隔离和 cross-play 变成可执行合同。
+              </p>
+            </div>
+          </details>
+
+          <details>
+            <summary>追问：为什么不直接用规则在 verifier success 时 STOP？</summary>
+            <div>
+              <p>
+                verifier success 与用户可见完成不是同一事件。DB 成功但 total savings 没说，用户仍应继续；
+                Agent 声称成功但 DB 失败，User 可能停止、verifier 仍应给 0。把 verifier-ready 注入 User observation 会泄漏真值并改变 benchmark。
+              </p>
+            </div>
+          </details>
+
+          <details>
+            <summary>追问：为什么不直接用更强模型在线当 User？</summary>
+            <div>
+              <p>
+                强模型适合作为 Teacher 和 cross-eval 上限，但在线 RL 调用量大，成本、延迟、版本漂移和供应稳定性会让环境非平稳。
+                微调固定 Qwen3-14B 便于控制 MDP；强 Simulator 保留为外部评估，防止 co-adaptation。
+              </p>
+            </div>
+          </details>
+
+          <details>
+            <summary>追问：怎样证明微调后的 User 真的有价值？</summary>
+            <div>
+              <p>
+                先做 Student-prefix consistency；再固定 Policy 只替换 User，隔离环境效果；随后固定 User 分别训练 Policy，
+                做 train-simulator × eval-simulator 交叉矩阵。只有 unseen task 和异构 Simulator 上仍提升，才是 Agent 能力提升。
+              </p>
+            </div>
+          </details>
+
+          <details>
+            <summary>追问：为什么当前不做 history summary？</summary>
+            <div>
+              <p>
+                当前最大保守序列上界 13,548，小于 16,384，长度并非已证实瓶颈。自由文本 summary 反而可能丢失金额、
+                reservation、fallback 和 communication-completeness。先在完整历史上验证微调模型；若真实 rollout 出现截断，
+                再引入 schema 化 state summary，并用原 history 做事实等价校验。
+              </p>
+            </div>
+          </details>
+
+          <h3>STAR 版本</h3>
+          <div class="table-wrap">
+            <table>
+              <tbody>
+                <tr>
+                  <th>Situation</th>
+                  <td>多轮 airline RL 出现 delayed STOP、post-tool loop 与 malformed tail。</td>
+                </tr>
+                <tr>
+                  <th>Task</th>
+                  <td>构建不掩盖 Agent failure、可与 runtime 直接对齐的 User Simulator 微调数据。</td>
+                </tr>
+                <tr>
+                  <th>Action</th>
+                  <td>环境穿刺、16-case Pilot、observable-only Teacher、typed grounding、semantic audit、prefix cut、last-assistant loss。</td>
+                </tr>
+                <tr>
+                  <th>Result</th>
+                  <td>Pilot 48/48；最终自然训练源 1,463/1,463 离线合同通过；train/eval 1,635/164；在线收益保持未执行。</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <section id="evidence">
+          <p class="section-kicker">12 · Evidence</p>
+          <h2>证据、代码与可复现入口</h2>
+
+          <div class="two-col">
+            <article class="card">
+              <h3>文档</h3>
+              <ul>
+                <li><a href="./user-simulator-data/PILOT_AUDIT.md">Pilot 真实采样审计</a></li>
+                <li><a href="./user-simulator-data/FULL_GENERATION_AUDIT.md">Full generation 与 audit-v2</a></li>
+                <li><a href="./user-simulator-data/README.md">数据方案与实现说明</a></li>
+                <li><a href="./user-simulator-interview/README.md">完整面试问答稿</a></li>
+              </ul>
+            </article>
+            <article class="card">
+              <h3>实现</h3>
+              <ul>
+                <li><a href="../agentic-grpo-longhorizon/src/user_simulator_data/contracts.py">Teacher contract 与 typed grounding</a></li>
+                <li><a href="../agentic-grpo-longhorizon/src/user_simulator_data/case_builder.py">role flip 与历史污染 prefix cut</a></li>
+                <li><a href="../agentic-grpo-longhorizon/src/user_simulator_data/prompts.py">observable-only Teacher Prompt</a></li>
+                <li><a href="../agentic-grpo-longhorizon/scripts/train/user_simulator/audit_sft_alignment.py">独立离线 alignment audit</a></li>
+              </ul>
+            </article>
+          </div>
+
+          <h3>最终产物 SHA256</h3>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Artifact</th>
+                  <th>SHA256</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td>audited natural source</td>
+                  <td class="hash">7b69d546a353bd805554e3044bcd252594284529aef501c0b01d714b7b938323</td>
+                </tr>
+                <tr>
+                  <td>rich train</td>
+                  <td class="hash">5e5077273e01fcc5a1c7eefe86e0eaebed109bfe20dd666ffd849a758106c372</td>
+                </tr>
+                <tr>
+                  <td>rich eval</td>
+                  <td class="hash">5020fddcab01b2cefa846cc0aadbc1ba520037be161f43b5cb2bd298daec971e</td>
+                </tr>
+                <tr>
+                  <td>TRL train</td>
+                  <td class="hash">becb64757589fd6890b03ac01ef870a7016d22edf3252c88d900ae0a900df24d</td>
+                </tr>
+                <tr>
+                  <td>TRL eval</td>
+                  <td class="hash">89be5d093484591ad804878d7e00b4575d4fcb1ed70a237893601d6fb3e86492</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <div class="quote">
+            这段工作的核心不是“用 DeepSeek 生成了一批用户回复”，而是把 User Simulator 当作多轮 RL 环境来设计：
+            先定义可观测性与终止语义，再区分 User、Policy 和 verifier 的责任；用 adversarial boundary case、
+            typed grounding、可追溯 provenance 与 Student-prefix 评估，让环境既不会过度配合降低任务难度，
+            也不会用无意义坚持拖长轨迹。
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <footer class="footer">
+      <p>基于 2026-08-04 本地代码与数据审计结果整理。所有“通过”均限定在对应验证范围内。</p>
+    </footer>
+  </div>
+
+  <script type="module">
+    import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs";
+    mermaid.initialize({
+      startOnLoad: true,
+      securityLevel: "strict",
+      theme: "base",
+      themeVariables: {
+        primaryColor: "#e6f4e9",
+        primaryTextColor: "#10231d",
+        primaryBorderColor: "#176c4a",
+        lineColor: "#55766a",
+        secondaryColor: "#edf6fc",
+        tertiaryColor: "#fff3d9",
+        fontFamily: "-apple-system, BlinkMacSystemFont, Segoe UI, PingFang SC, sans-serif"
+      },
+      flowchart: {
+        curve: "basis",
+        htmlLabels: false
+      },
+      sequence: {
+        diagramMarginX: 30,
+        diagramMarginY: 10,
+        actorMargin: 45,
+        messageMargin: 32
+      }
+    });
+  </script>
+</body>
+</html>

@@ -8,6 +8,7 @@ from src.user_simulator_data.contracts import (
     build_sft_record,
     parse_teacher_decision,
     validate_response_constraints,
+    validate_observable_grounding_text,
     validate_teacher_decision,
 )
 
@@ -135,6 +136,91 @@ class ContractTests(unittest.TestCase):
     )
 
         self.assertIn("privileged_entity_leak:ZXCV12", issues)
+
+    def test_grounding_rejects_invented_and_example_identifiers(self):
+        scenario = "You are mia_li_3668 and do not remember the reservation ID."
+        history = [
+            {
+                "role": "agent",
+                "content": "Please provide a six-character code like ABC123.",
+            }
+        ]
+
+        invented = validate_observable_grounding_text(
+            "My reservation ID is MADEUP7.",
+            scenario=scenario,
+            observable_history=history,
+        )
+        copied_example = validate_observable_grounding_text(
+            "My reservation ID is ABC123.",
+            scenario=scenario,
+            observable_history=history,
+        )
+        wrong_type = validate_observable_grounding_text(
+            "My reservation ID is mia_li_3668.",
+            scenario=scenario,
+            observable_history=history,
+        )
+
+        self.assertIn("unsupported_reservation_id:MADEUP7", invented)
+        self.assertIn(
+            "agent_example_copied_as_reservation_id:ABC123", copied_example
+        )
+        self.assertIn(
+            "user_id_mislabeled_as_reservation_id:mia_li_3668", wrong_type
+        )
+
+    def test_grounding_allows_observable_identifier_and_missing_id_reply(self):
+        scenario = "You are Mia and your reservation is VA5SGQ."
+        history = [{"role": "agent", "content": "What is the reservation ID?"}]
+
+        supported = validate_observable_grounding_text(
+            "My reservation ID is VA5SGQ.",
+            scenario=scenario,
+            observable_history=history,
+        )
+        unavailable = validate_observable_grounding_text(
+            "The reservation ID is unavailable. Can you use my profile?",
+            scenario=scenario,
+            observable_history=history,
+        )
+
+        self.assertEqual(supported, [])
+        self.assertEqual(unavailable, [])
+
+    def test_grounding_rejects_unsupported_dob_payment_id_and_placeholders(self):
+        scenario = "Book a flight for Aarav and use a payment method from the profile."
+        history = [{"role": "agent", "content": "Please provide the missing fields."}]
+
+        issues = validate_observable_grounding_text(
+            "My DOB is 1990-04-12, my payment ID is 987654321, the date is [date], "
+            "and the reservation ID for this trip is ... let me check.",
+            scenario=scenario,
+            observable_history=history,
+        )
+
+        self.assertIn("unsupported_date_of_birth_year:1990", issues)
+        self.assertIn("unsupported_payment_id:987654321", issues)
+        self.assertIn("template_placeholder_in_response", issues)
+        self.assertIn("placeholder_identifier:untyped", issues)
+
+    def test_grounding_checks_airport_code_and_city_aliases(self):
+        unsupported = validate_observable_grounding_text(
+            "I'm flying to Los Angeles (LAX).",
+            scenario="Change my May 17 flight from JFK.",
+        )
+        supported_alias = validate_observable_grounding_text(
+            "I need to leave from Newark.",
+            scenario="Change my flight from EWR.",
+        )
+        person_name = validate_observable_grounding_text(
+            "My name is Mia Li.",
+            scenario="You are mia_li_3668.",
+        )
+
+        self.assertIn("unsupported_airport_or_city:LAX", unsupported)
+        self.assertEqual(supported_alias, [])
+        self.assertEqual(person_name, [])
 
     def test_case_constraints_gate_semantics_without_forcing_one_wording(self):
         decision = TeacherDecision.from_mapping(
