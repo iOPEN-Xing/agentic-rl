@@ -4,7 +4,7 @@
 > - 主 Policy：Qwen3-8B
 > - User Simulator：Qwen3-14B
 > - Teacher：DeepSeek V4 Flash
-> 当前状态：16 个关键边界 case × 3 次真实采样的 pilot 已 48/48 通过；按阶段要求，1,527-case 全量生成和 Qwen3-14B 微调尚未执行。
+> - 当前状态：16 个关键边界 case × 3 次真实采样的 pilot 已 48/48 通过；按阶段要求，1,527-case 全量生成和 Qwen3-14B 微调尚未执行。
 
 这份 README 不是把一次 Prompt 调优包装成算法工作，而是说明：在多轮 Agentic RL 中，User Simulator 为什么是环境动力学的一部分，它会怎样决定训练上限，以及如何从真实坏例、数据合同、Prompt Engineering、可执行门禁和在线评估五个层面把它做对。
 
@@ -209,6 +209,128 @@ P_{\phi}(u_{t+1}\mid I,h_t,a_t)
 - terminal verifier success 也不能自动推导“最后一次 Agent 回复已经让用户满意”。
 
 所以数据构造时必须重新判断，而不是复制历史标签。
+
+### 3.5 更换 User Simulator 不是“增加一点噪声”，而是在换训练目标
+
+固定 User Simulator 参数为 \(\phi\)、Policy 参数为 \(\theta\)。一条多轮轨迹的分布可以简写为：
+
+\[
+p_{\theta,\phi}(\tau)
+=
+p(s_0)
+\prod_t
+\pi_\theta(a_t\mid h_t)
+P_{tool}(x_{t+1}\mid s_t,a_t)
+P_\phi(u_{t+1}\mid I,h_t,a_t)
+\]
+
+Policy 实际优化的是：
+
+\[
+J(\theta;\phi)
+=
+\mathbb E_{\tau\sim p_{\theta,\phi}}[R(\tau)]
+\]
+
+这里分号很重要：即使 Policy 不变，Simulator 的模型、Prompt、temperature、STOP 倾向或披露策略一变，\(J(\theta;\phi)\) 对应的环境也变了。它会进一步改变 occupancy measure：
+
+\[
+d^{\pi_\theta,\phi}(h)
+=
+P_{\pi_\theta,P_\phi}(h_t=h)
+\]
+
+例如一个总是主动给出 reservation ID 的 Simulator，会让“Agent 主动查询账户”状态几乎消失；一个遇到 basic economy 就放弃的 Simulator，会让 cancellation fallback 状态没有训练覆盖；一个完成后仍寒暄三轮的 Simulator，则会过度采样 post-completion 状态。
+
+所以我的判断不是“User Simulator 越强越好”，而是：
+
+> Simulator 必须在当前业务约束下足够忠实、可控且有覆盖。更会猜、更配合、更能替 Agent 补全信息的模型，可能反而定义了一个更容易、但错误的训练 MDP。
+
+### 3.6 STOP 可以建模成 learned termination hazard
+
+把 User 在第 \(t\) 轮停止的条件概率写成：
+
+\[
+q_\phi(t)
+=
+P_\phi(\texttt{STOP}\mid I,h_t,a_t)
+\]
+
+那么 episode 在第 \(t\) 轮以后仍存活的概率近似为：
+
+\[
+P(T>t)
+=
+\prod_{k=1}^{t}\left(1-q_\phi(k)\right)
+\]
+
+这能把 premature STOP 和 delayed STOP 统一理解为 termination hazard 的校准问题：
+
+- hazard 左移：目标还没完成就停止，截断本来可成功的 trajectory；
+- hazard 右移：目标已经完成仍不停止，增加无效 horizon、token 和后续退化概率；
+- hazard 对错误特征敏感：只要 Agent 说 `done` 就停止，会把自我声明当成业务真值；
+- hazard 对必要特征不敏感：看不出 total savings 缺失，会掩盖 communication gap。
+
+这也是为什么我不会只报平均对话轮数。轮数下降可能来自正确的 late-STOP 修复，也可能来自更严重的 premature STOP。必须联合看 STOP precision、STOP recall、late-STOP latency 和 terminal success。
+
+### 3.7 它还会污染 GRPO 的组内相对优势
+
+同一 task 做 \(G\) 条 rollout 时，标准 group-relative advantage 常写成：
+
+\[
+\hat A_i
+=
+\frac{R_i-\operatorname{mean}(R_{1:G})}
+{\operatorname{std}(R_{1:G})+\epsilon}
+\]
+
+但当前多轮环境中的 \(R_i\) 同时依赖：
+
+```text
+Policy action sampling
++ User Simulator response sampling
++ tool / environment transition
++ termination timing
+```
+
+如果 User Simulator 高温漂移，同一组里某条轨迹成功，可能不是 Agent action 更好，而是 User 恰好提前给了 ID、容忍了模糊回答或触发了更容易的分支。此时 \(\hat A_i\) 会把一部分环境随机性误当成 Policy 相对质量，增大 credit noise。
+
+因此主算法对比时，我会固定：
+
+- Simulator checkpoint、Prompt version 和 chat template；
+- temperature/top-p、thinking、max tokens 和 STOP parser；
+- task split、rollout 数和可用时的 User seed；
+- tool/database 初态与 max-turn 预算。
+
+低温不是为了把 User 变成完全确定的规则机，而是先降低不可归因的环境方差。高温、多 persona、对抗式回复应该放进独立 robustness 实验，不应在不同 RL 方法之间偷偷变化。评估阶段若后端支持 paired/common-random-number 设计，应该让不同 Policy 尽量面对同一组 User 随机条件，再做 task-level bootstrap。
+
+### 3.8 User Simulator 的优化目标不能直接设成 Agent reward 最大
+
+如果把“让当前 Policy 成功率最高”作为 Simulator 目标，最容易学出的不是现实用户，而是 cooperative shortcut：主动披露、接受含糊回答、忽略漏项、过早 STOP。这会造成 Policy–Simulator 共适应。
+
+更合理的离线目标是多约束的：
+
+\[
+\mathcal L_{sim}
+=
+\lambda_g\mathcal L_{goal}
++\lambda_s\mathcal L_{stop}
++\lambda_f\mathcal L_{factuality}
++\lambda_d\mathcal L_{disclosure}
++\lambda_p\mathcal L_{persona}
+\]
+
+其中：
+
+- \(\mathcal L_{goal}\)：显式、条件、时序子目标是否持续一致；
+- \(\mathcal L_{stop}\)：终止边界是否校准，且 precision 优先；
+- \(\mathcal L_{factuality}\)：是否虚构或泄漏不可见实体；
+- \(\mathcal L_{disclosure}\)：是否按当前问题渐进披露；
+- \(\mathcal L_{persona}\)：reactive、persistent、terse 等行为是否稳定。
+
+这里是监督目标的概念分解，不代表当前代码已经实现五个独立的可微 loss。现阶段 Student 仍使用 `last_assistant` token-level SFT loss；上述约束分别通过 Teacher 标签、case-specific gate、quarantine 和离线/在线指标落地。未来只有在引入多任务分类头、偏好优化或显式 simulator reward 时，才需要把它们正式写成加权训练损失。
+
+在线价值则通过 frozen-policy A/B 和 cross-simulator matrix 验证，而不是把 Agent reward 直接反向定义成 User 的训练标签。这个职责边界是整个方案最重要的理论底座。
 
 ---
 
@@ -1331,23 +1453,126 @@ Pilot 必须：
 
 ---
 
-## 15. 面试项目叙事模板：为什么做、怎么做、结果是什么
+## 15. 一场完整的模拟面试：从现象一直追到 RL 本质
 
-### 15.1 为什么做
+这部分不是另一套要背的答案，而是演示如何把前面的材料组织成一次真实技术面。我的建议是先讲最短闭环，让面试官沿着数据、算法、工程和评估逐层追问；不要上来把所有公式和 case 一次讲完。
+
+### 15.1 面试官：先用三分钟介绍一下这段工作
+
+> 我做的是 τ-bench Airline 多轮 RL 里的 User Simulator 数据和训练方案。表面现象是工具任务完成后，User 有时迟迟不输出 `###STOP###`，导致 Agent/User 继续循环、terminal reward 延迟，甚至把本来成功的轨迹拖进 malformed tail。
+>
+> 我没有直接把长轨迹末尾都标成 STOP，而是先穿刺环境语义：User 只能看到 instruction、Agent 自然语言和自身历史，看不到 tool result；只有 STOP 才触发 terminal verifier。然后我发现 task 34 里很多继续追问是合理的——DB action 做完了，但 Agent 没有说出精确 total，甚至回答乱码。这里真正的问题是 Policy communication 或 verifier coverage，不是 User 不会结束。
+>
+> 数据上，现有 80 条成功 Policy SFT 没有 terminal User turn，官方 400 条历史轨迹里 STOP 和 reward 又明显不等价，所以不能直接反转或复制标签。我把错误拆成 delayed STOP、premature STOP、partial goal、fallback、false-complete、malformed recovery 和 evaluator gap，基于 task 0/1/2/4/34 构造 16 类边界 case。
+>
+> 实现上让 DeepSeek V4 Flash Teacher 输出富 JSON，Student 只学一条自然回复或精确 STOP；observable 与 privileged audit 分层，并通过实体泄漏和 case-specific semantic gate 做自动隔离。真实 pilot 经历七轮迭代，最终 non-thinking、temperature 0.3、top-p 0.9 下 48/48 accepted，12 个 STOP 和 36 个 CONTINUE 全部符合预期，0 privileged leak。现在我只把它定义为“数据合同和 pilot 已通过”，还没有把未执行的全量微调或主 Policy 收益包装成结果。
+
+### 15.2 面试官：这不就是调了一个 Prompt 吗？算法含量在哪里？
+
+> 如果只是加一句“任务完成就 STOP”，那确实只是 Prompt 调优。这个工作的核心是先定义了一个 learned environment 的正确监督对象。
+>
+> 第一，我把 \(z_t^{env}\) 和 \(z_t^{comm}\) 分开：数据库完成不代表用户可见目标完成。第二，我把 STOP 当成 termination hazard，而不是普通回复 token；premature 和 delayed 会改变 trajectory horizon 与 reward 结算。第三，我显式处理 Simulator 对 occupancy distribution 和 GRPO 组内方差的影响。第四，数据合同用了 asymmetric information：Teacher 可借助 privileged reference 审计，但 Student observation 必须与 runtime 完全一致。
+>
+> Prompt 只是把这些算法和环境假设表达给 Teacher；真正让方案可训练、可回归的是 case construction、role flip、last-assistant loss mask、leak detector、semantic gate、holdout 隔离和 cross-simulator 评估。
+
+### 15.3 面试官：你怎么判断一条循环到底该修 User，还是该修 Agent？
+
+> 我看三个状态，而不是看对话长度：
+>
+> 1. 环境动作是否真实完成；
+> 2. Agent 是否把用户要求的结果完整、可读地告知；
+> 3. instruction 中是否还有 active explicit、conditional 或 temporal goal。
+>
+> 如果 env complete、communication complete、User 仍继续，这是 delayed STOP；如果 env complete 但 total savings 没说，User 继续是正确的；如果 Agent 文本 malformed，则主要修 Policy/context；如果 instruction 要求 total、verifier 却没检查，则是 evaluator gap。
+>
+> task 34 是最典型的例子。Agent 连续输出损坏的 `total_cost`，persistent 用户要求一个明确数字不是死循环，而是在暴露 Policy degeneration。把它强标 STOP，只会让 User 替 Agent 错误和 verifier 漏洞兜底。
+
+### 15.4 面试官：为什么不用现成轨迹直接微调？
+
+> 我做了两个审计。第一，80 条筛选后的成功 Policy SFT 只覆盖 19 个 task，而且 wrapper 在 terminal User observation 上只记 reward、不 append message，所以 STOP label 是 0。第二，官方 400 条历史中，reward=1 有 184 条，但只有 92 条带 STOP；reward=0 的 216 条中反而有 171 条带 STOP。
+>
+> 这说明轨迹 success、对话 termination 和用户满意边界是三个不同概念。历史轨迹可以提供 state coverage，但 next User label 必须重判；否则会蒸馏旧 Simulator 的 delayed STOP、错误放弃和泄漏行为。
+
+### 15.5 面试官：为什么用 DeepSeek Teacher？为什么后来又关 Thinking？
+
+> Teacher 的作用是低频地产生可审计标签，不是在线充当环境。强 Teacher 能展开 compound goal、conditional fallback 和 user-facing output，再把监督蒸馏到固定 Qwen3-14B，成本和版本都更可控。
+>
+> Thinking 是否开启我没有凭感觉决定。v1.0 在 high thinking、1,600 token 下只有 30/48 accepted，12 个 empty、6 个 JSON 截断；把预算加到 4,096 后证明不是边界判断能力差，而是 reasoning 挤占输出。这个任务的最终输出只是结构化判断和一句短回复，关闭 thinking 后 completion 中位数降到约 145 token，格式稳定。
+>
+> 但我也没有停在“格式能解析”。temperature 0.8 又引入 eager disclosure 和 delayed STOP，所以最后降到 0.3，并把人工观察转成可执行 semantic gate。这个迭代体现的是先归因失败类型，再改最小变量，而不是遇到错例就无限加 Prompt。
+
+### 15.6 面试官：Teacher 数据怎样保证与线上 Qwen3-14B 的 Prompt 对齐？
+
+> 我按 runtime 做 role flip，而不是导出一个看起来像聊天的数据集：
+
+```text
+system    = LLMUserSimulationEnv.build_system_prompt(instruction)
+user      = Agent 发给模拟用户的自然语言
+assistant = 模拟用户的下一条回复
+```
+
+> 初始 `Hi! How can I help you today?` 在这个视角里也是 `user` role；历史 Agent 消息继续映射到 `user`，历史模拟用户消息映射到 `assistant`。Teacher 的 JSON、resolved goals、evidence 都只放 metadata，不进入 Student target。训练用 `last_assistant` mask，只监督新生成的最后一个 User turn；推理同样关闭 thinking，STOP target 必须是 exact `###STOP###`，所以现有 runtime parser 不需要修改。
+>
+> 这里最容易犯的错误，是数据语义正确但 chat role、system prompt 或 loss mask 不一致。那样离线看起来有好数据，实际微调学到的却不是线上条件分布。
+
+### 15.7 面试官：它为什么会影响 GRPO？User 随机性不是普通环境噪声吗？
+
+> 在多轮 GRPO 中，同一 task 的组内 reward 差异同时来自 Policy 采样和 User response 采样。如果 User 高温时偶然提前泄漏 ID，某条 rollout 的高 reward 会被 group-relative advantage 当成 Policy 更优；但真正改变结果的是环境分支。这个噪声会直接进入相对优势，尤其在 outcome reward 只有 0/1 时更明显。
+>
+> 所以主方法比较时我会冻结 Simulator checkpoint、Prompt、decoding、chat template、task split 和 max turns，把 User 高温与 persona 扰动放到独立 robustness 实验。这样不是追求一个僵硬用户，而是先保证不同 RL 方法面对同一个训练 MDP，避免把环境变化误当算法收益。
+
+### 15.8 面试官：怎样证明微调后的 User Simulator 真有价值？
+
+> 我会分两层，不把 Simulator 离线 F1 直接等同于 Agent 收益。
+>
+> 第一层固定 Policy，只替换原 User 和新 User，看 premature STOP、late-STOP latency、post-final-tool turns、max-turn rate、trajectory tokens、terminal success 和 task 34 communication coverage。这能隔离“环境本身是否更干净”。
+>
+> 第二层再分别训练 Policy，做 train-simulator × eval-simulator 的交叉矩阵：原 User、新 User、强外部 User，最好再加真人边界小样本。只有新 Policy 在 unseen task 和 holdout Simulator 上仍提升，才能说主 Agent 能力提高；只在新 User 下提升，可能只是 co-adaptation 或 benchmark 被变简单。
+
+### 15.9 面试官：整个过程中最有价值的一次失败是什么？
+
+> 不是模型判断错，而是我们人工写的 task 34 complete case 漏了一条 upcoming reservation。原 case 给出两条航班但 total 写成 `$1,016`，Teacher 一直 CONTINUE。继续核对数据库才发现真实是 `$402 + $306 + $308 = $1,016`，遗漏的是 `A90KR2`。
+>
+> 这件事让我确认：Teacher pilot 不只是测模型，也在测 label 和 evaluator。模型与预期冲突时，不能默认人工 gold 正确，更不能靠 Prompt 强压成 STOP。应该回到 task、DB、history 和 verifier 四份证据做闭环。
+
+### 15.10 面试官：那为什么不同时训练 Policy 和 User Simulator？
+
+> 第一阶段不会这么做。两边同时更新会产生双重非平稳：Policy 的访问分布在变，User 的响应核也在变，reward 变化很难归因，甚至可能共同学出更容易的私有协议。
+>
+> 主实验应先冻结一个版本化 Simulator，比较 Policy 算法；Simulator 训练作为独立阶段，用 frozen-policy A/B 验证。如果后续研究 joint training，我会使用交替更新、较慢的 Simulator 更新频率、固定 anchor/holdout 对话集、KL 到 base Simulator，以及 cross-play 矩阵，防止两边共同漂向 cooperative shortcut。
+
+### 15.11 面试官：你认为这段工作最能证明你的什么能力？
+
+> 不是我会调用一个更强模型，而是我能把一个“User 不 STOP”的模糊现象拆成环境可观测性、终止语义、数据标签、Policy communication、verifier coverage 和 RL 方差六个问题，再用真实 case 和可执行门禁逐一验证。多轮 RL 的难点经常不在公式本身，而在公式优化的那个环境是否被定义对了；这段工作证明我会先守住这个边界。
+
+这一轮连续追问希望传递的不是“术语很多”，而是四个稳定信号：
+
+| 面试官要判断的能力 | 回答中对应的证据 |
+|---|---|
+| 是否懂多轮 RL，而不只会 SFT | transition kernel、occupancy、termination hazard、GRPO 方差 |
+| 是否有数据判断力 | STOP/reward 交叉审计、80 条轨迹缺标签、seen/holdout 隔离 |
+| 是否有工程闭环 | 七轮 pilot、错误分类、semantic gate、role/prompt/loss 对齐 |
+| 是否诚实且可追问 | 明确区分 48/48 pilot 与尚未执行的 full/SFT/在线收益 |
+
+---
+
+## 16. 面试项目叙事模板：为什么做、怎么做、结果是什么
+
+### 16.1 为什么做
 
 > 在 τ-bench airline 多轮 RL 中，我们观察到业务完成后 User 不 STOP，以及 Agent/User 在工具阶段后继续循环。这会延迟 terminal reward、浪费 rollout，并把成功轨迹拖入格式退化。我意识到 User Simulator 不只是辅助模型，而是训练环境的一部分，所以不能仅靠调 max turn 或写一个“尽快停止”的 Prompt。
 
-### 15.2 怎么做
+### 16.2 怎么做
 
 > 我先静态穿刺环境：确认 User 只看 Agent 文本、不看工具，STOP 才触发 terminal verifier。然后审计数据：80 条 Policy SFT 没有 STOP label；400 条官方历史里 STOP 与 reward 明显不等价。接着把失败分成 User delayed STOP、Agent communication gap、Policy malformed、fallback 和 verifier gap，围绕 task 0/1/2/4/34 构造 16 个边界 case。
 >
 > 数据合同上，我让 DeepSeek Teacher 输出富 JSON，Student 只学一句回复；observable 和 privileged 分开，hidden entity 有泄漏检测。工程上先跑 48-request pilot，不全量生成。我们经历了 thinking 截断、高温语义漂移、人工 case 事实错误和字符串门禁误杀，逐步改成 non-thinking、低温、可执行 semantic constraints，并修正 task 34 的三条 upcoming reservation 和 $1,016 总价。
 
-### 15.3 当前结果
+### 16.3 当前结果
 
 > 最终 v1.7 pilot 达到 48/48 accepted、48/48 decision match、12/12 精确 STOP、36/36 合理 CONTINUE、0 privileged leak。36 条 CONTINUE 中有 25 条不同规范化文本，说明在语义稳定的前提下仍有适度表达变化。现在只证明 pilot 合同可放行，尚未宣称全量数据、Qwen3-14B 微调或主 Agent reward 已提升；下一步必须经过 full-batch quarantine、离线终止指标和 cross-simulator 在线 A/B。
 
-### 15.4 STAR 版本
+### 16.4 STAR 版本
 
 | STAR | 内容 |
 |---|---|
@@ -1356,9 +1581,22 @@ Pilot 必须：
 | Action | 环境穿刺、数据审计、边界分类、Teacher contract、16-case pilot、七轮真实迭代、semantic gate、task 34 事实修复 |
 | Result | v1.7 真实 pilot 48/48，通过安全、终止、任务遵循和多样性检查；full/微调保持未执行并设置后续放行门槛 |
 
+### 16.5 当前阶段可直接放进简历的两条表述
+
+> - 面向 τ-bench Airline 多轮 Agentic RL，穿刺 User Simulator 的可观测性、STOP/reward 语义与 Policy–Verifier 边界；审计 400 条历史轨迹并构建 40-seen/10-unseen、1,527/424 隔离的数据方案，覆盖 compound goal、fallback、temporal trigger 与 communication-completeness 难例。
+> - 设计 DeepSeek V4 Flash Teacher → Qwen3-14B Student 的可审计 SFT 管线，落地 observable/privileged 隔离、last-assistant loss mask、entity leak/semantic gates；经七轮真实 pilot 将关键边界集提升到 48/48 accepted、0 leak，并规划 frozen-policy 与 cross-simulator 评估。
+
+当前不能写成：
+
+```text
+“通过微调 User Simulator 显著提升主模型 reward”
+```
+
+因为 full generation、LoRA 和主 Policy 在线对照都还没有执行。等后续实验完成，才可以补充 STOP latency、terminal success、trajectory token 和 cross-simulator gap 的真实变化。项目包装的底线是：把已做深的部分讲透，不用未发生的结果补气势。
+
 ---
 
-## 16. 我会重点监控的失败模式
+## 17. 我会重点监控的失败模式
 
 | Failure mode | 观测信号 | 风险 | 防线 |
 |---|---|---|---|
@@ -1378,7 +1616,7 @@ Pilot 必须：
 
 ---
 
-## 17. 当前完成度和诚实边界
+## 18. 当前完成度和诚实边界
 
 ### 已完成并验证
 
@@ -1413,7 +1651,7 @@ Pilot 必须：
 
 ---
 
-## 18. 证据与代码入口
+## 19. 证据与代码入口
 
 - 数据方案与实现：[`docs/user-simulator-data/README.md`](../user-simulator-data/README.md)
 - 真实 pilot 审计：[`PILOT_AUDIT.md`](../user-simulator-data/PILOT_AUDIT.md)
@@ -1444,6 +1682,6 @@ Pilot 必须：
 
 ---
 
-## 19. 面试收尾句
+## 20. 面试收尾句
 
 > 这段工作的核心不是“我用 DeepSeek 生成了一批用户回复”，而是我把 User Simulator 当成多轮 RL 环境来设计：先定义可观测性和终止语义，再区分用户问题、Policy 问题与 verifier gap；用 compound goal、fallback、confirmation、temporal trigger 和 malformed recovery 构造边界；最后通过版本化 Prompt、富 Teacher 标签、纯 Student target、语义门禁和 cross-simulator 评估，确保它既不会把任务变简单，也不会用无意义坚持拖长轨迹。真正好的 User Simulator，不是最会聊天，而是能稳定地产生正确、可控、足够丰富且不泄漏的训练环境。
