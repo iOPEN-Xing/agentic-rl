@@ -156,10 +156,92 @@ python3 scripts/train/user_simulator/export_sft.py \
 在用户确认前，`full_scale_generation_allowed` 保持 `false`。后续若扩量，至少要先满足：
 
 1. 下载并锁定官方 ABCD v1.1 train split，不使用 dev/test。
-2. 为进入候选池的每个 subflow 人工审核 `Goal / Context / fallback` 映射；未知 subflow 继续 fail closed。
+2. 为每个进入候选池的会话审核 `Goal / Context / fallback`；不能把某个 pilot 会话里的 fallback 当成整个 subflow 的通用目标。
 3. 排除寒暄、纯情绪、小聊、action 依赖回复和结束轮次。
 4. 外部数据继续保持 0 个 STOP，并与当前 τ-bench eval/holdout 完全隔离。
 5. 第一轮只做单一来源 A/B，建议将 ABCD 控制在训练 batch 的约 5%，监控航空领域事实漂移、过度配合、premature/delayed STOP 和主任务成功率。
 6. 不能把 ABCD 静态 human-prefix 数据当成 Student-prefix rollout 的替代品；后者仍是解决 exposure bias 的优先数据来源。
 
 官方来源：[ABCD GitHub](https://github.com/asappresearch/abcd)、[NAACL 2021 论文](https://aclanthology.org/2021.naacl-main.239/)。
+
+## 8. 官方全量 train split 的静态穿刺
+
+在没有调用 DeepSeek、没有生成新标签的前提下，已经锁定官方仓库 commit `6b8700ce67c6b37b062dd7a60abc76d7ef832a97` 的 ABCD v1.1 全量压缩文件：
+
+- 压缩文件大小：36,985,084 bytes
+- SHA-256：`2bdf53ac359543dcdc38d55bc6513e78df120363f8f44870716e909f4606de15`
+- train：8,034 个会话
+- dev：1,004 个会话，排除
+- test：1,004 个会话，排除
+- 三个 split 的 conversation ID 重叠：0
+
+全量结构不能直接按 `scenario.subflow` 做 55 类采样：
+
+| 统计口径 | 数量 |
+|---|---:|
+| 顶层 flow | 10 |
+| 原始 `scenario.subflow` 叶子值 | 96 |
+| `delexed[*].targets[0]` canonical intent | 55 |
+| canonical intent 与官方 `kb.json` keys 对齐 | 55 / 55 |
+| 非 identity 的 raw-leaf → canonical 映射 | 50 |
+
+典型别名包括：
+
+```text
+storewide_query/timing_1..4       -> timing
+single_item_query/boots_how_1..4  -> boots
+single_item_query/boots_other_1..4 -> boots
+order_issue/status_delivery_date  -> status_delivery_time
+subscription_inquiry/status_questions -> status_active
+```
+
+因此后续覆盖统计必须以 canonical intent 为主键，再用 raw leaf 保留 FAQ 具体问题；不能把 96 个叶子误当 96 个独立任务，也不能只读 `scenario.subflow` 后声称覆盖了官方 55 intents。
+
+确定性 reachability 与明显终止寒暄过滤后的统计为：
+
+| 项目 | 数量 |
+|---|---:|
+| 原始 action turns（全部禁止可见） | 29,190 |
+| opening 后 customer blocks | 47,674 |
+| 明显终止/寒暄 blocks 已排除 | 3,564 |
+| 多段 customer fragments 合并 | 14,338 |
+| 因 action 后不可达 customer 分支而截断的会话 | 1,283 |
+| 剩余 CONTINUE 候选上界 | 44,110 |
+
+这里的 44,110 只是“通过确定性结构门禁后的上界”，仍包含语义小聊、无训练价值的确认、对电商专有流程的依赖等内容，绝不能直接送入 DeepSeek 或训练集。按 v0.3 实测平均 token 粗估：
+
+| 方案 | 行数 | 估计总 token |
+|---|---:|---:|
+| 下一阶段：55 intents × 2 会话 × 最多 2 targets | 220 | 260,040 |
+| 受控中批次 | 1,000 | 1,182,000 |
+| 错误做法：44,110 条全部生成 | 44,110 | 52,138,020 |
+
+更重要的 P0 修正是：pilot 目标规范已从 subflow 级改为 conversation 级绑定。比如：
+
+- “正常退货被拒后要求经理升级”只在会话 `3592` 中有源证据，不是所有 `return_size` 客户的统一目标；
+- “退款状态之外还要追问预计多久完成”只在会话 `9489` 中有源证据，不是所有 `refund_status` 客户的统一目标。
+
+现在即使新会话拥有已知的 `return_size` 或 `refund_status` subflow，只要 convo_id 未经过审核，`build_abcd_scenario()` 仍会 fail closed。这样可以防止扩量脚本看似复用了已知模板，实际却批量虚构 fallback 并造成 delayed STOP。
+
+可重复静态审计入口：
+
+```bash
+python3 scripts/train/user_simulator/analyze_abcd_full.py
+```
+
+完整机器可读结果位于：
+
+```text
+outputs/user_simulator_data/abcd_adapter/full_analysis/train_static_audit.json
+```
+
+当前全量门状态仍是：
+
+```json
+{
+  "pilot_deterministic_and_human_audit_passed": true,
+  "user_pilot_acceptance_received": false,
+  "full_scale_generation_allowed": false,
+  "deepseek_calls_made_by_this_analysis": 0
+}
+```
