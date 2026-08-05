@@ -9,6 +9,7 @@ from src.user_simulator_data.abcd_adapter import (
     build_abcd_scenario,
     build_abcd_teacher_messages,
     generate_abcd_one,
+    select_abcd_pilot_cases,
 )
 
 
@@ -117,9 +118,9 @@ class ABCDAdapterTests(unittest.TestCase):
         self.assertIn("must never emit ###STOP###", rendered)
         self.assertNotIn("Account 7916676427 was pulled up", rendered)
         self.assertNotIn("Refund ETA is 7 days", rendered)
-        self.assertNotIn(
-            case["reference_response"],
-            json.dumps(case["student_messages"], ensure_ascii=False),
+        self.assertEqual(case["student_messages"][-1]["role"], "user")
+        self.assertNotEqual(
+            case["student_messages"][-1]["content"], case["reference_response"]
         )
 
     def test_generation_produces_current_last_assistant_sft_contract(self):
@@ -177,6 +178,22 @@ class ABCDAdapterTests(unittest.TestCase):
 
         self.assertEqual(row["status"], "quarantined")
         self.assertIn("novel_numeric_fact:1234567890", row["quality_issues"])
+
+    def test_pilot_selection_fails_closed_when_a_reviewed_turn_is_missing(self):
+        selected = select_abcd_pilot_cases(
+            [sample_conversation()], target_map={9489: {2, 4, 8}}
+        )
+
+        self.assertEqual(
+            [case["source_turn_indices"][0] for case in selected], [2, 4, 8]
+        )
+        self.assertTrue(
+            all(case["pilot_selection"] == "reviewed_turn_allowlist" for case in selected)
+        )
+        with self.assertRaisesRegex(ValueError, "reviewed ABCD pilot targets were not built"):
+            select_abcd_pilot_cases(
+                [sample_conversation()], target_map={9489: {2, 999}}
+            )
 
 
 if __name__ == "__main__":
