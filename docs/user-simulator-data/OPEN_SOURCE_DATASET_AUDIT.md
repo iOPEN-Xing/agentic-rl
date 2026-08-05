@@ -56,7 +56,7 @@ ABCD 的优势不是领域，而是行为：人工客户会逐步披露身份信
 - 数据保持为独立候选集，没有混入主训练集；
 - 当前 `full_scale_generation_allowed=false`。
 
-全量 ABCD train 的静态结构过滤后存在 44,110 个 CONTINUE 候选上界，但其中仍包含小聊、无信息确认和电商专有流程。这个数字不是可训练样本数，更不是应当调用 Teacher 的数量。
+全量 ABCD train 的静态结构过滤后存在 43,851 个 CONTINUE 候选上界，但其中仍包含小聊、无信息确认和电商专有流程。这个数字不是可训练样本数，更不是应当调用 Teacher 的数量。另有 18 个 customer 寒暄后紧接实质 Agent 信息的会话无法安全映射为项目固定 greeting，已 fail closed，而不是丢失可见因果前提后继续造样本。
 
 详细实现和审计见 [ABCD_PILOT_AUDIT.md](./ABCD_PILOT_AUDIT.md)。
 
@@ -68,7 +68,7 @@ ABCD 的优势不是领域，而是行为：人工客户会逐步披露身份信
 
 ### 阶段 B：ABCD 受控扩展，而非全量
 
-用户确认后，按 55 个 canonical intents 各抽 2 个 train 会话，每个会话最多 2 个目标轮次，理论上限 220 条。每个会话单独审核 Goal / Context / fallback，不能复用 subflow 全局模板。
+已经提前构建 55 个 canonical intents 各 2 个 train 会话、每个会话 2 个候选轮次的人工审核队列，共 110 个会话和 220 个 proposed targets。该队列不含 action 文本，不构造 system prompt，所有记录均为 pending 且禁止生成。用户确认 pilot 后，仍需对每个会话单独审核 Goal / Context / fallback，不能复用 subflow 全局模板；审核队列本身不等于训练数据。
 
 ### 阶段 C：单独做 AirDialogue 静态 pilot
 

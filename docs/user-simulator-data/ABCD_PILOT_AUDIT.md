@@ -202,19 +202,20 @@ subscription_inquiry/status_questions -> status_active
 | 项目 | 数量 |
 |---|---:|
 | 原始 action turns（全部禁止可见） | 29,190 |
-| opening 后 customer blocks | 47,674 |
-| 明显终止/寒暄 blocks 已排除 | 3,564 |
-| 多段 customer fragments 合并 | 14,338 |
+| 固定 runtime greeting 后 customer blocks | 48,274 |
+| 明显终止/寒暄 blocks 已排除 | 4,423 |
+| 多段 customer fragments 合并 | 14,550 |
 | 因 action 后不可达 customer 分支而截断的会话 | 1,283 |
-| 剩余 CONTINUE 候选上界 | 44,110 |
+| 寒暄后接实质 Agent 信息、无法安全映射固定 greeting 的会话 | 18 |
+| 剩余 CONTINUE 候选上界 | 43,851 |
 
-这里的 44,110 只是“通过确定性结构门禁后的上界”，仍包含语义小聊、无训练价值的确认、对电商专有流程的依赖等内容，绝不能直接送入 DeepSeek 或训练集。按 v0.3 实测平均 token 粗估：
+ABCD train 中有 1,072 个 customer-first 会话。实质性首轮需求应映射为固定 runtime greeting 后的第一个 target；纯 `hello / hi / hey ho` 只有在紧随其后的 source-agent turn 也是纯寒暄或可替换服务寒暄时，二者才一起折叠进固定 greeting，不能把寒暄误标成 intent。即使 Agent turn 很短，只要它已给出业务信息（例如 `Hi, your refund was cancelled.`），替换就会丢失 target 的可见因果前提；当前 18 个此类会话因此 fail closed。修正后的 43,851 仍只是“通过确定性结构门禁后的上界”，包含语义小聊、无训练价值的确认、对电商专有流程的依赖等内容，绝不能直接送入 DeepSeek 或训练集。按 v0.3 实测平均 token 粗估：
 
 | 方案 | 行数 | 估计总 token |
 |---|---:|---:|
 | 下一阶段：55 intents × 2 会话 × 最多 2 targets | 220 | 260,040 |
 | 受控中批次 | 1,000 | 1,182,000 |
-| 错误做法：44,110 条全部生成 | 44,110 | 52,138,020 |
+| 错误做法：43,851 条全部生成 | 43,851 | 51,831,882 |
 
 更重要的 P0 修正是：pilot 目标规范已从 subflow 级改为 conversation 级绑定。比如：
 
@@ -245,3 +246,53 @@ outputs/user_simulator_data/abcd_adapter/full_analysis/train_static_audit.json
   "deepseek_calls_made_by_this_analysis": 0
 }
 ```
+
+## 9. 55-intent 人工审核队列
+
+为了让用户确认 pilot 后可以直接进入受控扩量，同时避免把 43,851 个结构候选误当训练数据，已经增加一个**不调用 Teacher、不可生成**的确定性审核队列：
+
+```bash
+python3 scripts/train/user_simulator/build_abcd_review_queue.py
+```
+
+队列严格只读官方 train split，并再次验证 train/dev/test conversation ID 无重叠、canonical intents 与官方 `kb.json` 完全一致。默认选择规则是：
+
+1. 每个 canonical intent 选择 2 个会话；
+2. 优先选择不同 raw leaf，保留同一 canonical intent 下不同 FAQ/场景表达；
+3. 每个会话保留 2 个候选 target：跳过 `hello / yes / name` 等低信息 preamble 后的早期 goal-expression，加一个由可见 Agent 问题触发的后续 goal-progress turn；
+4. 后续 target 优先选择最后一个可见 Agent turn 之后没有隐藏 action 的轮次，并优先避开触发因果截断的会话；
+5. 不导出任何 action 文本，不构造 system prompt，不填写 Goal / Context / goal labels；
+6. 每条记录固定为 `review.status=pending` 和 `allowed_for_generation=false`。
+
+当前队列统计：
+
+| 项目 | 数量 |
+|---|---:|
+| Canonical intents | 55 |
+| Train conversations | 110 |
+| Proposed targets | 220 |
+| 覆盖的 raw leaves | 64 |
+| 选中且触发 causal cut 的会话 | 0 |
+| Early goal-expression targets | 110 |
+| Later goal-progress targets | 110 |
+| Early target 恰好是固定 greeting 后首个 customer block | 96 / 110 |
+| 选中的 customer-first 会话 | 27 |
+| Later target 前一个 Agent 消息含问题 | 105 / 110 |
+| Early → later 的 source turn 顺序严格递增 | 110 / 110 |
+| 与前一 Agent 消息高度复读（token overlap ≥ 0.8） | 0 |
+| 选中 target 前存在未传达的隐藏 action | 0 |
+| 精确 action 文本泄露 | 0 |
+| DeepSeek 调用 | 0 |
+
+两个不足三个词的 later target 都是 Agent 明确询问后给出的邮箱或用户名等标识符，不是无信息的 “yes / okay”。这说明当前选择规则没有为了追求长度而排除必要的短槽位回答，但它仍只是待人工审核的候选，不代表已经准入。
+
+本地审核产物：
+
+```text
+outputs/user_simulator_data/abcd_adapter/review_queue/v1/
+├── review_queue.jsonl      # 110 个会话级待审核记录
+├── manifest.json           # 来源哈希、覆盖统计和关闭的生成门
+└── REVIEW_CHECKLIST.md     # 方便人工逐会话索引
+```
+
+下一步必须由 reviewer 对每个会话单独填写自然语言 `goal`、可选 `context`、精确 `goal_labels`，并逐 target 标记 approved/rejected。只要 pilot 尚未得到用户明确验收，或者 promotion validator 尚未实现和通过，整个队列都不能调用 DeepSeek。
