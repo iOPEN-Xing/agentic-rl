@@ -10,9 +10,10 @@ adapter therefore exports only intermediate CONTINUE targets and never derives a
 from __future__ import annotations
 
 from collections import Counter
+import hashlib
 import json
 import re
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Any, Iterable, Mapping, Optional, Sequence
 
 from .case_builder import build_runtime_system_prompt
 from .contracts import (
@@ -75,8 +76,35 @@ DEFAULT_PILOT_TARGETS: dict[int, set[int]] = {
 }
 
 _TERMINAL_COURTESY = re.compile(
-    r"(?:\bthat(?:'s| is) all\b|\bhave a (?:great|nice) day\b|\btake care\b|"
-    r"\bthanks? for (?:your )?help\b|^\s*(?:great|perfect|thanks?|thank you)[.! ]*$)",
+    r"(?:\b(?:that'?s|that is) all\b|\bhave a (?:great|nice) day\b|\btake care\b|"
+    r"\bthanks? for (?:(?:your|the) )?help\b|\bnothing else[.! ]*$|"
+    r"\bthat(?:'ll| will) be (?:all|it|everything)\b|"
+    r"\bi (?:can )?see\b.*\bnow\b.*\bthank|"
+    r"\bgreat[, ]+thanks?[.! ]*$|"
+    r"^\s*(?:great[, ]*)?no[, ]+thanks?[.! ]*$|"
+    r"^\s*(?:great|perfect|thanks?|thank you)[.! ]*$)",
+    flags=re.IGNORECASE,
+)
+_OPENING_GREETING = re.compile(
+    r"^\s*(?:hi|hello|hey(?: ho)?|good (?:morning|afternoon|evening))"
+    r"(?: there)?[!. ]*$",
+    flags=re.IGNORECASE,
+)
+_AGENT_OPENING_SIGNAL = re.compile(
+    r"\b(?:hi|hello|hey|welcome|good (?:morning|afternoon|evening)|"
+    r"thanks? for (?:contacting|calling|reaching)|"
+    r"how (?:can|may) i (?:help|assist))\b",
+    flags=re.IGNORECASE,
+)
+_AGENT_SERVICE_CUE = re.compile(
+    r"\b(?:help|assist|support|welcome)\b", flags=re.IGNORECASE
+)
+_ABCD_GOAL_EXPRESSION_CUE = re.compile(
+    r"\b(?:want|need|would like|looking|trying|help|issue|problem|question|"
+    r"check|change|cancel|return|refund|buy|purchase|order|account|password|"
+    r"username|shipping|delivery|price|cost|promo|membership|subscription|"
+    r"bill|card|stock|website|product|wrong|missing|charged|status|when|where|"
+    r"why|how|what|can you|could you)\b",
     flags=re.IGNORECASE,
 )
 _EMAIL = re.compile(r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b", re.IGNORECASE)
@@ -259,6 +287,47 @@ def _dialogue_blocks(original: Sequence[Sequence[Any]]) -> list[dict[str, Any]]:
     return blocks
 
 
+def _runtime_blocks_after_fixed_greeting(
+    blocks: Sequence[dict[str, Any]],
+) -> tuple[
+    list[dict[str, Any]],
+    Optional[dict[str, Any]],
+    Optional[dict[str, Any]],
+    str,
+]:
+    """Map either source opening convention onto the runtime's fixed greeting."""
+
+    if not blocks:
+        return [], None, None, "empty"
+    if blocks[0]["speaker"] == "agent":
+        return list(blocks[1:]), blocks[0], None, "agent_first"
+    if blocks[0]["speaker"] == "customer":
+        opening_text = " ".join(blocks[0]["texts"])
+        if _OPENING_GREETING.fullmatch(opening_text):
+            if len(blocks) > 1 and blocks[1]["speaker"] == "agent":
+                agent_opening = " ".join(blocks[1]["texts"])
+                replaceable = bool(_OPENING_GREETING.fullmatch(agent_opening)) or (
+                    bool(_AGENT_OPENING_SIGNAL.search(agent_opening))
+                    and bool(_AGENT_SERVICE_CUE.search(agent_opening))
+                )
+                if replaceable:
+                    return (
+                        list(blocks[2:]),
+                        blocks[1],
+                        blocks[0],
+                        "customer_greeting_then_agent",
+                    )
+                return (
+                    [],
+                    blocks[1],
+                    blocks[0],
+                    "customer_greeting_unmappable",
+                )
+            return [], None, blocks[0], "customer_greeting_unmappable"
+        return list(blocks), None, None, "customer_goal_first"
+    raise ValueError(f"invalid ABCD opening speaker: {blocks[0]['speaker']!r}")
+
+
 def count_abcd_continue_candidates(conversation: Mapping[str, Any]) -> dict[str, Any]:
     """Count conservative full-data candidates without constructing a scenario."""
 
@@ -273,11 +342,9 @@ def count_abcd_continue_candidates(conversation: Mapping[str, Any]) -> dict[str,
         and _clean(turn[0]).casefold() in {"agent", "customer"}
     ]
     consumed_indices = [index for block in blocks for index in block["turn_indices"]]
-    first_agent = next(
-        (index for index, block in enumerate(blocks) if block["speaker"] == "agent"),
-        None,
+    runtime_blocks, _, _, source_opening_mode = _runtime_blocks_after_fixed_greeting(
+        blocks
     )
-    runtime_blocks = blocks[first_agent + 1 :] if first_agent is not None else []
     customer_blocks = [
         block for block in runtime_blocks if block["speaker"] == "customer"
     ]
@@ -292,7 +359,7 @@ def count_abcd_continue_candidates(conversation: Mapping[str, Any]) -> dict[str,
         "candidate_response_chars": sum(
             len(" ".join(block["texts"])) for block in candidates
         ),
-        "customer_blocks_after_opening": len(customer_blocks),
+        "customer_blocks_after_runtime_greeting": len(customer_blocks),
         "customer_fragments_merged": sum(
             max(len(block["turn_indices"]) - 1, 0) for block in customer_blocks
         ),
@@ -309,7 +376,315 @@ def count_abcd_continue_candidates(conversation: Mapping[str, Any]) -> dict[str,
             and consumed_indices
             and max(consumed_indices) < max(natural_indices)
         ),
+        "opening_mapping_unmappable": (
+            source_opening_mode == "customer_greeting_unmappable"
+        ),
     }
+
+
+def _is_low_information_abcd_response(candidate: Mapping[str, Any]) -> bool:
+    response = _clean(candidate.get("reference_response"))
+    words = response.split()
+    return len(words) <= 2 and not any(
+        character.isdigit() for character in response
+    )
+
+
+def _abcd_agent_echo_ratio(response: str, preceding_agent: str) -> float:
+    response_tokens = set(re.findall(r"[a-z0-9]+", response.casefold()))
+    if not response_tokens:
+        return 0.0
+    agent_tokens = set(re.findall(r"[a-z0-9]+", preceding_agent.casefold()))
+    return len(response_tokens & agent_tokens) / len(response_tokens)
+
+
+def _abcd_review_target_rank(candidate: Mapping[str, Any]) -> tuple[Any, ...]:
+    """Prefer a grounded progress turn after preserving the opening intent turn."""
+
+    response = _clean(candidate.get("reference_response"))
+    preceding_agent = _clean(candidate.get("preceding_agent_text"))
+    return (
+        bool(candidate.get("hidden_action_turn_indices_before_target")),
+        float(candidate.get("agent_echo_ratio", 0.0)) >= 0.8,
+        _is_low_information_abcd_response(candidate),
+        "?" not in preceding_agent,
+        "?" not in response,
+        -int(candidate.get("source_fragment_count", 1)),
+        -min(len(response), 240),
+        int(candidate["source_turn_indices"][0]),
+    )
+
+
+def _looks_like_abcd_goal_expression(candidate: Mapping[str, Any]) -> bool:
+    response = _clean(candidate.get("reference_response"))
+    return len(response.split()) >= 3 and bool(
+        _ABCD_GOAL_EXPRESSION_CUE.search(response)
+    )
+
+
+def build_abcd_review_item(
+    conversation: Mapping[str, Any],
+    *,
+    targets_per_conversation: int = 2,
+) -> dict[str, Any]:
+    """Build a non-generatable, action-redacted conversation review item.
+
+    This is deliberately separate from :func:`build_abcd_cases`: a full-data
+    conversation has no approved natural-language goal yet.  The artifact gives a
+    reviewer source evidence and candidate customer targets, but no runtime system
+    prompt and no path into Teacher generation until the review fields are completed
+    by a later, separately validated promotion step.
+    """
+
+    if targets_per_conversation <= 0:
+        raise ValueError("targets_per_conversation must be positive")
+    convo_id = int(conversation["convo_id"])
+    scenario = conversation.get("scenario")
+    if not isinstance(scenario, Mapping):
+        raise ValueError(f"ABCD scenario must be an object: {convo_id}")
+    flow = _clean(scenario.get("flow"))
+    raw_subflow = _clean(scenario.get("subflow"))
+    if not flow or not raw_subflow:
+        raise ValueError(f"ABCD flow/subflow missing: {convo_id}")
+
+    original = list(conversation.get("original", []))
+    blocks = _dialogue_blocks(original)
+    runtime_blocks, source_opening, source_customer_greeting, source_opening_mode = (
+        _runtime_blocks_after_fixed_greeting(blocks)
+    )
+    action_turn_indices = [
+        index
+        for index, turn in enumerate(original)
+        if isinstance(turn, Sequence)
+        and not isinstance(turn, (str, bytes))
+        and len(turn) == 2
+        and _clean(turn[0]).casefold() == "action"
+    ]
+    last_visible_agent_turn = (
+        max(source_opening["turn_indices"]) if source_opening is not None else -1
+    )
+    student_prefix: list[dict[str, str]] = [
+        {"role": "user", "content": FIXED_AGENT_GREETING}
+    ]
+    candidates: list[dict[str, Any]] = []
+    customer_turns_seen = 0
+
+    for block in runtime_blocks:
+        content = " ".join(block["texts"])
+        if block["speaker"] == "agent":
+            if student_prefix[-1]["role"] == "user":
+                student_prefix[-1]["content"] += " " + content
+            else:
+                student_prefix.append({"role": "user", "content": content})
+            last_visible_agent_turn = max(block["turn_indices"])
+            continue
+
+        if student_prefix[-1]["role"] != "user":
+            break
+        if not _TERMINAL_COURTESY.search(content):
+            preceding_agent = student_prefix[-1]["content"]
+            candidates.append(
+                {
+                    "source_turn_indices": list(block["turn_indices"]),
+                    "reference_response": content,
+                    "preceding_agent_text": preceding_agent,
+                    "student_prefix_without_system": [
+                        dict(message) for message in student_prefix
+                    ],
+                    "source_fragment_count": len(block["turn_indices"]),
+                    "response_chars": len(content),
+                    "is_opening_target": customer_turns_seen == 0,
+                    "agent_echo_ratio": round(
+                        _abcd_agent_echo_ratio(content, preceding_agent), 4
+                    ),
+                    "hidden_action_turn_indices_before_target": [
+                        index
+                        for index in action_turn_indices
+                        if last_visible_agent_turn < index < block["turn_indices"][0]
+                    ],
+                }
+            )
+        student_prefix.append({"role": "assistant", "content": content})
+        customer_turns_seen += 1
+
+    proposed: list[dict[str, Any]] = []
+    eligible_candidates = [
+        candidate
+        for candidate in candidates
+        if not candidate["hidden_action_turn_indices_before_target"]
+    ]
+    early_goal = next(
+        (
+            candidate
+            for candidate in eligible_candidates
+            if _looks_like_abcd_goal_expression(candidate)
+        ),
+        None,
+    )
+    if early_goal is None:
+        early_goal = next(
+            (
+                candidate
+                for candidate in eligible_candidates
+                if not _is_low_information_abcd_response(candidate)
+            ),
+            eligible_candidates[0] if eligible_candidates else None,
+        )
+    if early_goal is not None:
+        proposed.append(
+            {
+                **early_goal,
+                "selection_reason": (
+                    "early_goal_expression"
+                    if _looks_like_abcd_goal_expression(early_goal)
+                    else "fallback_early_customer_turn"
+                ),
+            }
+        )
+    early_goal_end = (
+        max(early_goal["source_turn_indices"]) if early_goal is not None else -1
+    )
+    remaining = [
+        candidate
+        for candidate in eligible_candidates
+        if candidate is not early_goal
+        and min(candidate["source_turn_indices"]) > early_goal_end
+    ]
+    for candidate in sorted(remaining, key=_abcd_review_target_rank):
+        if len(proposed) >= targets_per_conversation:
+            break
+        proposed.append({**candidate, "selection_reason": "later_goal_progress"})
+
+    counts = count_abcd_continue_candidates(conversation)
+    target_reviews = [
+        {
+            "source_turn_indices": list(target["source_turn_indices"]),
+            "eligibility": "pending",
+            "issue_tags": [],
+            "notes": "",
+        }
+        for target in proposed
+    ]
+    return {
+        "format_version": "abcd-conversation-review-v1",
+        "source": ABCD_SOURCE,
+        "source_split": "train",
+        "source_convo_id": convo_id,
+        "canonical_intent": canonical_abcd_intent(conversation),
+        "flow": flow,
+        "raw_subflow": raw_subflow,
+        "raw_leaf": f"{flow}/{raw_subflow}",
+        "source_opening_mode": source_opening_mode,
+        "source_scenario": json.loads(json.dumps(scenario, ensure_ascii=False)),
+        "source_opening_agent": (
+            " ".join(source_opening["texts"]) if source_opening is not None else ""
+        ),
+        "source_opening_turn_indices": (
+            list(source_opening["turn_indices"])
+            if source_opening is not None
+            else []
+        ),
+        "source_opening_customer_greeting_turn_indices": (
+            list(source_customer_greeting["turn_indices"])
+            if source_customer_greeting is not None
+            else []
+        ),
+        "redacted_action_turn_indices": action_turn_indices,
+        "candidate_counts": counts,
+        "proposed_targets": proposed,
+        "selection_eligible": len(proposed) == targets_per_conversation,
+        "review": {
+            "status": "pending",
+            "reviewer": "",
+            "reviewed_at": "",
+            "goal": "",
+            "context": "",
+            "goal_labels": [],
+            "target_reviews": target_reviews,
+            "notes": "",
+        },
+        "allowed_for_generation": False,
+    }
+
+
+def _abcd_review_item_rank(item: Mapping[str, Any], *, seed: str) -> tuple[Any, ...]:
+    stable = hashlib.sha256(
+        (
+            f"{seed}|{item['canonical_intent']}|{item['raw_leaf']}|"
+            f"{item['source_convo_id']}"
+        ).encode("utf-8")
+    ).hexdigest()
+    counts = item.get("candidate_counts", {})
+    return (
+        bool(counts.get("causal_cut_applied")),
+        -int(counts.get("candidate_continue_blocks", 0)),
+        stable,
+    )
+
+
+def select_abcd_review_queue(
+    conversations: Iterable[Mapping[str, Any]],
+    *,
+    conversations_per_intent: int = 2,
+    targets_per_conversation: int = 2,
+    seed: str = "abcd-55-intent-review-v1",
+) -> list[dict[str, Any]]:
+    """Select a deterministic, raw-leaf-diverse queue for human review."""
+
+    if conversations_per_intent <= 0:
+        raise ValueError("conversations_per_intent must be positive")
+    by_intent: dict[str, list[dict[str, Any]]] = {}
+    for conversation in conversations:
+        item = build_abcd_review_item(
+            conversation,
+            targets_per_conversation=targets_per_conversation,
+        )
+        if not item["selection_eligible"]:
+            continue
+        by_intent.setdefault(item["canonical_intent"], []).append(item)
+
+    selected: list[dict[str, Any]] = []
+    insufficient: dict[str, int] = {}
+    for intent in sorted(by_intent):
+        ranked = sorted(
+            by_intent[intent],
+            key=lambda item: _abcd_review_item_rank(item, seed=seed),
+        )
+        if len(ranked) < conversations_per_intent:
+            insufficient[intent] = len(ranked)
+            continue
+        intent_selected: list[dict[str, Any]] = []
+        used_raw_leaves: set[str] = set()
+        for item in ranked:
+            if item["raw_leaf"] in used_raw_leaves:
+                continue
+            intent_selected.append(item)
+            used_raw_leaves.add(item["raw_leaf"])
+            if len(intent_selected) == conversations_per_intent:
+                break
+        if len(intent_selected) < conversations_per_intent:
+            chosen_ids = {int(item["source_convo_id"]) for item in intent_selected}
+            for item in ranked:
+                if int(item["source_convo_id"]) in chosen_ids:
+                    continue
+                intent_selected.append(item)
+                chosen_ids.add(int(item["source_convo_id"]))
+                if len(intent_selected) == conversations_per_intent:
+                    break
+        for selection_rank, item in enumerate(intent_selected, start=1):
+            value = dict(item)
+            value["queue_selection"] = {
+                "seed": seed,
+                "intent_rank": selection_rank,
+                "conversations_per_intent": conversations_per_intent,
+                "targets_per_conversation": targets_per_conversation,
+                "raw_leaf_diversity_preferred": True,
+            }
+            selected.append(value)
+
+    if insufficient:
+        raise ValueError(f"insufficient ABCD review coverage: {insufficient}")
+    return selected
 
 
 def build_abcd_cases(conversation: Mapping[str, Any]) -> list[dict[str, Any]]:
@@ -320,14 +695,8 @@ def build_abcd_cases(conversation: Mapping[str, Any]) -> list[dict[str, Any]]:
     scenario = build_abcd_scenario(source_scenario, convo_id=convo_id)
     scenario_spec = _PILOT_SCENARIO_SPECS[convo_id]
     blocks = _dialogue_blocks(conversation.get("original", []))
-    first_agent = next(
-        (index for index, block in enumerate(blocks) if block["speaker"] == "agent"),
-        None,
-    )
-    if first_agent is None:
-        return []
-    blocks = blocks[first_agent:]
-    if not blocks or blocks[0]["speaker"] != "agent":
+    runtime_blocks, _, _, _ = _runtime_blocks_after_fixed_greeting(blocks)
+    if not runtime_blocks:
         return []
 
     student_messages: list[dict[str, str]] = [
@@ -336,8 +705,9 @@ def build_abcd_cases(conversation: Mapping[str, Any]) -> list[dict[str, Any]]:
     ]
     observable_history: list[dict[str, Any]] = []
     cases: list[dict[str, Any]] = []
-    # The source opening agent block is represented by the runtime's fixed greeting.
-    for block in blocks[1:]:
+    # A source agent opening is replaced by the runtime greeting.  A source customer
+    # opening becomes the first target conditioned on that same greeting.
+    for block in runtime_blocks:
         content = " ".join(block["texts"])
         source_turn = int(block["turn_indices"][0])
         if block["speaker"] == "agent":

@@ -6,12 +6,14 @@ import unittest
 from src.user_simulator_data.abcd_adapter import (
     ABCD_PROMPT_VERSION,
     build_abcd_cases,
+    build_abcd_review_item,
     build_abcd_scenario,
     build_abcd_teacher_messages,
     canonical_abcd_intent,
     count_abcd_continue_candidates,
     generate_abcd_one,
     select_abcd_pilot_cases,
+    select_abcd_review_queue,
     validate_abcd_resume_alignment,
 )
 
@@ -127,6 +129,284 @@ class ABCDAdapterTests(unittest.TestCase):
         self.assertEqual(counts["terminal_courtesy_blocks"], 0)
         self.assertTrue(counts["causal_cut_applied"])
 
+    def test_full_analysis_counts_a_customer_first_opening_as_runtime_reachable(self):
+        conversation = sample_conversation()
+        conversation["original"] = conversation["original"][2:]
+
+        counts = count_abcd_continue_candidates(conversation)
+
+        self.assertEqual(counts["candidate_continue_blocks"], 3)
+        self.assertEqual(counts["customer_blocks_after_runtime_greeting"], 3)
+
+    def test_review_item_is_pending_and_never_exports_action_text(self):
+        item = build_abcd_review_item(
+            sample_conversation(), targets_per_conversation=2
+        )
+        rendered = json.dumps(item, ensure_ascii=False)
+
+        self.assertEqual(item["canonical_intent"], "refund_status")
+        self.assertEqual(len(item["proposed_targets"]), 2)
+        self.assertEqual(item["review"]["status"], "pending")
+        self.assertFalse(item["allowed_for_generation"])
+        self.assertEqual(item["source_opening_mode"], "agent_first")
+        self.assertEqual(
+            item["proposed_targets"][0]["student_prefix_without_system"][0],
+            {"role": "user", "content": "Hi! How can I help you today?"},
+        )
+        self.assertNotIn("Account 7916676427 was pulled up", rendered)
+        self.assertNotIn("Refund ETA is 7 days", rendered)
+        self.assertEqual(item["redacted_action_turn_indices"], [6, 9])
+
+    def test_review_target_excludes_an_action_after_the_last_visible_agent_turn(self):
+        conversation = sample_conversation()
+        conversation["original"] = [
+            ["agent", "Hello."],
+            ["customer", "I need help with a refund."],
+            ["agent", "What happened?"],
+            ["action", "A hidden refund lookup completed."],
+            ["customer", "It still has not arrived."],
+        ]
+
+        item = build_abcd_review_item(conversation, targets_per_conversation=2)
+
+        self.assertEqual(len(item["proposed_targets"]), 1)
+        self.assertFalse(item["selection_eligible"])
+        self.assertTrue(
+            all(
+                not target["hidden_action_turn_indices_before_target"]
+                for target in item["proposed_targets"]
+            )
+        )
+
+    def test_review_item_preserves_a_customer_first_opening_after_runtime_greeting(self):
+        conversation = sample_conversation()
+        conversation["original"] = conversation["original"][2:]
+
+        item = build_abcd_review_item(conversation, targets_per_conversation=2)
+
+        self.assertEqual(
+            item["proposed_targets"][0]["reference_response"],
+            "I want to check the status of a refund.",
+        )
+        self.assertEqual(
+            item["proposed_targets"][0]["student_prefix_without_system"],
+            [{"role": "user", "content": "Hi! How can I help you today?"}],
+        )
+        self.assertEqual(item["source_opening_turn_indices"], [])
+        self.assertEqual(item["source_opening_mode"], "customer_goal_first")
+
+    def test_customer_first_salutation_pair_is_folded_into_runtime_greeting(self):
+        conversation = sample_conversation()
+        conversation["original"] = [
+            ["customer", "HEY HO!"],
+            ["agent", "Hi, how may I help you?"],
+            ["customer", "I need help with a refund."],
+            ["agent", "What is your name?"],
+            ["customer", "Alessandro Phoenix"],
+        ]
+
+        item = build_abcd_review_item(conversation, targets_per_conversation=2)
+
+        self.assertEqual(
+            item["proposed_targets"][0]["reference_response"],
+            "I need help with a refund.",
+        )
+        self.assertEqual(
+            item["proposed_targets"][0]["student_prefix_without_system"],
+            [{"role": "user", "content": "Hi! How can I help you today?"}],
+        )
+        self.assertEqual(item["source_opening_customer_greeting_turn_indices"], [0])
+        self.assertEqual(
+            item["source_opening_mode"], "customer_greeting_then_agent"
+        )
+
+    def test_review_selection_skips_low_information_customer_preamble(self):
+        conversation = sample_conversation()
+        conversation["original"] = [
+            ["customer", "Hello."],
+            ["agent", "How can I help you?"],
+            ["customer", "Yes."],
+            ["agent", "How may I help?"],
+            ["customer", "I would like to check the status of my refund."],
+            ["agent", "What is your name?"],
+            ["customer", "Alessandro Phoenix"],
+        ]
+
+        item = build_abcd_review_item(conversation, targets_per_conversation=2)
+
+        self.assertEqual(
+            item["proposed_targets"][0]["reference_response"],
+            "I would like to check the status of my refund.",
+        )
+        self.assertEqual(
+            item["proposed_targets"][0]["selection_reason"],
+            "early_goal_expression",
+        )
+        self.assertGreater(
+            item["proposed_targets"][1]["source_turn_indices"][0],
+            item["proposed_targets"][0]["source_turn_indices"][-1],
+        )
+
+    def test_later_progress_target_cannot_move_back_before_the_selected_goal(self):
+        conversation = sample_conversation()
+        conversation["original"] = [
+            ["agent", "Hello."],
+            ["customer", "Hi, sorry, I am really frustrated today."],
+            ["agent", "How may I help?"],
+            ["customer", "I need help with a refund."],
+            ["agent", "What is your order ID?"],
+            ["customer", "7916676427"],
+        ]
+
+        item = build_abcd_review_item(conversation, targets_per_conversation=2)
+
+        self.assertEqual(
+            [target["reference_response"] for target in item["proposed_targets"]],
+            ["I need help with a refund.", "7916676427"],
+        )
+
+    def test_customer_greeting_with_substantive_agent_opening_fails_closed(self):
+        for agent_opening in (
+            "The refund was cancelled.",
+            "Hi, your refund was cancelled.",
+        ):
+            with self.subTest(agent_opening=agent_opening):
+                conversation = sample_conversation()
+                conversation["original"] = [
+                    ["customer", "Hello."],
+                    ["agent", agent_opening],
+                    ["customer", "Why was my refund cancelled?"],
+                    ["agent", "What is your order ID?"],
+                    ["customer", "7916676427"],
+                ]
+
+                item = build_abcd_review_item(
+                    conversation, targets_per_conversation=2
+                )
+                counts = count_abcd_continue_candidates(conversation)
+
+                self.assertEqual(item["proposed_targets"], [])
+                self.assertFalse(item["selection_eligible"])
+                self.assertEqual(
+                    item["source_opening_mode"],
+                    "customer_greeting_unmappable",
+                )
+                self.assertTrue(counts["opening_mapping_unmappable"])
+
+    def test_review_item_never_proposes_a_target_after_a_hidden_action(self):
+        conversation = sample_conversation()
+        conversation["original"] = [
+            ["agent", "Hello."],
+            ["customer", "Yes."],
+            ["agent", "How can I help?"],
+            ["action", "A hidden account lookup completed."],
+            ["customer", "I need help with a refund."],
+        ]
+
+        item = build_abcd_review_item(conversation, targets_per_conversation=2)
+
+        self.assertEqual(
+            [target["reference_response"] for target in item["proposed_targets"]],
+            ["Yes."],
+        )
+        self.assertFalse(item["selection_eligible"])
+
+    def test_review_item_excludes_nothing_else_as_a_terminal_turn(self):
+        conversation = sample_conversation()
+        conversation["original"] = [
+            ["agent", "Hello."],
+            ["customer", "I need help with a refund."],
+            ["agent", "Do you need anything else?"],
+            ["customer", "We sure do. Nothing else."],
+        ]
+
+        item = build_abcd_review_item(conversation, targets_per_conversation=2)
+
+        self.assertEqual(len(item["proposed_targets"]), 1)
+        self.assertFalse(item["selection_eligible"])
+
+    def test_review_item_excludes_explicit_completion_courtesies(self):
+        for terminal_response in (
+            "Thank you, that will be all.",
+            "No, that'll be it. Thanks again.",
+            "Yes, I see the credits now. Thank you!",
+            "No, thanks for the help.",
+            "Thats all, thanks! Have a good da",
+        ):
+            with self.subTest(response=terminal_response):
+                conversation = sample_conversation()
+                conversation["original"] = [
+                    ["agent", "Hello."],
+                    ["customer", "I need help with a refund."],
+                    ["agent", "The refund is complete. Anything else?"],
+                    ["customer", terminal_response],
+                ]
+
+                item = build_abcd_review_item(
+                    conversation, targets_per_conversation=2
+                )
+
+                self.assertEqual(len(item["proposed_targets"]), 1)
+                self.assertFalse(item["selection_eligible"])
+
+    def test_review_selection_deprioritizes_a_customer_echo_of_the_agent(self):
+        conversation = sample_conversation()
+        conversation["original"] = [
+            ["agent", "Hello."],
+            ["customer", "I need help choosing some boots."],
+            ["agent", "Anything in particular?"],
+            ["customer", "Anything in particular?"],
+            ["agent", "Which brand are you considering?"],
+            ["customer", "Calvin Klein"],
+        ]
+
+        item = build_abcd_review_item(conversation, targets_per_conversation=2)
+
+        self.assertEqual(
+            item["proposed_targets"][1]["reference_response"], "Calvin Klein"
+        )
+
+    def test_review_queue_is_order_independent_and_prefers_distinct_raw_leaves(self):
+        conversations = []
+        for convo_id, subflow in (
+            (100, "refund_status"),
+            (101, "refund_status"),
+            (102, "refund_update"),
+        ):
+            conversation = json.loads(json.dumps(sample_conversation()))
+            conversation["convo_id"] = convo_id
+            conversation["scenario"]["subflow"] = subflow
+            conversations.append(conversation)
+
+        selected = select_abcd_review_queue(
+            conversations,
+            conversations_per_intent=2,
+            targets_per_conversation=2,
+            seed="unit-test",
+        )
+        reversed_selected = select_abcd_review_queue(
+            reversed(conversations),
+            conversations_per_intent=2,
+            targets_per_conversation=2,
+            seed="unit-test",
+        )
+
+        self.assertEqual(
+            [item["source_convo_id"] for item in selected],
+            [item["source_convo_id"] for item in reversed_selected],
+        )
+        self.assertEqual(len(selected), 2)
+        self.assertEqual(len({item["raw_leaf"] for item in selected}), 2)
+        self.assertTrue(all(not item["allowed_for_generation"] for item in selected))
+
+    def test_review_queue_fails_closed_when_an_intent_lacks_coverage(self):
+        with self.assertRaisesRegex(ValueError, "insufficient ABCD review coverage"):
+            select_abcd_review_queue(
+                [sample_conversation()],
+                conversations_per_intent=2,
+                targets_per_conversation=2,
+            )
+
     def test_case_builder_role_flips_and_merges_customer_fragments(self):
         cases = build_abcd_cases(sample_conversation())
 
@@ -139,7 +419,10 @@ class ABCDAdapterTests(unittest.TestCase):
                 "How much longer will it take?",
             ],
         )
-        self.assertEqual(cases[0]["student_messages"][1]["content"], "Hi! How can I help you today?")
+        self.assertEqual(
+            cases[0]["student_messages"][1]["content"],
+            "Hi! How can I help you today?",
+        )
         self.assertEqual(
             [message["role"] for message in cases[-1]["student_messages"]],
             ["system", "user", "assistant", "user", "assistant", "user"],
@@ -152,6 +435,21 @@ class ABCDAdapterTests(unittest.TestCase):
                 "Thanks, that's all." != case["reference_response"]
                 for case in cases
             )
+        )
+
+    def test_case_builder_preserves_a_customer_first_opening(self):
+        conversation = sample_conversation()
+        conversation["original"] = conversation["original"][2:]
+
+        cases = build_abcd_cases(conversation)
+
+        self.assertEqual(
+            cases[0]["reference_response"],
+            "I want to check the status of a refund.",
+        )
+        self.assertEqual(
+            cases[0]["student_messages"][1],
+            {"role": "user", "content": "Hi! How can I help you today?"},
         )
 
     def test_teacher_prompt_uses_reference_only_as_teacher_semantic_anchor(self):

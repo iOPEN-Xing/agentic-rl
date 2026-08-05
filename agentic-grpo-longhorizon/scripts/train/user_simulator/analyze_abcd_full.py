@@ -99,6 +99,7 @@ def main() -> None:
     conversations_by_intent: Counter[str] = Counter()
     candidate_totals: Counter[str] = Counter()
     causal_cut_conversations = 0
+    unmappable_opening_conversations = 0
 
     for conversation in train:
         scenario = conversation["scenario"]
@@ -120,6 +121,9 @@ def main() -> None:
                 continue
             candidate_totals[key] += int(value)
         causal_cut_conversations += int(candidate["causal_cut_applied"])
+        unmappable_opening_conversations += int(
+            candidate["opening_mapping_unmappable"]
+        )
 
     if any(len(labels) != 1 for labels in raw_to_canonical.values()):
         raise RuntimeError("one raw ABCD scenario leaf maps to multiple canonical intents")
@@ -164,7 +168,7 @@ def main() -> None:
         for intent in sorted(canonical_intents)
     }
     report: dict[str, Any] = {
-        "format_version": "abcd-full-train-static-audit-v1",
+        "format_version": "abcd-full-train-static-audit-v2",
         "source": {
             "repository": "https://github.com/asappresearch/abcd",
             "official_commit": args.official_commit,
@@ -195,6 +199,7 @@ def main() -> None:
         "candidate_upper_bound": {
             **dict(candidate_totals),
             "causal_cut_conversations": causal_cut_conversations,
+            "unmappable_opening_conversations": unmappable_opening_conversations,
             "note": (
                 "Upper bound after deterministic reachability/courtesy gates; still "
                 "contains semantic small talk and must not be sent wholesale to a Teacher."
