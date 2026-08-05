@@ -80,6 +80,14 @@ def main() -> None:
     rendered = json.dumps(cases, ensure_ascii=False).casefold()
     if '"role": "tool"' in rendered or '"speaker": "action"' in rendered:
         raise RuntimeError("ABCD action/tool state leaked into pilot cases")
+    action_texts = [
+        str(turn[1]).strip().casefold()
+        for conversation in value
+        for turn in conversation.get("original", [])
+        if isinstance(turn, list) and len(turn) == 2 and turn[0] == "action"
+    ]
+    if any(action_text and action_text in rendered for action_text in action_texts):
+        raise RuntimeError("ABCD action result text leaked into pilot cases")
 
     _atomic_jsonl(args.output, cases)
     counts = Counter(int(case["source_convo_id"]) for case in cases)

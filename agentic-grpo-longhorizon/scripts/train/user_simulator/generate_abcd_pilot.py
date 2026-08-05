@@ -21,6 +21,7 @@ from src.user_simulator_data.abcd_adapter import (  # noqa: E402
     ABCD_PROMPT_VERSION,
     generate_abcd_one,
     summarize_abcd_generations,
+    validate_abcd_resume_alignment,
 )
 from src.user_simulator_data.deepseek_client import DeepSeekClient  # noqa: E402
 
@@ -57,8 +58,8 @@ def _atomic_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--input", type=Path, default=DEFAULT_DIR / "source_cases.jsonl")
-    parser.add_argument("--output", type=Path, default=DEFAULT_DIR / "v0.1.jsonl")
-    parser.add_argument("--report", type=Path, default=DEFAULT_DIR / "v0.1.report.json")
+    parser.add_argument("--output", type=Path, default=DEFAULT_DIR / "v0.3.jsonl")
+    parser.add_argument("--report", type=Path, default=DEFAULT_DIR / "v0.3.report.json")
     parser.add_argument("--model", default="deepseek-v4-flash")
     parser.add_argument("--workers", type=int, default=2)
     parser.add_argument("--limit", type=int, default=None)
@@ -78,6 +79,7 @@ def main() -> None:
     case_ids = [str(case["case_id"]) for case in cases]
     if len(set(case_ids)) != len(case_ids):
         raise RuntimeError("ABCD pilot input contains duplicate case IDs")
+    case_by_id = {str(case["case_id"]): case for case in cases}
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
     expected_ids = set(case_ids)
@@ -88,8 +90,9 @@ def main() -> None:
             case_id = str(row["case_id"])
             if case_id not in expected_ids:
                 raise RuntimeError(f"resume output has unexpected case: {case_id}")
-            if row.get("prompt_version") != ABCD_PROMPT_VERSION:
-                raise RuntimeError(f"resume prompt version mismatch: {case_id}")
+            validate_abcd_resume_alignment(
+                row, case_by_id[case_id], expected_model=args.model
+            )
             attempts[case_id] = max(attempts[case_id], int(row.get("generation_attempt", 1)))
             completed[case_id] = row
 

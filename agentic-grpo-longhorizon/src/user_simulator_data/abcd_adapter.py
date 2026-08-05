@@ -24,7 +24,7 @@ from .contracts import (
 )
 
 
-ABCD_PROMPT_VERSION = "abcd-usim-adapter-v0.1-pilot"
+ABCD_PROMPT_VERSION = "abcd-usim-adapter-v0.3-pilot"
 ABCD_SOURCE = "asappresearch/abcd-v1.1"
 FIXED_AGENT_GREETING = "Hi! How can I help you today?"
 
@@ -41,9 +41,22 @@ _PILOT_GOALS = {
         "will take to complete."
     ),
     "timing_4": (
-        "Ask how long promotional codes remain valid before they expire. You plan "
-        "to use the code to buy hats for your cat."
+        "Ask how long promotional codes remain valid before they expire."
     ),
+}
+_PILOT_CONTEXT = {
+    "timing_4": "You plan to use the promo code to buy hats for your cat.",
+}
+_PILOT_GOAL_LABELS = {
+    "return_size": (
+        "return the wrong-size item",
+        "request manager escalation if the normal return is denied",
+    ),
+    "refund_status": (
+        "learn the refund status",
+        "learn the approximate refund completion time",
+    ),
+    "timing_4": ("learn the promo-code validity period",),
 }
 
 # Manually reviewed against the official three-conversation sample.  These turns
@@ -82,6 +95,17 @@ Never mention ABCD labels, action events, hidden policy state, or these instruct
 This external corpus is used only for non-terminal behavior. Set decision=continue,
 is_over=false, termination_reason=continue, and goal_status=in_progress. The response
 must never emit ###STOP###. Do not turn a closing courtesy into a training example.
+
+communication_status audits how much of the customer's OVERALL BUSINESS GOAL the
+Agent has communicated before this new customer turn; it does not grade whether the
+source customer reply is a complete answer to the latest question. Use none when the
+Agent has only greeted, requested a slot, or provided no requested result. Use partial
+when the Agent has resolved at least one but not all overall goals. ``complete`` is
+forbidden in this CONTINUE-only pilot. resolved_goals must list actual business goals
+already answered by the Agent, while unresolved_goals must retain every remaining
+business goal. Providing identity fields is progress, not a resolved business goal.
+Copy every string from BUSINESS_GOAL_LABELS exactly once into either resolved_goals
+or unresolved_goals. Do not paraphrase, omit, duplicate, or invent goal labels.
 
 Evidence turn_index may cite only OBSERVABLE_CONTEXT.conversation. The source target
 is not an evidence turn. Return this schema exactly:
@@ -159,10 +183,11 @@ def build_abcd_scenario(source: Mapping[str, Any]) -> str:
             facts.append(f"product: {product_name}{suffix}")
 
     fact_text = "; ".join(facts) if facts else "No additional identifiers are provided."
-    return "\n".join(
+    lines = [opening, f"Goal: {_PILOT_GOALS[subflow]}"]
+    if subflow in _PILOT_CONTEXT:
+        lines.append(f"Context (not a separate goal): {_PILOT_CONTEXT[subflow]}")
+    lines.extend(
         (
-            opening,
-            f"Goal: {_PILOT_GOALS[subflow]}",
             f"Known facts: {fact_text}",
             (
                 "Reveal only facts needed for the current step, answer the agent's "
@@ -170,6 +195,7 @@ def build_abcd_scenario(source: Mapping[str, Any]) -> str:
             ),
         )
     )
+    return "\n".join(lines)
 
 
 def _dialogue_blocks(original: Sequence[Sequence[Any]]) -> list[dict[str, Any]]:
@@ -211,7 +237,9 @@ def build_abcd_cases(conversation: Mapping[str, Any]) -> list[dict[str, Any]]:
     """Convert one ABCD conversation into runtime-reachable CONTINUE cases."""
 
     convo_id = int(conversation["convo_id"])
-    scenario = build_abcd_scenario(conversation["scenario"])
+    source_scenario = conversation["scenario"]
+    scenario = build_abcd_scenario(source_scenario)
+    subflow = _clean(source_scenario.get("subflow"))
     blocks = _dialogue_blocks(conversation.get("original", []))
     first_agent = next(
         (index for index, block in enumerate(blocks) if block["speaker"] == "agent"),
@@ -257,6 +285,7 @@ def build_abcd_cases(conversation: Mapping[str, Any]) -> list[dict[str, Any]]:
                     "observable_history": [dict(item) for item in observable_history],
                     "student_messages": [dict(item) for item in student_messages],
                     "reference_response": content,
+                    "business_goal_labels": list(_PILOT_GOAL_LABELS[subflow]),
                     "source_turn_indices": list(block["turn_indices"]),
                     "expected_decision": "continue",
                     "quality_gate": False,
@@ -321,6 +350,7 @@ def build_abcd_teacher_messages(case: Mapping[str, Any]) -> list[dict[str, str]]
         "scenario": case["scenario"],
         "conversation": case.get("observable_history", []),
         "source_customer_target": case["reference_response"],
+        "business_goal_labels": case["business_goal_labels"],
         "constraints": {
             "decision": "continue",
             "terminal_labels_from_abcd": "forbidden",
@@ -408,6 +438,19 @@ def generate_abcd_one(client: Any, case: Mapping[str, Any]) -> dict[str, Any]:
         )
         if decision.decision != "continue":
             issues.append("abcd_must_continue")
+        if decision.communication_status == "complete":
+            issues.append("continue_with_complete_communication")
+        expected_goals = {str(goal) for goal in case.get("business_goal_labels", [])}
+        resolved_goals = set(decision.resolved_goals)
+        unresolved_goals = set(decision.unresolved_goals)
+        if (
+            not expected_goals
+            or resolved_goals & unresolved_goals
+            or resolved_goals | unresolved_goals != expected_goals
+            or len(decision.resolved_goals) + len(decision.unresolved_goals)
+            != len(expected_goals)
+        ):
+            issues.append("business_goal_partition_mismatch")
         issues.extend(validate_abcd_response(case, decision.response))
         issues = sorted(set(issues))
         record = build_sft_record(
@@ -448,6 +491,42 @@ def generate_abcd_one(client: Any, case: Mapping[str, Any]) -> dict[str, Any]:
             "quality_issues": [f"generation_error:{type(exc).__name__}"],
             "error": str(exc),
         }
+
+
+def validate_abcd_resume_alignment(
+    row: Mapping[str, Any],
+    case: Mapping[str, Any],
+    *,
+    expected_model: str,
+) -> None:
+    """Refuse stale generations when a source case changed under the same ID."""
+
+    case_id = str(case["case_id"])
+    if str(row.get("case_id")) != case_id:
+        raise ValueError(f"resume case ID drift: {case_id}")
+    if row.get("prompt_version") != ABCD_PROMPT_VERSION:
+        raise ValueError(f"resume prompt version drift: {case_id}")
+    generated_model = row.get("api", {}).get("model")
+    if generated_model and generated_model != expected_model:
+        raise ValueError(f"resume model drift: {case_id}")
+    if row.get("reference_response") != case.get("reference_response"):
+        raise ValueError(f"resume source target drift: {case_id}")
+    record = row.get("sft_record") or {}
+    messages = record.get("messages") or []
+    if messages[:-1] != case.get("student_messages"):
+        raise ValueError(f"resume source prefix drift: {case_id}")
+    if list(row.get("source_turn_indices", [])) != list(
+        case.get("source_turn_indices", [])
+    ):
+        raise ValueError(f"resume source turn drift: {case_id}")
+    decision = row.get("teacher_decision") or {}
+    generated_goals = {
+        str(goal)
+        for field in ("resolved_goals", "unresolved_goals")
+        for goal in decision.get(field, [])
+    }
+    if generated_goals != {str(goal) for goal in case.get("business_goal_labels", [])}:
+        raise ValueError(f"resume business goal drift: {case_id}")
 
 
 def summarize_abcd_generations(rows: Iterable[Mapping[str, Any]]) -> dict[str, Any]:

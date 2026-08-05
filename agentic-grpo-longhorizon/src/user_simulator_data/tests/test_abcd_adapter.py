@@ -10,6 +10,7 @@ from src.user_simulator_data.abcd_adapter import (
     build_abcd_teacher_messages,
     generate_abcd_one,
     select_abcd_pilot_cases,
+    validate_abcd_resume_alignment,
 )
 
 
@@ -133,8 +134,8 @@ class ABCDAdapterTests(unittest.TestCase):
                 "goal_status": "in_progress",
                 "communication_status": "partial",
                 "response": "About how much longer should the refund take?",
-                "resolved_goals": ["refund status is processing"],
-                "unresolved_goals": ["refund completion time"],
+                "resolved_goals": ["learn the refund status"],
+                "unresolved_goals": ["learn the approximate refund completion time"],
                 "evidence": [
                     {
                         "turn_index": 7,
@@ -158,6 +159,51 @@ class ABCDAdapterTests(unittest.TestCase):
         )
         self.assertFalse(client.request["thinking"])
 
+    def test_generation_quarantines_incomplete_business_goal_partition(self):
+        case = build_abcd_cases(sample_conversation())[2]
+        client = FakeDeepSeekClient(
+            {
+                "decision": "continue",
+                "is_over": False,
+                "termination_reason": "continue",
+                "goal_status": "in_progress",
+                "communication_status": "partial",
+                "response": "How much longer will it take?",
+                "resolved_goals": ["refund is processing"],
+                "unresolved_goals": ["refund completion time"],
+                "evidence": [],
+            }
+        )
+
+        row = generate_abcd_one(client, case)
+
+        self.assertEqual(row["status"], "quarantined")
+        self.assertIn("business_goal_partition_mismatch", row["quality_issues"])
+
+    def test_generation_quarantines_duplicate_business_goal_label(self):
+        case = build_abcd_cases(sample_conversation())[2]
+        client = FakeDeepSeekClient(
+            {
+                "decision": "continue",
+                "is_over": False,
+                "termination_reason": "continue",
+                "goal_status": "in_progress",
+                "communication_status": "partial",
+                "response": "How much longer will it take?",
+                "resolved_goals": ["learn the refund status"],
+                "unresolved_goals": [
+                    "learn the approximate refund completion time",
+                    "learn the approximate refund completion time",
+                ],
+                "evidence": [],
+            }
+        )
+
+        row = generate_abcd_one(client, case)
+
+        self.assertEqual(row["status"], "quarantined")
+        self.assertIn("business_goal_partition_mismatch", row["quality_issues"])
+
     def test_generation_quarantines_novel_identifier_even_when_json_contract_is_valid(self):
         case = build_abcd_cases(sample_conversation())[1]
         client = FakeDeepSeekClient(
@@ -179,6 +225,29 @@ class ABCDAdapterTests(unittest.TestCase):
         self.assertEqual(row["status"], "quarantined")
         self.assertIn("novel_numeric_fact:1234567890", row["quality_issues"])
 
+    def test_generation_rejects_complete_communication_for_external_continue_case(self):
+        case = build_abcd_cases(sample_conversation())[2]
+        client = FakeDeepSeekClient(
+            {
+                "decision": "continue",
+                "is_over": False,
+                "termination_reason": "continue",
+                "goal_status": "in_progress",
+                "communication_status": "complete",
+                "response": "How much longer will it take?",
+                "resolved_goals": [],
+                "unresolved_goals": ["refund completion time"],
+                "evidence": [],
+            }
+        )
+
+        row = generate_abcd_one(client, case)
+
+        self.assertEqual(row["status"], "quarantined")
+        self.assertIn(
+            "continue_with_complete_communication", row["quality_issues"]
+        )
+
     def test_pilot_selection_fails_closed_when_a_reviewed_turn_is_missing(self):
         selected = select_abcd_pilot_cases(
             [sample_conversation()], target_map={9489: {2, 4, 8}}
@@ -193,6 +262,30 @@ class ABCDAdapterTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "reviewed ABCD pilot targets were not built"):
             select_abcd_pilot_cases(
                 [sample_conversation()], target_map={9489: {2, 999}}
+            )
+
+    def test_resume_alignment_rejects_stale_source_prefix(self):
+        case = build_abcd_cases(sample_conversation())[2]
+        client = FakeDeepSeekClient(
+            {
+                "decision": "continue",
+                "is_over": False,
+                "termination_reason": "continue",
+                "goal_status": "in_progress",
+                "communication_status": "partial",
+                "response": "How much longer will it take?",
+                "resolved_goals": ["learn the refund status"],
+                "unresolved_goals": ["learn the approximate refund completion time"],
+                "evidence": [],
+            }
+        )
+        row = generate_abcd_one(client, case)
+        stale_case = json.loads(json.dumps(case))
+        stale_case["student_messages"][-1]["content"] = "A changed Agent prefix."
+
+        with self.assertRaisesRegex(ValueError, "resume source prefix drift"):
+            validate_abcd_resume_alignment(
+                row, stale_case, expected_model="deepseek-v4-flash"
             )
 
 
