@@ -28,35 +28,40 @@ ABCD_PROMPT_VERSION = "abcd-usim-adapter-v0.3-pilot"
 ABCD_SOURCE = "asappresearch/abcd-v1.1"
 FIXED_AGENT_GREETING = "Hi! How can I help you today?"
 
-# Pilot-only, human-readable goals.  Unknown subflows fail closed instead of
-# turning a latent annotation such as ``status_x`` into an unreliable task.
-_PILOT_GOALS = {
-    "return_size": (
-        "Return the purchased item because it is the wrong size. If the normal "
-        "return is refused because it is outside the return window, politely ask "
-        "whether the issue can be escalated to a manager."
-    ),
-    "refund_status": (
-        "Check the status of a refund and find out approximately how long it "
-        "will take to complete."
-    ),
-    "timing_4": (
-        "Ask how long promotional codes remain valid before they expire."
-    ),
-}
-_PILOT_CONTEXT = {
-    "timing_4": "You plan to use the promo code to buy hats for your cat.",
-}
-_PILOT_GOAL_LABELS = {
-    "return_size": (
-        "return the wrong-size item",
-        "request manager escalation if the normal return is denied",
-    ),
-    "refund_status": (
-        "learn the refund status",
-        "learn the approximate refund completion time",
-    ),
-    "timing_4": ("learn the promo-code validity period",),
+# These goals were reviewed at the *conversation* level.  The fallback in 3592
+# and the ETA request in 9489 are not universal properties of their subflows.
+# Binding them to convo_id prevents an apparently known subflow from silently
+# applying a pilot-specific goal to unreviewed full-dataset conversations.
+_PILOT_SCENARIO_SPECS = {
+    3592: {
+        "subflow": "return_size",
+        "goal": (
+            "Return the purchased item because it is the wrong size. If the normal "
+            "return is refused because it is outside the return window, politely ask "
+            "whether the issue can be escalated to a manager."
+        ),
+        "goal_labels": (
+            "return the wrong-size item",
+            "request manager escalation if the normal return is denied",
+        ),
+    },
+    9489: {
+        "subflow": "refund_status",
+        "goal": (
+            "Check the status of a refund and find out approximately how long it "
+            "will take to complete."
+        ),
+        "goal_labels": (
+            "learn the refund status",
+            "learn the approximate refund completion time",
+        ),
+    },
+    3695: {
+        "subflow": "timing_4",
+        "goal": "Ask how long promotional codes remain valid before they expire.",
+        "context": "You plan to use the promo code to buy hats for your cat.",
+        "goal_labels": ("learn the promo-code validity period",),
+    },
 }
 
 # Manually reviewed against the official three-conversation sample.  These turns
@@ -131,13 +136,34 @@ def _display_name(value: Any) -> str:
     return _clean(value).replace("_", " ").title()
 
 
-def build_abcd_scenario(source: Mapping[str, Any]) -> str:
+def canonical_abcd_intent(conversation: Mapping[str, Any]) -> str:
+    """Return the 55-way intent label, not the 96-way raw scenario leaf."""
+
+    labels: list[str] = []
+    for turn_index, turn in enumerate(conversation.get("delexed", [])):
+        targets = turn.get("targets") if isinstance(turn, Mapping) else None
+        if not isinstance(targets, list) or not targets or not _clean(targets[0]):
+            raise ValueError(f"missing ABCD canonical intent at turn {turn_index}")
+        labels.append(_clean(targets[0]))
+    if not labels:
+        raise ValueError("ABCD conversation has no delexed intent labels")
+    unique = set(labels)
+    if len(unique) != 1:
+        raise ValueError(f"ABCD canonical intent drift: {sorted(unique)}")
+    return labels[0]
+
+
+def build_abcd_scenario(source: Mapping[str, Any], *, convo_id: int) -> str:
     """Build a customer-known natural instruction without action/policy state."""
 
+    spec = _PILOT_SCENARIO_SPECS.get(int(convo_id))
+    if spec is None:
+        raise ValueError(f"unreviewed ABCD pilot conversation: {convo_id}")
     subflow = _clean(source.get("subflow"))
-    if subflow not in _PILOT_GOALS:
+    if subflow != spec["subflow"]:
         raise ValueError(
-            f"unsupported ABCD pilot subflow {subflow!r}; add a reviewed goal mapping"
+            f"ABCD pilot subflow drift for {convo_id}: "
+            f"{subflow!r} != {spec['subflow']!r}"
         )
     personal = source.get("personal") or {}
     order = source.get("order") or {}
@@ -183,9 +209,9 @@ def build_abcd_scenario(source: Mapping[str, Any]) -> str:
             facts.append(f"product: {product_name}{suffix}")
 
     fact_text = "; ".join(facts) if facts else "No additional identifiers are provided."
-    lines = [opening, f"Goal: {_PILOT_GOALS[subflow]}"]
-    if subflow in _PILOT_CONTEXT:
-        lines.append(f"Context (not a separate goal): {_PILOT_CONTEXT[subflow]}")
+    lines = [opening, f"Goal: {spec['goal']}"]
+    if spec.get("context"):
+        lines.append(f"Context (not a separate goal): {spec['context']}")
     lines.extend(
         (
             f"Known facts: {fact_text}",
@@ -233,13 +259,66 @@ def _dialogue_blocks(original: Sequence[Sequence[Any]]) -> list[dict[str, Any]]:
     return blocks
 
 
+def count_abcd_continue_candidates(conversation: Mapping[str, Any]) -> dict[str, Any]:
+    """Count conservative full-data candidates without constructing a scenario."""
+
+    original = list(conversation.get("original", []))
+    blocks = _dialogue_blocks(original)
+    natural_indices = [
+        index
+        for index, turn in enumerate(original)
+        if isinstance(turn, Sequence)
+        and not isinstance(turn, (str, bytes))
+        and len(turn) == 2
+        and _clean(turn[0]).casefold() in {"agent", "customer"}
+    ]
+    consumed_indices = [index for block in blocks for index in block["turn_indices"]]
+    first_agent = next(
+        (index for index, block in enumerate(blocks) if block["speaker"] == "agent"),
+        None,
+    )
+    runtime_blocks = blocks[first_agent + 1 :] if first_agent is not None else []
+    customer_blocks = [
+        block for block in runtime_blocks if block["speaker"] == "customer"
+    ]
+    courtesy_blocks = [
+        block
+        for block in customer_blocks
+        if _TERMINAL_COURTESY.search(" ".join(block["texts"]))
+    ]
+    candidates = [block for block in customer_blocks if block not in courtesy_blocks]
+    return {
+        "candidate_continue_blocks": len(candidates),
+        "candidate_response_chars": sum(
+            len(" ".join(block["texts"])) for block in candidates
+        ),
+        "customer_blocks_after_opening": len(customer_blocks),
+        "customer_fragments_merged": sum(
+            max(len(block["turn_indices"]) - 1, 0) for block in customer_blocks
+        ),
+        "terminal_courtesy_blocks": len(courtesy_blocks),
+        "action_turns": sum(
+            isinstance(turn, Sequence)
+            and not isinstance(turn, (str, bytes))
+            and len(turn) == 2
+            and _clean(turn[0]).casefold() == "action"
+            for turn in original
+        ),
+        "causal_cut_applied": bool(
+            natural_indices
+            and consumed_indices
+            and max(consumed_indices) < max(natural_indices)
+        ),
+    }
+
+
 def build_abcd_cases(conversation: Mapping[str, Any]) -> list[dict[str, Any]]:
     """Convert one ABCD conversation into runtime-reachable CONTINUE cases."""
 
     convo_id = int(conversation["convo_id"])
     source_scenario = conversation["scenario"]
-    scenario = build_abcd_scenario(source_scenario)
-    subflow = _clean(source_scenario.get("subflow"))
+    scenario = build_abcd_scenario(source_scenario, convo_id=convo_id)
+    scenario_spec = _PILOT_SCENARIO_SPECS[convo_id]
     blocks = _dialogue_blocks(conversation.get("original", []))
     first_agent = next(
         (index for index, block in enumerate(blocks) if block["speaker"] == "agent"),
@@ -285,7 +364,7 @@ def build_abcd_cases(conversation: Mapping[str, Any]) -> list[dict[str, Any]]:
                     "observable_history": [dict(item) for item in observable_history],
                     "student_messages": [dict(item) for item in student_messages],
                     "reference_response": content,
-                    "business_goal_labels": list(_PILOT_GOAL_LABELS[subflow]),
+                    "business_goal_labels": list(scenario_spec["goal_labels"]),
                     "source_turn_indices": list(block["turn_indices"]),
                     "expected_decision": "continue",
                     "quality_gate": False,

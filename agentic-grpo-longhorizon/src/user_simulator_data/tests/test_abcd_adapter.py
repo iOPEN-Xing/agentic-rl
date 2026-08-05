@@ -8,6 +8,8 @@ from src.user_simulator_data.abcd_adapter import (
     build_abcd_cases,
     build_abcd_scenario,
     build_abcd_teacher_messages,
+    canonical_abcd_intent,
+    count_abcd_continue_candidates,
     generate_abcd_one,
     select_abcd_pilot_cases,
     validate_abcd_resume_alignment,
@@ -50,6 +52,18 @@ def sample_conversation() -> dict:
             ["action", "Refund ETA is 7 days."],
             ["customer", "Thanks, that's all."],
         ],
+        "delexed": [
+            {
+                "speaker": "agent",
+                "text": "good afternoon",
+                "targets": ["refund_status", "retrieve_utterance", None, [], 0],
+            },
+            {
+                "speaker": "customer",
+                "text": "refund status",
+                "targets": ["refund_status", None, None, [], -1],
+            },
+        ],
     }
 
 
@@ -71,7 +85,9 @@ class FakeDeepSeekClient:
 
 class ABCDAdapterTests(unittest.TestCase):
     def test_scenario_exposes_customer_known_goal_and_facts_not_latent_labels(self):
-        scenario = build_abcd_scenario(sample_conversation()["scenario"])
+        scenario = build_abcd_scenario(
+            sample_conversation()["scenario"], convo_id=9489
+        )
 
         self.assertIn("check the status of a refund", scenario.casefold())
         self.assertIn("how long it will take", scenario.casefold())
@@ -81,6 +97,35 @@ class ABCDAdapterTests(unittest.TestCase):
         self.assertNotIn("refund_status", scenario)
         self.assertNotIn("image_url", scenario)
         self.assertNotIn("images/", scenario)
+
+    def test_scenario_fails_closed_for_unreviewed_conversation_in_known_subflow(self):
+        with self.assertRaisesRegex(ValueError, "unreviewed ABCD pilot conversation"):
+            build_abcd_scenario(
+                sample_conversation()["scenario"], convo_id=123456
+            )
+
+    def test_canonical_intent_comes_from_consistent_delexed_targets(self):
+        conversation = sample_conversation()
+        conversation["scenario"]["subflow"] = "timing_4"
+        for turn in conversation["delexed"]:
+            turn["targets"][0] = "timing"
+
+        self.assertEqual(canonical_abcd_intent(conversation), "timing")
+
+    def test_canonical_intent_rejects_turn_level_label_drift(self):
+        conversation = sample_conversation()
+        conversation["delexed"][1]["targets"][0] = "refund_update"
+
+        with self.assertRaisesRegex(ValueError, "canonical intent drift"):
+            canonical_abcd_intent(conversation)
+
+    def test_full_analysis_counts_only_runtime_reachable_nonterminal_blocks(self):
+        counts = count_abcd_continue_candidates(sample_conversation())
+
+        self.assertEqual(counts["candidate_continue_blocks"], 3)
+        self.assertEqual(counts["customer_fragments_merged"], 1)
+        self.assertEqual(counts["terminal_courtesy_blocks"], 0)
+        self.assertTrue(counts["causal_cut_applied"])
 
     def test_case_builder_role_flips_and_merges_customer_fragments(self):
         cases = build_abcd_cases(sample_conversation())
