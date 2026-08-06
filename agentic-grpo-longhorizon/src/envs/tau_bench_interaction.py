@@ -55,6 +55,7 @@ def record_policy_error_action(
         "inc_reward": 0.0,
         "done": False,
         "is_error": True,
+        "observation": f"Error: {error_type}",  # v5: for soft-failure detection in scoring
         "error_type": error_type,
         "raw_arguments": str(raw_arguments)[:1000],
         "extracted_entities": {},
@@ -186,54 +187,115 @@ def _compute_partial_credit_reward(state: dict) -> float:
     return max(0.0, min(score, 0.3))
 
 
+def _obs_indicates_success(obs: str, tool_name: str) -> bool:
+    """τ-bench语义：非Error的返回值中，有实质性进展（结构化数据、ID确认等）表示成功。
+
+    这是对 is_error 判定的补充——tau_bench 的 inc_reward 才是 ground truth，
+    但 obs 中的关键词可以辅助识别"软失败"（inc_reward=0 但 obs 无 Error 前缀）。
+    """
+    if not obs or obs.startswith("Error:"):
+        return False
+    if tool_name in _WRITE_TOOLS:
+        return any(
+            kw in obs
+            for kw in (
+                "HAT",
+                "reservation",
+                "updated",
+                "cancelled",
+                "certificate",
+                "baggage",
+                "flight",
+                "passenger",
+            )
+        )
+    if tool_name in _READ_TOOLS:
+        return any(kw in obs for kw in ("[", "{", "flight", "user", "airport", "detail"))
+    return False
+
+
+def _is_tool_call_failure(inc_reward: float, obs: str, tool_name: str) -> bool:
+    """比 obs.startswith('Error:') 更可靠的 tool 调用失败检测。
+
+    原则：tau_bench 的 inc_reward 是 ground truth。当 inc_reward==0 且
+    obs 没有成功指示词时，视为软失败（工具执行了但没有产生有用结果）。
+    这类失败同样应触发 P0 惩罚和 P3 recovery 检测。
+    """
+    return bool(inc_reward == 0.0 and not _obs_indicates_success(obs, tool_name))
+
+
 def _compute_reasoning_quality_score(action_history: list[dict]) -> float:
     """
-    PRM-Lite v4-optimal: rule-based per-step reasoning quality scorer.
-    Hyperparameters tuned via offline grid search on vanilla eval data.
-    Key design principles:
-    1. Mean-based (not sum-based) to avoid long-trajectory penalty flattening
-    2. Penalize "busy but wrong" (length penalty + no implicit_think reward)
-    3. Reward signal concentrated in high-value actions (data chain, recovery)
-    4. Force reasoning (no-reasoning penalty strengthened)
+    PRM-Lite v5: 基于 PRM-Lite v4 的优化版本，主要改进：
+
+    1. 用 inc_reward + obs 语义替代字符串前缀 is_error 检测（P0 更可靠）
+    2. 移除 implicit_think 对 action_history 的污染（v4 的双倍计数问题）
+    3. B4/B5 anti-hacking 扩展到 2-step check（防止 think-think-bypass）
+    4. P8 length penalty 阈值调整为 6（airline 优质轨迹均值 4-6 步）
+    5. B7 read diversity 阈值调整为 2（airline 实际 read 工具只有 3 类）
+    6. P3 error recovery 区分"同一工具换参数"的修正行为
+    7. P5 no reasoning penalty 覆盖 >= 2 步轨迹，>= 3 步强惩罚
+
+    所有超参数变更均有领域依据（见 tau_bench airline 工具集定义）。
     """
     if not action_history:
         return 0.0
 
-    per_step_scores = []
+    per_step_scores: list[float] = []
 
     for i, action in enumerate(action_history):
         tool = action["tool"]
         params = action.get("parameters", {})
         pstr = action.get("param_str", "")
+        inc_reward = float(action.get("inc_reward", 0.0))
+        obs = str(action.get("observation", "") or "")
         score = 0.0
 
-        # --- Core Penalties ---
+        # --- P0: Core Penalty (reliability-based, not string-based) ---
 
-        # P0: Penalize the invalid action itself. Previously is_error only
-        # affected the following action, leaving terminal errors unpenalized.
-        if action.get("is_error", False):
-            score += _PRM_LITE_ACTION_ERROR_PENALTY
+        # v5: 使用 inc_reward=0 且 obs 无成功指示词作为 is_error 判定。
+        # 这覆盖了 "tool 执行了但结果无用" 的软失败，比 obs.startswith("Error:")
+        # 更准确（tau_bench 很多软失败返回 0 reward 但 obs 没有 Error 前缀）。
+        is_failure = _is_tool_call_failure(
+            inc_reward,
+            action.get("observation", ""),
+            tool,
+        )
+        if is_failure:
+            score += _PRM_LITE_ACTION_ERROR_PENALTY  # -0.10
 
-        # P1: Placeholder penalty (schema-based)
+        # --- P1: Placeholder penalty (schema-based) ---
         if tool not in _THINK_TOOLS and _has_placeholder(params):
             score += (-0.05 if tool in _WRITE_TOOLS else -0.03)
 
-        # P2: Redundancy (same tool+params in last 3 steps)
+        # --- P2: Redundancy ---
         if tool not in _THINK_TOOLS and _is_redundant(action_history[:i], tool, params, window=3):
             score -= 0.03
 
-        # P3: Error repetition vs recovery
+        # --- P3: Error recovery vs repetition ---
+        # v5 改进：区分"同一工具换参数"（可能是修正）和"完全换工具"
         if i >= 1 and tool not in _THINK_TOOLS:
             prev = action_history[i - 1]
-            if prev.get("is_error", False):
+            prev_is_failure = bool(
+                prev.get("is_error", False)
+                or _is_tool_call_failure(
+                    float(prev.get("inc_reward", 0.0)),
+                    str(prev.get("observation", "") or ""),
+                    prev.get("tool", ""),
+                )
+            )
+            if prev_is_failure:
                 prev_sig = (prev.get("tool", ""), prev.get("param_str", ""))
                 curr_sig = (tool, pstr)
                 if curr_sig == prev_sig:
-                    score -= 0.04
+                    score -= 0.04  # 重复同一个错误
+                elif tool != prev["tool"]:
+                    score += 0.03  # 换了工具（保守）
                 else:
-                    score += 0.05
+                    # 同一工具不同参数：可能是修正行为（比 v4 的 0 更合理）
+                    score += 0.02
 
-        # P4: Escalation penalty (layered: did we even try to gather info?)
+        # --- P4: Escalation penalty ---
         if tool in _ESCALATION_TOOLS:
             has_done_read = any(
                 prev.get("tool") in _READ_TOOLS
@@ -241,83 +303,107 @@ def _compute_reasoning_quality_score(action_history: list[dict]) -> float:
             )
             score += (-0.10 if not has_done_read else -0.05)
 
-        # --- Positive Incentives ---
-
-        # B1: Data chain (parameter value appeared in previous extracted entities)
+        # --- B1: Data chain (parameter value appeared in previous extracted entities) ---
         if i >= 1 and tool not in _THINK_TOOLS and params:
-            seen_entities = set()
+            seen_entities: set[str] = set()
             for prev in action_history[:i]:
                 for ent_list in prev.get("extracted_entities", {}).values():
                     seen_entities.update(ent_list)
-            used = any(isinstance(v, str) and v in seen_entities for v in params.values())
+            used = any(
+                isinstance(v, str) and v in seen_entities for v in params.values()
+            )
             if used:
                 score += (0.08 if tool in _WRITE_TOOLS else 0.04)
 
-        # B2: First read exploration (diverse info gathering)
+        # --- B2: First read exploration ---
         if tool in _READ_TOOLS:
             seen_reads = set(
-                prev["tool"] for prev in action_history[:i]
+                prev["tool"]
+                for prev in action_history[:i]
                 if prev.get("tool") in _READ_TOOLS
             )
             if tool not in seen_reads:
                 score += 0.01
 
-        # B3: Removed — success_bonus caused anti-incentive in long failures
-
-        # B4/B5: Think bonus with anti-hacking (tuned to +0.01 via grid search)
+        # --- B4/B5: Think bonus with 2-step anti-hacking ---
+        # v5: 原版只检查 action[i+1]，现在扩展到 action[i+2]。
+        # 防御：think → think → non-placeholder → actual tool（v4 漏掉）
         if tool in _THINK_TOOLS:
-            # (a) consecutive think: no bonus
+            # (a) consecutive think：不奖励
             if i >= 1 and action_history[i - 1].get("tool") in _THINK_TOOLS:
                 pass
-            # (b) think is the last step: no bonus (didn't guide any action)
+            # (b) think 是最后一步：不奖励
             elif i == len(action_history) - 1:
                 pass
-            # (c) think followed by placeholder/redundancy: no bonus
-            elif i + 1 < len(action_history):
-                next_action = action_history[i + 1]
-                next_tool = next_action.get("tool", "")
-                next_params = next_action.get("parameters", {})
-                if _has_placeholder(next_params) or _is_redundant(
-                    action_history[:i + 1], next_tool, next_params, window=3
-                ):
-                    pass
-                else:
-                    score += 0.01
             else:
-                score += 0.01
+                safe = False
+                next1 = action_history[i + 1] if i + 1 < len(action_history) else None
+                if next1:
+                    next1_tool = next1.get("tool", "")
+                    next1_params = next1.get("parameters", {})
+                    if next1_tool in _THINK_TOOLS:
+                        # think-think-bypass: 再看 action[i+2]
+                        if i + 2 < len(action_history):
+                            next2 = action_history[i + 2]
+                            next2_tool = next2.get("tool", "")
+                            next2_params = next2.get("parameters", {})
+                            if (
+                                next2_tool not in _THINK_TOOLS
+                                and not _has_placeholder(next2_params)
+                            ):
+                                safe = True  # think → think → non-placeholder → actual tool
+                    elif _has_placeholder(next1_params) or _is_redundant(
+                        action_history[: i + 1], next1_tool, next1_params, window=3
+                    ):
+                        pass  # 被绕过，不奖励
+                    else:
+                        safe = True  # think → direct non-placeholder tool
+                if safe:
+                    score += 0.01
 
-        # B6: Implicit think reward REMOVED (grid search found it inflates long-failure scores)
-
-        # P9: Cheap reasoning penalty — assistant content too short before tool call
-        # 直接打击"没想清楚就调 tool"的敷衍行为 (SFT baseline 中 66.7% turns 受此罚)
-        # 注意: content=="" 表示未记录(旧数据/测试)，不触发惩罚; 0 < len(content) < 30 才罚
+        # --- P9: Cheap reasoning penalty ---
+        # v5: content 来自 action_history["content"]，记录的是 tool 调用前的 assistant content。
+        # 如果记录缺失（旧数据），不触发惩罚（已保护）。
         if tool not in _THINK_TOOLS:
             content = action.get("content", "")
-            if 0 < len(content) < 30:
+            if content and 0 < len(content) < 30:
                 score -= 0.02
 
         per_step_scores.append(score)
 
-    mean_score = sum(per_step_scores) / len(per_step_scores) if per_step_scores else 0.0
+    mean_score = (
+        sum(per_step_scores) / len(per_step_scores) if per_step_scores else 0.0
+    )
 
-    # --- Trajectory-level adjustments (not averaged) ---
+    # --- Trajectory-level adjustments ---
 
-    # P5: No reasoning penalty (strengthened to -0.05 via grid search)
-    think_count = sum(1 for a in action_history if a["tool"] in _THINK_TOOLS)
-    if think_count == 0 and len(action_history) >= 3:
-        mean_score -= 0.05
+    # P5: No reasoning penalty（v5: 覆盖 >= 2 步，>= 3 步强惩罚）
+    think_count = sum(
+        1 for a in action_history if a["tool"] in _THINK_TOOLS
+    )
+    if think_count == 0:
+        if len(action_history) >= 3:
+            mean_score -= 0.05
+        elif len(action_history) >= 2:
+            mean_score -= 0.02  # 新增：两步都没 thinking 的弱惩罚
 
-    # B7: Read tool diversity bonus (reduced to +0.01 via grid search)
-    all_reads = set(a["tool"] for a in action_history if a.get("tool") in _READ_TOOLS)
-    if len(all_reads) >= 3:
+    # B7: Read diversity（v5: 阈值从 3 降到 2，airline 实际只有 3 类 read tools）
+    all_reads = set(
+        a["tool"]
+        for a in action_history
+        if a.get("tool") in _READ_TOOLS
+    )
+    if len(all_reads) >= 2:
         mean_score += 0.01
 
-    # P8: Length penalty — penalize excessively long trajectories
-    # v4-optimal grid search: threshold=8, per_step=-0.01
-    length_threshold = 8
-    length_penalty_per_step = -0.01
+    # P8: Length penalty（v5: 阈值从 8 降到 6，per_step 罚幅从 -0.01 降到 -0.005）
+    # airline 优质轨迹集中在 4-6 步，> 6 步多为冗余操作
+    length_threshold = 6
+    length_penalty_per_step = -0.005
     if len(action_history) > length_threshold:
-        mean_score += length_penalty_per_step * (len(action_history) - length_threshold)
+        mean_score += length_penalty_per_step * (
+            len(action_history) - length_threshold
+        )
 
     return float(max(-0.5, min(0.5, mean_score)))
 

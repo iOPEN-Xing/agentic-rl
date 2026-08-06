@@ -202,6 +202,33 @@ bash run_exp4_prm_lite_lata.sh
 bash run_vanilla.sh
 ```
 
+#### Experiment naming and configuration variants
+
+| Slug | Description | Training config | Eval launcher |
+| --- | --- | --- | --- |
+| `exp5` | GRPO + LATA + turn-derived trajectory reward shaping (legacy) | `configs/train/grpo/lata.yaml` | `bash scripts/eval/eval_exp4_prm_lite_lata.sh` |
+| `exp6` | Turn-PPO (`turn_gae` advantage + `turn_ppo` policy loss), PRM-Lite shaping optional | `configs/train/grpo/turn_level_reward.yaml` | `bash scripts/eval/eval_turn_ppo.sh` |
+| `exp7` | Turn-PPO **strict** — terminal τ-bench reward only, turn-level shaping disabled | `configs/train/grpo/turn_ppo_strict.yaml` | `bash scripts/eval/eval_turn_ppo_strict.sh` |
+
+`exp6` and `exp7` use the same advantage estimator, the same policy loss, the
+same rollout budget (32 trajectories per update with `n=1`), and the same H200
+launcher pattern. The strict variant disables the optional turn-level reward
+shaping path entirely so the credit assignment question stays isolated from any
+heuristic turn reward.
+
+```bash
+# Strict Turn-PPO on 4xH200
+AGENTIC_RL_VANILLA_DATA_ROOT=/absolute/path/to/experiments/vanilla \
+    bash scripts/train/grpo/run_turn_ppo_strict_h200_4gpu.sh
+
+# Evaluate strict Turn-PPO checkpoints
+bash scripts/eval/eval_turn_ppo_strict.sh
+```
+
+Checkpoints land in `experiments/h200_4gpu/turn_ppo_strict/<run-tag>/`, and the
+eval launcher expects exported Hugging Face checkpoints at
+`experiments/turn_ppo_strict/hf_step_{50,100,150,200}`.
+
 ### 3. Independent Evaluation
 
 ```bash

@@ -109,6 +109,27 @@ class AgentData:
             self.failure_reason = reason
         self.valid_for_training = False
 
+    def finalize_pending_turn(self) -> None:
+        """Mark the in-flight assistant span as terminal so subsequent spans can't reuse it.
+
+        Both ``_handle_processing_tools_state`` (terminal tool / environment done) and
+        ``_handle_interacting_state`` (interaction-side should_terminate_sequence) used
+        to short-circuit without rolling the cursor forward. Without this helper, the
+        next trajectory sharing the same AgentData buffer could see a stale
+        ``pending_turn_start`` that points into the middle of the previous assistant
+        response, causing ``assistant_turn_spans`` to overlap. Assistant turn ids
+        already get appended in ``_handle_generating_state``, so this helper only
+        advances bookkeeping state without rewriting any spans.
+        """
+        cursor = int(self.pending_turn_start)
+        if cursor < len(self.response_mask) and self.assistant_turn_spans:
+            self.pending_turn_start = len(self.response_mask)
+        elif cursor < len(self.response_mask):
+            # No assistant turn was recorded for this segment (e.g. env_done before
+            # the first response). Still roll the cursor forward so the next run
+            # starts from a clean boundary.
+            self.pending_turn_start = len(self.response_mask)
+
 
 @register("tool_agent")
 class ToolAgentLoop(AgentLoopBase):
@@ -500,6 +521,7 @@ class ToolAgentLoop(AgentLoopBase):
             agent_data.response_logprobs += [0.0] * len(response_ids)
         agent_data.user_turns += 1
         if environment_done or not agent_data.valid_for_training:
+            agent_data.finalize_pending_turn()
             return AgentState.TERMINATED
         return AgentState.GENERATING
 
@@ -565,6 +587,7 @@ class ToolAgentLoop(AgentLoopBase):
         # double check prompt
         # Check termination condition
         if should_terminate_sequence:
+            agent_data.finalize_pending_turn()
             return AgentState.TERMINATED
         else:
             return AgentState.GENERATING

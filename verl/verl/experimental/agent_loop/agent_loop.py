@@ -591,8 +591,12 @@ class AgentLoopWorkerBase:
         assistant_turn_spans = [
             input.extra_fields.get("assistant_turn_spans", []) for input in inputs
         ]
-        if any("assistant_turn_spans" in input.extra_fields for input in inputs):
-            batch["turn_ids"] = materialize_turn_ids(assistant_turn_spans, response_mask)
+        # Strict Turn-PPO requires `turn_ids` to be present on every batch so that the
+        # advantage and policy loss fail fast on missing coverage instead of silently
+        # dropping the field. We materialize unconditionally; samples that recorded no
+        # assistant turns produce an empty span list, which ``materialize_turn_ids``
+        # turns into a "trainable response token not covered" error downstream.
+        batch["turn_ids"] = materialize_turn_ids(assistant_turn_spans, response_mask)
 
         scores = [input.reward_score for input in inputs]
         # W5 conditional PRM: support dict reward_score from interaction

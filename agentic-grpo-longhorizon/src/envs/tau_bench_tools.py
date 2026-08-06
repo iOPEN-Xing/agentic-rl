@@ -144,6 +144,7 @@ class TauBenchToolBase(BaseTool):
             "inc_reward": inc_reward,
             "done": is_done,
             "is_error": bool(obs and obs.startswith("Error:")),
+            "observation": obs,  # v5: PRM-Lite scoring needs raw obs for soft-failure detection
             "extracted_entities": _extract_entities(obs),
             "content": assistant_content or "",
         })

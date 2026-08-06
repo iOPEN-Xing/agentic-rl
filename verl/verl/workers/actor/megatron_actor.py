@@ -323,6 +323,12 @@ class MegatronPPOActor(BasePPOActor):
         # Include rollout_log_probs for computing rollout_corr metrics in bypass mode
         if "rollout_log_probs" in data.batch.keys():
             select_keys.append("rollout_log_probs")
+        # Turn-PPO policy loss requires per-token turn ids to compute one ratio per assistant turn.
+        # Mirrors verl/verl/workers/actor/dp_actor.py so FSDP and Megatron stay aligned.
+        if self.config.policy_loss.get("loss_mode", "vanilla") == "turn_ppo":
+            if "turn_ids" not in data.batch.keys():
+                raise ValueError("turn_ppo policy loss requires turn_ids in the training batch")
+            select_keys.append("turn_ids")
         self.has_multi_modal_inputs = "multi_modal_inputs" in data.non_tensor_batch.keys()
         if self.has_multi_modal_inputs:
             data = data.select(select_keys, ["multi_modal_inputs"])
@@ -454,15 +460,18 @@ class MegatronPPOActor(BasePPOActor):
                 # Extract pre-computed rollout correction weights if present
                 # Weights are computed centrally in trainer and added when algorithm.rollout_is=True
                 rollout_is_weights = data.get("rollout_is_weights", None)
-                pg_loss, pg_metrics = policy_loss_fn(
-                    old_log_prob=old_log_prob,
-                    log_prob=log_prob,
-                    advantages=advantages,
-                    response_mask=response_mask,
-                    loss_agg_mode=loss_agg_mode,
-                    config=self.config,
-                    rollout_is_weights=rollout_is_weights,
-                )
+                policy_loss_kwargs = {
+                    "old_log_prob": old_log_prob,
+                    "log_prob": log_prob,
+                    "advantages": advantages,
+                    "response_mask": data["response_mask"],
+                    "loss_agg_mode": loss_agg_mode,
+                    "config": self.config,
+                    "rollout_is_weights": rollout_is_weights,
+                }
+                if loss_mode == "turn_ppo":
+                    policy_loss_kwargs["turn_ids"] = data["turn_ids"]
+                pg_loss, pg_metrics = policy_loss_fn(**policy_loss_kwargs)
                 stats.update(pg_metrics)
 
                 # Skip if using pure rollout correction mode (metrics already in pg_metrics)

@@ -175,6 +175,44 @@ Turn-PPO has additional critic parameters, optimizer state, forward/backward
 compute, and memory. Those costs must be reported separately even when rollout
 counts match.
 
+### Experiment naming and configuration variants
+
+The repository distinguishes three experiment families so reviewers can map the
+ablation cleanly:
+
+| Slug | Purpose | Training config | Eval launcher |
+| --- | --- | --- | --- |
+| `exp5` | GRPO + LATA + turn-derived trajectory reward shaping (legacy) | [`lata.yaml`](agentic-grpo-longhorizon/configs/train/grpo/lata.yaml) | `scripts/eval/eval_exp4_prm_lite_lata.sh` |
+| `exp6` | Turn-PPO (turn_gae advantage + turn_ppo policy loss), PRM-Lite shaping optional | [`turn_level_reward.yaml`](agentic-grpo-longhorizon/configs/train/grpo/turn_level_reward.yaml) | `bash scripts/eval/eval_turn_ppo.sh` |
+| `exp7` | Turn-PPO **strict** — terminal τ-bench reward only, turn-level shaping disabled | [`turn_ppo_strict.yaml`](agentic-grpo-longhorizon/configs/train/grpo/turn_ppo_strict.yaml) | `bash scripts/eval/eval_turn_ppo_strict.sh` |
+
+`exp6` and `exp7` use the same advantage estimator (`turn_gae`), the same
+policy loss (`turn_ppo`), the same rollout budget (32 trajectories per update
+with `n=1`), and the same H200 launcher pattern. The strict variant disables
+the optional turn-level reward shaping path entirely so the credit assignment
+question isolates cleanly from any heuristic turn reward.
+
+To run the strict variant on the one-node H200 launcher use:
+
+```bash
+AGENTIC_RL_DRY_RUN=1 \
+bash agentic-grpo-longhorizon/scripts/train/grpo/run_turn_ppo_strict_h200_4gpu.sh
+
+AGENTIC_RL_VANILLA_DATA_ROOT=/absolute/path/to/experiments/vanilla \
+bash agentic-grpo-longhorizon/scripts/train/grpo/run_turn_ppo_strict_h200_4gpu.sh
+```
+
+To evaluate strict-turn-PPO checkpoints use:
+
+```bash
+bash agentic-grpo-longhorizon/scripts/eval/eval_turn_ppo_strict.sh
+```
+
+The strict launcher writes checkpoints under
+`experiments/h200_4gpu/turn_ppo_strict/<run-tag>/` and the evaluation launcher
+expects exported Hugging Face checkpoints under
+`experiments/turn_ppo_strict/hf_step_{50,100,150,200}`.
+
 ## One-Node 4×H200 Launcher
 
 The dedicated launcher keeps the strict Turn-PPO YAML unchanged and uses a

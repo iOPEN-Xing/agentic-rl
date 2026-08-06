@@ -202,6 +202,28 @@ bash run_exp4_prm_lite_lata.sh
 bash run_vanilla.sh
 ```
 
+#### 实验命名与配置变体
+
+| Slug | 描述 | 训练配置 | 评测脚本 |
+| --- | --- | --- | --- |
+| `exp5` | GRPO + LATA + turn-derived trajectory reward shaping（legacy） | `configs/train/grpo/lata.yaml` | `bash scripts/eval/eval_exp4_prm_lite_lata.sh` |
+| `exp6` | Turn-PPO（`turn_gae` 优势 + `turn_ppo` 策略损失），可选 PRM-Lite shaping | `configs/train/grpo/turn_level_reward.yaml` | `bash scripts/eval/eval_turn_ppo.sh` |
+| `exp7` | Turn-PPO **strict**——仅使用终端 τ-bench 奖励，关闭 turn-level shaping | `configs/train/grpo/turn_ppo_strict.yaml` | `bash scripts/eval/eval_turn_ppo_strict.sh` |
+
+`exp6` 与 `exp7` 使用相同 advantage 估计器、相同 policy loss、相同 rollout 预算（每次更新 32 条轨迹，`n=1`）以及相同 H200 启动器模式。strict 变体完全关闭可选的 turn-level reward shaping 路径，使 credit assignment 的论证独立于任何启发式 turn reward。
+
+```bash
+# 4×H200 上的 strict Turn-PPO
+AGENTIC_RL_VANILLA_DATA_ROOT=/absolute/path/to/experiments/vanilla \
+    bash scripts/train/grpo/run_turn_ppo_strict_h200_4gpu.sh
+
+# 评测 strict Turn-PPO checkpoint
+bash scripts/eval/eval_turn_ppo_strict.sh
+```
+
+checkpoint 输出到 `experiments/h200_4gpu/turn_ppo_strict/<run-tag>/`，评测期望
+`experiments/turn_ppo_strict/hf_step_{50,100,150,200}`。
+
 ### 3. 独立评测
 
 ```bash
