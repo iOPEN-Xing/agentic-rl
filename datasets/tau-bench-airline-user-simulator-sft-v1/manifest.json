@@ -1,0 +1,67 @@
+{
+  "format_version": "tau-airline-user-simulator-sft-v1-cleaned",
+  "release_date": "2026-08-06",
+  "dataset_name": "tau-bench-airline-user-simulator-sft-v1",
+  "source": {
+    "benchmark": "tau-bench airline",
+    "upstream_repository": "https://github.com/sierra-research/tau-bench",
+    "upstream_license": "MIT",
+    "source_pipeline_format": "tau-airline-user-simulator-sft-v1",
+    "teacher_prompt_version": "tau-airline-usim-teacher-v1.5",
+    "audited_generation_sha256": "7b69d546a353bd805554e3044bcd252594284529aef501c0b01d714b7b938323",
+    "original_trl_train_sha256": "becb64757589fd6890b03ac01ef870a7016d22edf3252c88d900ae0a900df24d",
+    "original_trl_eval_sha256": "89be5d093484591ad804878d7e00b4575d4fcb1ed70a237893601d6fb3e86492",
+    "source_statement": "This release is derived from tau-bench, not Pi-Bench."
+  },
+  "schema": {
+    "record": "{messages: list[{role: str, content: str}]}",
+    "role_contract": {
+      "system": "runtime LLMUserSimulationEnv system prompt",
+      "user": "agent-visible text passed to the user simulator",
+      "assistant": "simulated customer reply or exact ###STOP### target"
+    },
+    "training_loss_mask": "last_assistant",
+    "chat_template_kwargs": {
+      "enable_thinking": false
+    }
+  },
+  "splits": {
+    "train": {
+      "file": "train.jsonl",
+      "rows": 1595,
+      "continuation_targets": 1091,
+      "terminal_targets": 504,
+      "sha256": "c1dd6fa61cc141bc6d596da38e2e7c0e44c11389ae409332e3ad88009ef50379"
+    },
+    "eval": {
+      "file": "eval.jsonl",
+      "rows": 164,
+      "continuation_targets": 139,
+      "terminal_targets": 25,
+      "selection": "held-out trial07 natural population",
+      "sha256": "89be5d093484591ad804878d7e00b4575d4fcb1ed70a237893601d6fb3e86492"
+    },
+    "cross_split_validation": {
+      "identical_full_rows": 0,
+      "identical_model_input_prefixes": 0
+    }
+  },
+  "release_transform": {
+    "train_input": "original 1635-row TRL training artifact",
+    "released_train_rows": 1595,
+    "omitted_rows": 40,
+    "omitted_target_type": "continuation",
+    "introduced_rows": 0,
+    "terminal_targets_removed": 0
+  },
+  "validation": {
+    "json_parse_failures": 0,
+    "blank_lines": 0,
+    "unexpected_top_level_fields": 0,
+    "empty_message_contents": 0,
+    "invalid_roles": 0,
+    "non_alternating_adjacent_roles": 0,
+    "live_prefix_stop_markers": 0,
+    "secret_pattern_matches": 0
+  }
+}

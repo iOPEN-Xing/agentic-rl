@@ -284,6 +284,19 @@ bash run_exp4_prm_lite_lata.sh
 | `docs/HARDWARE_ADAPTATION_PLAN.md` | hardware adaptation decisions and branch-specific constraints |
 | `docs/code-review-report.md` | cross-branch implementation audit and prioritized risks |
 
+## Published User-Simulator Data
+
+The audited user-simulator SFT release is available in
+[`datasets/tau-bench-airline-user-simulator-sft-v1/`](datasets/tau-bench-airline-user-simulator-sft-v1/).
+It contains 1,595 train and 164 held-out evaluation conversational JSONL
+examples for the tau-bench airline runtime. The data card documents the
+role-flipped message contract, exact `###STOP###` handling, terminal-target
+oversampling, checksums, license, and the required last-assistant loss mask.
+
+This is a tau-bench-derived dataset, not a Pi-Bench dataset. Do not train on
+the evaluation split or interpret the offline release checks as online rollout
+quality evidence.
+
 ## Recommended Experimental Order
 
 1. Reproduce vanilla with the fixed split and record per-task reward variance.

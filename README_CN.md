@@ -223,6 +223,13 @@ bash eval_exp4_prm_lite_lata.sh
 | [`docs/ablation/ablation_plan.md`](docs/ablation/ablation_plan.md) | 实验设计手册：代码实现、PRM-Lite 规则集、黑客风险分析 |
 | [`docs/vanilla_grpo/vanilla_grpo_diagnosis.md`](docs/vanilla_grpo/vanilla_grpo_diagnosis.md) | Vanilla GRPO 崩溃诊断：三个根本原因、五个检查点分析 |
 
+## 用户模拟器 SFT 数据
+
+公开数据位于
+[`datasets/tau-bench-airline-user-simulator-sft-v1/`](datasets/tau-bench-airline-user-simulator-sft-v1/)，包括 1,595 条训练样本与 164 条隔离评测样本。数据卡说明了 role-flipped 对话格式、精确 `###STOP###` 终止标记、终止样本过采样、校验哈希和 `last_assistant` loss mask。
+
+该数据来自 tau-bench airline，并非 Pi-Bench。评测集不得混入训练；离线格式校验也不能替代在线 rollout A/B 评测。
+
 ---
 
 ## 🛠️ 技术栈

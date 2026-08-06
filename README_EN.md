@@ -224,6 +224,13 @@ bash eval_exp4_prm_lite_lata.sh
 | [`docs/vanilla_grpo/vanilla_grpo_diagnosis.md`](docs/vanilla_grpo/vanilla_grpo_diagnosis.md) | Vanilla GRPO collapse diagnosis: three root causes, five checkpoints analysis |
 | [`../agentic-grpo-longhorizon-blog.md`](../agentic-grpo-longhorizon-blog.md) | 🆕 Technical blog: from training collapse to stable convergence (PRM-Lite + LATA) |
 
+## User-Simulator SFT Data
+
+The published release lives in
+[`datasets/tau-bench-airline-user-simulator-sft-v1/`](datasets/tau-bench-airline-user-simulator-sft-v1/). It contains 1,595 train and 164 held-out evaluation conversational JSONL examples. The data card documents the role-flipped contract, exact `###STOP###` marker, terminal oversampling, checksums, and `last_assistant` loss masking.
+
+This is a tau-bench airline dataset, not a Pi-Bench dataset. Keep the evaluation split out of training and treat its offline checks as format validation rather than online rollout evidence.
+
 ---
 
 ## 🛠️ Tech Stack

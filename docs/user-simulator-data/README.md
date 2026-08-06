@@ -2,6 +2,8 @@
 
 > 目标：提升 User Simulator 的任务遵循、渐进披露和终止校准，减少无效长尾，同时不把 Agent 的工具/推理错误伪装成“用户应该早点结束”。生成的数据最终用于微调当前 `/data/xjz/model/qwen3-14b` User Simulator，并作为主模型 Agentic RL 的交互环境。
 
+已发布的可直接使用 JSONL、校验哈希、数据划分和许可证见 [`../../datasets/tau-bench-airline-user-simulator-sft-v1/`](../../datasets/tau-bench-airline-user-simulator-sft-v1/)。该发布包来自 tau-bench airline，不是 Pi-Bench。
+
 ## 1. 先给结论：两个现象相关，但不是同一个根因
 
 “User Simulator 迟迟不输出 `###STOP###`”与“工具任务完成后 Agent/User 继续循环”有交集，但不能全部归因于 User Simulator。
