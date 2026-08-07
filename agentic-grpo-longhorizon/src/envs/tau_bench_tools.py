@@ -139,6 +139,7 @@ class TauBenchToolBase(BaseTool):
             "inc_reward": inc_reward,
             "done": is_done,
             "is_error": bool(obs and obs.startswith("Error:")),
+            "observation": obs,
             "extracted_entities": _extract_entities(obs),
             "content": assistant_content or "",
         })

@@ -1,6 +1,7 @@
-# Exp 3: PRM-Lite (300 step)
+# Exp 3: PRM-Lite v6.1 (300 step)
 # 对照 vanilla: reward_mode=prm_lite, advantage=standard GRPO
-# 针对问题: P1 group 饱和双端 + P2 收益偏向 covered
+# v6.1 包含：P8 长度放宽 + A3/A4/A3-v6 加固
+# 对比实验：prm_lite_dapo.yaml（启用 DAPO Dynamic Sampling）
 hydra:
   searchpath:
     - pkg://verl/trainer/config
@@ -98,6 +99,6 @@ trainer:
   default_local_dir: experiments/prm_lite/checkpoints
   logger: ['console', 'wandb']
   project_name: agentic-grpo-longhorizon
-  experiment_name: prm_lite_300step
+  experiment_name: prm_lite_v61_300step
   n_gpus_per_node: 4
   nnodes: 1

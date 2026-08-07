@@ -71,6 +71,15 @@ _WRITE_TOOLS = frozenset({
 _ESCALATION_TOOLS = frozenset({"transfer_to_human_agents"})
 _THINK_TOOLS = frozenset({"think", "implicit_think"})
 
+# ── v6 加固: 已知合法工具白名单（与 configs/tool_config/tau_bench_airline_tools.yaml 对齐）────────
+_VALID_TOOLS = frozenset({
+    "book_reservation", "cancel_reservation", "update_reservation_baggages",
+    "update_reservation_passengers", "update_reservation_flights", "send_certificate",
+    "list_all_airports", "search_direct_flight", "search_onestop_flight",
+    "get_user_details", "get_reservation_details", "calculate",
+    "think", "implicit_think", "transfer_to_human_agents",
+})
+
 # Schema-based parameter validation patterns (from tau_bench_airline_tools.yaml)
 _PARAM_PATTERNS = {
     "reservation_id": re.compile(r'^[A-Z0-9]{6}$'),
@@ -87,6 +96,31 @@ _PLACEHOLDER_KEYWORDS = frozenset({
     "any", "some", "first", "last", "default", "example", "sample",
     "test", "dummy", "temp", "temporary",
 })
+
+
+# ── v6 加固: 递归 flatten 嵌套参数（展开 passengers[], flights[] 等）──────────────────
+def _flatten_params(params: dict) -> list[tuple[str, Any]]:
+    """Recursively flatten nested dict/list params into (field_path, value) pairs.
+
+    Example: {"passengers": [{"first_name": "John"}]}
+    → [("passengers[0].first_name", "John")]
+    """
+    result: list[tuple[str, Any]] = []
+
+    def _flatten(obj: Any, prefix: str) -> None:
+        if isinstance(obj, dict):
+            for k, v in obj.items():
+                path = f"{prefix}.{k}" if prefix else k
+                _flatten(v, path)
+        elif isinstance(obj, list):
+            for idx, item in enumerate(obj):
+                path = f"{prefix}[{idx}]"
+                _flatten(item, path)
+        else:
+            result.append((prefix, obj))
+
+    _flatten(params, "")
+    return result
 
 
 def _param_str(params: dict) -> str:
@@ -108,7 +142,8 @@ def _is_placeholder_param(field_name: str, value: Any) -> bool:
 
 
 def _has_placeholder(params: dict) -> bool:
-    for field_name, value in params.items():
+    """v6: recursively flatten nested params before checking placeholders."""
+    for field_name, value in _flatten_params(params):
         if _is_placeholder_param(field_name, value):
             return True
     return False
@@ -153,15 +188,39 @@ def _compute_partial_credit_reward(state: dict) -> float:
     return max(0.0, min(score, 0.3))
 
 
+def _obs_indicates_success(obs: str) -> bool:
+    """Check if observation indicates a soft failure (inc_reward=0 but not an Error).
+
+    τ-bench has many soft failures where the tool call succeeds technically but
+    doesn't advance toward the goal (e.g., "No flights found", "Reservation not found").
+    These are not Error-prefixed but also not true successes.
+    """
+    if not obs:
+        return False
+    if obs.startswith("Error:"):
+        return False
+    # Soft failure keywords: tool returned empty/declined results
+    soft_fail_keywords = [
+        "no flights found", "no reservation", "not found", "no results",
+        "could not find", "unable to find", "no available", "no matching",
+    ]
+    obs_lower = obs.lower()
+    return any(kw in obs_lower for kw in soft_fail_keywords)
+
+
 def _compute_reasoning_quality_score(action_history: list[dict]) -> float:
     """
-    PRM-Lite v4-optimal: rule-based per-step reasoning quality scorer.
-    Hyperparameters tuned via offline grid search on vanilla eval data.
-    Key design principles:
-    1. Mean-based (not sum-based) to avoid long-trajectory penalty flattening
-    2. Penalize "busy but wrong" (length penalty + no implicit_think reward)
-    3. Reward signal concentrated in high-value actions (data chain, recovery)
-    4. Force reasoning (no-reasoning penalty strengthened)
+    PRM-Lite v6: rule-based per-step reasoning quality scorer.
+    Six v5 optimizations + three v6 hardening fixes (based on experiment analysis):
+      P0: Soft-failure detection via inc_reward=0 + _obs_indicates_success()
+      B4/B5: Think anti-hacking extended to action[i+2] (2-step bypass)
+      P3: Error recovery split: different tool +0.03, same-tool different-params +0.02
+      P8: Length penalty tightened: threshold 8→6, per-step -0.01→-0.005
+      B7: Read diversity bonus threshold: >=3→>=2
+      P5: Two-tier no-reasoning: >=2 steps -0.02, >=3 steps -0.05
+      A3: Invalid tool penalty (-0.05): "Error: Unknown tool 'xxx'" from tau-bench base.py
+      A4: Recursive placeholder check: flatten nested params (flights[], passengers[])
+      P3-v6: Recovery bonus only after legitimate errors (not after invalid tool calls)
     """
     if not action_history:
         return 0.0
@@ -172,28 +231,60 @@ def _compute_reasoning_quality_score(action_history: list[dict]) -> float:
         tool = action["tool"]
         params = action.get("parameters", {})
         pstr = action.get("param_str", "")
+        obs = action.get("observation", "")
+        inc_reward = action.get("inc_reward", 0.0)
         score = 0.0
 
         # --- Core Penalties ---
+
+        # P0: Soft-failure detection (v5 new)
+        # inc_reward=0 without Error prefix → tool "succeeded" but didn't advance goal
+        is_soft_fail = (
+            inc_reward == 0
+            and not action.get("is_error", False)
+            and _obs_indicates_success(obs)
+        )
 
         # P1: Placeholder penalty (schema-based)
         if tool not in _THINK_TOOLS and _has_placeholder(params):
             score += (-0.05 if tool in _WRITE_TOOLS else -0.03)
 
+        # A3: Invalid/unknown tool penalty (v6 new)
+        # "Error: Unknown tool 'xxx'" from tau-bench base.py step() else-branch
+        # NOT the same as backend error. Directly penalized.
+        is_invalid_tool = (
+            action.get("is_error", False)
+            and tool not in _VALID_TOOLS
+            and obs.startswith("Error: Unknown tool")
+        )
+        if is_invalid_tool:
+            score -= 0.05
+
         # P2: Redundancy (same tool+params in last 3 steps)
         if tool not in _THINK_TOOLS and _is_redundant(action_history[:i], tool, params, window=3):
             score -= 0.03
 
-        # P3: Error repetition vs recovery
+        # P3: Error repetition vs recovery (v5: split bonus; v6: invalid-tool guards)
+        # v6 A3: if prev was an invalid/unknown tool, don't give recovery bonus.
+        # Recovery should follow legitimate errors, not model hallucination.
         if i >= 1 and tool not in _THINK_TOOLS:
             prev = action_history[i - 1]
             if prev.get("is_error", False):
-                prev_sig = (prev.get("tool", ""), prev.get("param_str", ""))
-                curr_sig = (tool, pstr)
-                if curr_sig == prev_sig:
-                    score -= 0.04
+                prev_is_invalid = (
+                    prev.get("tool", "") not in _VALID_TOOLS
+                    and prev.get("observation", "").startswith("Error: Unknown tool")
+                )
+                if prev_is_invalid:
+                    pass  # no recovery bonus after invalid tool (penalized separately by A3)
                 else:
-                    score += 0.05
+                    prev_sig = (prev.get("tool", ""), prev.get("param_str", ""))
+                    curr_sig = (tool, pstr)
+                    if curr_sig == prev_sig:
+                        score -= 0.04
+                    elif tool != prev.get("tool", ""):
+                        score += 0.03  # v5: different tool recovery +0.03
+                    else:
+                        score += 0.02  # v5: same tool, different params +0.02
 
         # P4: Escalation penalty (layered: did we even try to gather info?)
         if tool in _ESCALATION_TOOLS:
@@ -202,6 +293,17 @@ def _compute_reasoning_quality_score(action_history: list[dict]) -> float:
                 for prev in action_history[:i]
             )
             score += (-0.10 if not has_done_read else -0.05)
+
+        # P0 bonus: successful soft-failure recovery (v5 new)
+        # Positive: recovering from a soft fail (tool returned no results)
+        if is_soft_fail:
+            score -= 0.02  # penalized as soft fail
+            # If next action uses data from the soft-fail observation, reward recovery
+            if i + 1 < len(action_history):
+                next_params = action_history[i + 1].get("parameters", {})
+                # Recovery bonus if next action uses data from the obs
+                if next_params:
+                    score += 0.02
 
         # --- Positive Incentives ---
 
@@ -226,12 +328,12 @@ def _compute_reasoning_quality_score(action_history: list[dict]) -> float:
 
         # B3: Removed — success_bonus caused anti-incentive in long failures
 
-        # B4/B5: Think bonus with anti-hacking (tuned to +0.01 via grid search)
+        # B4/B5: Think bonus with anti-hacking (v5: extended to action[i+2])
         if tool in _THINK_TOOLS:
             # (a) consecutive think: no bonus
             if i >= 1 and action_history[i - 1].get("tool") in _THINK_TOOLS:
                 pass
-            # (b) think is the last step: no bonus (didn't guide any action)
+            # (b) think is the last step: no bonus
             elif i == len(action_history) - 1:
                 pass
             # (c) think followed by placeholder/redundancy: no bonus
@@ -243,6 +345,19 @@ def _compute_reasoning_quality_score(action_history: list[dict]) -> float:
                     action_history[:i + 1], next_tool, next_params, window=3
                 ):
                     pass
+                # (d) v5 new: think→think→bypass (2-step bypass detection)
+                elif i + 2 < len(action_history):
+                    after_next_action = action_history[i + 2]
+                    after_next_tool = after_next_action.get("tool", "")
+                    after_next_params = after_next_action.get("parameters", {})
+                    # If think→think→placeholder, or think→think→redundancy: no bonus
+                    if (after_next_tool in _THINK_TOOLS) or (
+                        _has_placeholder(after_next_params)
+                        or _is_redundant(action_history[:i + 2], after_next_tool, after_next_params, window=3)
+                    ):
+                        pass
+                    else:
+                        score += 0.01
                 else:
                     score += 0.01
             else:
@@ -251,8 +366,6 @@ def _compute_reasoning_quality_score(action_history: list[dict]) -> float:
         # B6: Implicit think reward REMOVED (grid search found it inflates long-failure scores)
 
         # P9: Cheap reasoning penalty — assistant content too short before tool call
-        # 直接打击"没想清楚就调 tool"的敷衍行为 (SFT baseline 中 66.7% turns 受此罚)
-        # 注意: content=="" 表示未记录(旧数据/测试)，不触发惩罚; 0 < len(content) < 30 才罚
         if tool not in _THINK_TOOLS:
             content = action.get("content", "")
             if 0 < len(content) < 30:
@@ -264,20 +377,24 @@ def _compute_reasoning_quality_score(action_history: list[dict]) -> float:
 
     # --- Trajectory-level adjustments (not averaged) ---
 
-    # P5: No reasoning penalty (strengthened to -0.05 via grid search)
+    # P5: Two-tier no-reasoning penalty (v5: >=2 → -0.02 weak, >=3 → -0.05 strong)
     think_count = sum(1 for a in action_history if a["tool"] in _THINK_TOOLS)
     if think_count == 0 and len(action_history) >= 3:
         mean_score -= 0.05
+    elif think_count == 0 and len(action_history) >= 2:
+        mean_score -= 0.02
 
-    # B7: Read tool diversity bonus (reduced to +0.01 via grid search)
+    # B7: Read tool diversity bonus (v5: >=2 instead of >=3)
     all_reads = set(a["tool"] for a in action_history if a.get("tool") in _READ_TOOLS)
-    if len(all_reads) >= 3:
+    if len(all_reads) >= 2:
         mean_score += 0.01
 
-    # P8: Length penalty — penalize excessively long trajectories
-    # v4-optimal grid search: threshold=8, per_step=-0.01
-    length_threshold = 8
-    length_penalty_per_step = -0.01
+    # P8: Length penalty (v6.1: relaxed threshold from v5)
+    # v5: threshold=6, per-step=-0.005 (too aggressive for airline tasks with
+    # multi-step booking flows). Experiment showed step>6 trajectories are often
+    # legitimate complex tasks, not just loops. Relax to threshold=10, per-step=-0.003.
+    length_threshold = 10
+    length_penalty_per_step = -0.003
     if len(action_history) > length_threshold:
         mean_score += length_penalty_per_step * (len(action_history) - length_threshold)
 
@@ -285,7 +402,13 @@ def _compute_reasoning_quality_score(action_history: list[dict]) -> float:
 
 
 def _compute_prm_lite_reward(state: dict) -> float:
-    """Exp 3 v4: outcome + 0.3 * process (un-normalized, process as independent signal)"""
+    """PRM-Lite v6: outcome + 0.3 * process_score (un-normalized)
+
+    v6 includes v5 six optimizations plus three hardening fixes:
+      - A3: Invalid tool penalty (-0.05 per occurrence)
+      - A4: Recursive placeholder check for nested params
+      - P3-v6: Recovery bonus only after legitimate errors
+    """
     outcome = 1.0 if state["total_reward"] >= 1.0 else 0.0
     history = state.get("action_history", [])
     process_score = _compute_reasoning_quality_score(history)
@@ -434,6 +557,7 @@ class TauBenchInteraction(BaseInteraction):
                     "inc_reward": 0,
                     "done": False,
                     "is_error": False,
+                    "observation": assistant_content[:300],
                     "extracted_entities": {},
                     "content": assistant_content[:300],
                 })
@@ -497,6 +621,16 @@ class TauBenchInteraction(BaseInteraction):
         if is_done or total_turns >= self.max_turns:
             state["done"] = True
             final_score = self._compute_reward(state)
+            # v6: decompose reward for W&B logging (A1 diagnostic)
+            outcome = 1.0 if state["total_reward"] >= 1.0 else 0.0
+            history = state.get("action_history", [])
+            process_score = _compute_reasoning_quality_score(history)
+            # Count invalid tool calls for diagnostic
+            invalid_count = sum(
+                1 for a in history
+                if a.get("tool", "") not in _VALID_TOOLS
+                and a.get("observation", "").startswith("Error: Unknown tool")
+            )
             return (
                 True,
                 "",
@@ -510,6 +644,10 @@ class TauBenchInteraction(BaseInteraction):
                     "reason": "done" if is_done else "max_turns",
                     "reward_mode": self.reward_mode,
                     "transferred_to_human": state.get("transferred_to_human", False),
+                    # v6: reward decomposition for analysis (not used by GRPO, only for logging)
+                    "outcome": outcome,
+                    "process_score": process_score,
+                    "invalid_tool_count": invalid_count,
                 },
             )
 

@@ -31,6 +31,14 @@ from verl.utils.config import validate_config
 from verl.utils.device import is_cuda_available
 from verl.utils.import_utils import load_extern_type
 
+# DAPO imports: only loaded when filter_groups is enabled
+try:
+    from verl.recipe.dapo.dapo_ray_trainer import RayDAPOTrainer
+    HAS_DAPO = True
+except ImportError:
+    RayDAPOTrainer = RayPPOTrainer  # fallback
+    HAS_DAPO = False
+
 
 @hydra.main(config_path="config", config_name="ppo_trainer", version_base=None)
 def main(config):
@@ -320,7 +328,19 @@ class TaskRunner:
         train_sampler = create_rl_sampler(config.data, train_dataset)
 
         # Initialize the PPO trainer.
-        trainer = RayPPOTrainer(
+        # Auto-select between RayPPOTrainer and RayDAPOTrainer based on filter_groups config.
+        # DAPO: filter_groups.enable=True → use RayDAPOTrainer (filters silent groups).
+        # GRPO: filter_groups not enabled → use RayPPOTrainer (standard GRPO).
+        filter_cfg = config.algorithm.get("filter_groups", None)
+        use_dapo = (
+            HAS_DAPO
+            and filter_cfg is not None
+            and getattr(filter_cfg, "enable", False)
+        )
+        trainer_cls = RayDAPOTrainer if use_dapo else RayPPOTrainer
+        if use_dapo:
+            print(f"[DAPO] Using RayDAPOTrainer with filter_groups.metric={filter_cfg.metric}")
+        trainer = trainer_cls(
             config=config,
             tokenizer=tokenizer,
             processor=processor,

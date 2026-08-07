@@ -6,7 +6,7 @@ tools:
     type: function
     function:
       name: book_reservation
-      description: Book a reservation.
+      description: "Book a reservation with complete flight and passenger information. Required: user_id, flight_type, cabin, at least one flight with flight_number+date, at least one passenger with first_name+last_name, and payment_method or loyalty_points+certificate_code."
       parameters:
         type: object
         properties:
@@ -132,7 +132,7 @@ tools:
     type: function
     function:
       name: cancel_reservation
-      description: Cancel the whole reservation.
+      description: "Cancel an entire reservation. Required: reservation_id (6-char alphanumeric). Warning: cancellation may incur fees based on fare rules."
       parameters:
         type: object
         properties:
@@ -148,7 +148,7 @@ tools:
     type: function
     function:
       name: get_reservation_details
-      description: Get the details of a reservation.
+      description: "Retrieve details of an existing reservation. Required: reservation_id (6-character alphanumeric, e.g., 'ABC123')."
       parameters:
         type: object
         properties:
@@ -164,7 +164,7 @@ tools:
     type: function
     function:
       name: get_user_details
-      description: Get the details of an user, including their reservations.
+      description: "Retrieve user profile including reservations. Required: user_id (format: first_last_number, e.g., 'john_doe_123')."
       parameters:
         type: object
         properties:
@@ -192,7 +192,7 @@ tools:
     type: function
     function:
       name: search_direct_flight
-      description: Search direct flights between two cities on a specific date.
+      description: "Search for non-stop (direct) flights between two cities on a specific date. Only searches direct flights - for multi-stop routes, use search_onestop_flight or list_all_airports."
       parameters:
         type: object
         properties:
@@ -217,7 +217,7 @@ tools:
     type: function
     function:
       name: search_onestop_flight
-      description: Search direct flights between two cities on a specific date.
+      description: "Search for one-stop (connecting) flights between two cities on a specific date. Returns flights with a connection. For direct flights use search_direct_flight, for multi-stop routes use list_all_airports."
       parameters:
         type: object
         properties:
@@ -242,7 +242,7 @@ tools:
     type: function
     function:
       name: send_certificate
-      description: Send a certificate to a user. Be careful!
+      description: "Send a certificate/voucher to a user account. Use after confirming user's eligibility. Required: user_id and certificate_code."
       parameters:
         type: object
         properties:
