@@ -478,6 +478,16 @@ class ToolAgentLoop(AgentLoopBase):
                 )
                 response_ids = response_ids[len(self.system_prompt) :]
         if len(agent_data.response_mask) + len(response_ids) >= self.response_length:
+            # Without invalidation the rollout returns a partial trajectory
+            # whose response_mask is one or more tokens short. The
+            # _handle_interacting_state guard added below catches the same
+            # case for user-side overflow; mirror it on the tool side so
+            # downstream groups don't carry a stale `valid_for_training=True`.
+            agent_data.invalidate(
+                "tool_response_overflow",
+                f"tool response of {len(response_ids)} tokens would overflow "
+                f"response_length={self.response_length}; trajectory excluded",
+            )
             return AgentState.TERMINATED
         # Update prompt_ids and response_mask
 
@@ -540,7 +550,19 @@ class ToolAgentLoop(AgentLoopBase):
                 None,
                 lambda: self.tokenizer.apply_chat_template(add_messages, add_generation_prompt=True, tokenize=True),
             )
-        response_ids = response_ids[len(self.system_prompt) :]
+            response_ids = response_ids[len(self.system_prompt) :]
+        # Mirror _handle_processing_tools_state: refuse to silently exceed the
+        # response_length budget. Without this guard, an unusually long user
+        # simulator message could push response_mask past self.response_length
+        # and leave an inconsistent response_mask vs trace layout at finalize
+        # time. We mark the trajectory invalid so downstream groups skip it.
+        if len(agent_data.response_mask) + len(response_ids) >= self.response_length:
+            agent_data.invalidate(
+                "interacting_user_response_overflow",
+                f"user response of {len(response_ids)} tokens would overflow "
+                f"response_length={self.response_length}; trajectory excluded",
+            )
+            return AgentState.TERMINATED
 
         # Update prompt_ids and response_mask
         agent_data.prompt_ids += response_ids

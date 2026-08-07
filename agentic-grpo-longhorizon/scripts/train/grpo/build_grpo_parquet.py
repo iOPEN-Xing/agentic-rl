@@ -42,7 +42,11 @@ SYSTEM_PROMPT = (
 )
 
 INTERACTION_NAME = "tau_bench_airline"
-NUM_AIRLINE_TASKS = 50
+# Default upper bound mirrors the upstream τ-bench airline test split size.
+# The actual task count is asserted against `len(TASKS)` at the start of main()
+# so a future split growth surfaces as a clear error rather than silently
+# dropping the unseen tasks at the end.
+_NUM_AIRLINE_TASKS_DEFAULT = 50
 
 
 def serialize_tau_bench_trace_target(task) -> str:
@@ -107,8 +111,16 @@ def main():
     group.add_argument("--seen-task-ids-from", type=str, help="Path to metadata.json with seen_task_ids")
     parser.add_argument("--output-train", default="experiments/vanilla/train.parquet")
     parser.add_argument("--output-val", default="experiments/vanilla/val.parquet")
-    parser.add_argument("--num-total-tasks", type=int, default=NUM_AIRLINE_TASKS)
+    parser.add_argument("--num-total-tasks", type=int, default=_NUM_AIRLINE_TASKS_DEFAULT)
     args = parser.parse_args()
+
+    # Fail loud: --num-total-tasks must not exceed the actual τ-bench task set.
+    # Silently truncating would silently drop unseen tasks and skew pass@k.
+    if args.num_total_tasks > len(TASKS):
+        raise ValueError(
+            f"--num-total-tasks={args.num_total_tasks} exceeds the τ-bench airline "
+            f"task count ({len(TASKS)}). Adjust the default or pass a smaller value."
+        )
 
     if args.seen_task_ids:
         seen_ids = [int(x.strip()) for x in args.seen_task_ids.split(",")]
@@ -121,8 +133,14 @@ def main():
         elif "covered_task_ids" in meta:
             seen_ids = meta["covered_task_ids"]
         else:
-            seen_ids = list(range(40))
-            print(f"[WARN] No seen_task_ids in {meta_path}, using default 0-39")
+            # Fail loud: silently falling back to ``range(40)`` would mask a
+            # metadata schema drift (e.g. split.json now lives under a
+            # different key). Refuse to guess.
+            raise ValueError(
+                f"{meta_path} contains neither 'seen_task_ids' nor 'covered_task_ids'. "
+                f"Found keys: {sorted(meta.keys())}. Refusing to silently fall back "
+                f"to range(40); pass --seen-task-ids explicitly to override."
+            )
 
     all_ids = list(range(args.num_total_tasks))
     unseen_ids = [t for t in all_ids if t not in seen_ids]

@@ -45,6 +45,16 @@ def record_policy_error_action(
     """Record a model-attributable invalid tool action for PRM-Lite."""
     state = CURRENT_TAU_STATE.get()
     if state is None:
+        # No active trajectory state. This is an upstream contract violation
+        # (tool call attempted before Interaction.start_interaction ran). The
+        # PRM-Lite signal for this turn is lost, but we surface the problem so
+        # the bug is debuggable rather than silently swallowed.
+        logger.warning(
+            "record_policy_error_action called without an active trajectory state "
+            "(tool=%s, error=%s); PRM-Lite signal for this turn will be missing",
+            tool_name,
+            error_type,
+        )
         return False
 
     state["num_tool_calls"] += 1
@@ -56,6 +66,7 @@ def record_policy_error_action(
             "inc_reward": 0.0,
             "done": False,
             "is_error": True,
+            "observation": f"Error: {error_type}",  # v5: also flag for soft-failure detection
             "error_type": error_type,
             "raw_arguments": str(raw_arguments)[:1000],
             "extracted_entities": {},
@@ -160,6 +171,51 @@ def _is_redundant(action_history: list[dict], current_tool: str, current_params:
     return False
 
 
+def _obs_indicates_success(obs: str, tool_name: str) -> bool:
+    """τ-bench semantics: a non-Error observation containing concrete progress
+    (structured data, ID confirmation, etc.) counts as soft-success.
+
+    This complements the strict ``is_error`` (``obs.startswith("Error:")``)
+    check. τ-bench's ``inc_reward`` is ground truth, but obs keyword matching
+    can identify **soft failures** that tau_bench returns inc_reward=0 on yet
+    does not prefix with ``Error:`` (e.g. "No user found with that id").
+    """
+    if not obs or obs.startswith("Error:"):
+        return False
+    if tool_name in _WRITE_TOOLS:
+        return any(
+            kw in obs
+            for kw in (
+                "HAT",
+                "reservation",
+                "updated",
+                "cancelled",
+                "certificate",
+                "baggage",
+                "flight",
+                "passenger",
+            )
+        )
+    if tool_name in _READ_TOOLS:
+        return any(kw in obs for kw in ("[", "{", "flight", "user", "airport", "detail"))
+    return False
+
+
+def _is_tool_call_failure(inc_reward: float, obs: str, tool_name: str) -> bool:
+    """More reliable tool-call failure detection than ``obs.startswith("Error:")``.
+
+    Rule: tau_bench's ``inc_reward`` is ground truth. When ``inc_reward == 0``
+    AND the obs has no success-indicator keyword, treat the call as a **soft
+    failure** (the tool ran but produced no useful signal). Such failures
+    should also trigger P0 penalty and P3 recovery detection.
+    """
+    # Think tools are not external tool calls and tau_bench returns empty obs
+    # for them; the soft-failure concept does not apply.
+    if tool_name in _THINK_TOOLS:
+        return False
+    return bool(inc_reward == 0.0 and not _obs_indicates_success(obs, tool_name))
+
+
 def _compute_binary_reward(state: dict) -> float:
     """W3 原始: outcome >= 1.0 → 1, 否则 0"""
     return 1.0 if state["total_reward"] >= 1.0 else 0.0
@@ -196,6 +252,23 @@ def _compute_reasoning_quality_score(action_history: list[dict]) -> float:
     2. Penalize "busy but wrong" (length penalty + no implicit_think reward)
     3. Reward signal concentrated in high-value actions (data chain, recovery)
     4. Force reasoning (no-reasoning penalty strengthened)
+
+    v5 changes vs v4 (mirrors reference project agentic-rl-codex-turn-level-reward):
+
+    1. P0 soft-failure detection: replaces ``obs.startswith("Error:")`` with
+       ``_is_tool_call_failure(inc_reward, obs, tool)``, catching tau-bench
+       soft failures (inc_reward=0 with no Error prefix).
+    2. P3 error-recovery shaping: v4 was binary (repeat vs any switch). v5
+       distinguishes same-tool+different-args (+0.02) from cross-tool (+0.03),
+       reflecting that refining a parameter is stronger evidence of correction.
+    3. B4/B5 think anti-hacking: v4 only checked ``[i+1]``. v5 extends to
+       ``[i+2]`` to defeat the think → think → placeholder → real_tool trick.
+    4. P8 length penalty: threshold lowered from 8 to 6, per-step penalty
+       softened from -0.01 to -0.005 (airline optimal = 4-6 steps).
+    5. B7 read-tool diversity: threshold lowered from 3 to 2 (airline has
+       only 3 distinct read tools).
+    6. P5 no-reasoning: v4 fires len>=3 ⇒ -0.05. v5 also fires len>=2
+       ⇒ -0.02 (weak warning for short trajectories that ignored thinking).
     """
     if not action_history:
         return 0.0
@@ -206,13 +279,16 @@ def _compute_reasoning_quality_score(action_history: list[dict]) -> float:
         tool = action["tool"]
         params = action.get("parameters", {})
         pstr = action.get("param_str", "")
+        inc_reward = float(action.get("inc_reward", 0.0))
+        obs = str(action.get("observation", "") or "")
         score = 0.0
 
         # --- Core Penalties ---
 
-        # Attribute malformed/unknown calls to the policy itself. Previously
-        # terminal errors had no direct penalty and could disappear entirely.
-        if action.get("is_error", False):
+        # P0 (v5): reliability-based soft-failure detection. tau_bench's
+        # inc_reward is ground truth; obs keyword checks cover the soft
+        # failures that return inc_reward=0 yet no "Error:" prefix.
+        if _is_tool_call_failure(inc_reward, obs, tool) or action.get("is_error", False):
             score += _PRM_LITE_ACTION_ERROR_PENALTY
 
         # P1: Placeholder penalty (schema-based)
@@ -223,16 +299,29 @@ def _compute_reasoning_quality_score(action_history: list[dict]) -> float:
         if tool not in _THINK_TOOLS and _is_redundant(action_history[:i], tool, params, window=3):
             score -= 0.03
 
-        # P3: Error repetition vs recovery
+        # P3: Error recovery shaping (v5: distinguishes same-tool-fixed-args
+        # from cross-tool switch). The prev check uses both ``is_error`` and
+        # ``_is_tool_call_failure`` so soft failures also count as failures
+        # for the purpose of crediting the next-step correction.
         if i >= 1 and tool not in _THINK_TOOLS:
             prev = action_history[i - 1]
-            if prev.get("is_error", False):
+            prev_is_failure = bool(
+                prev.get("is_error", False)
+                or _is_tool_call_failure(
+                    float(prev.get("inc_reward", 0.0)),
+                    str(prev.get("observation", "") or ""),
+                    prev.get("tool", ""),
+                )
+            )
+            if prev_is_failure:
                 prev_sig = (prev.get("tool", ""), prev.get("param_str", ""))
                 curr_sig = (tool, pstr)
                 if curr_sig == prev_sig:
                     score -= 0.04
+                elif tool != prev["tool"]:
+                    score += 0.03
                 else:
-                    score += 0.05
+                    score += 0.02
 
         # P4: Escalation penalty (layered: did we even try to gather info?)
         if tool in _ESCALATION_TOOLS:
@@ -265,7 +354,7 @@ def _compute_reasoning_quality_score(action_history: list[dict]) -> float:
 
         # B3: Removed — success_bonus caused anti-incentive in long failures
 
-        # B4/B5: Think bonus with anti-hacking (tuned to +0.01 via grid search)
+        # B4/B5: Think bonus with 2-step anti-hacking (v5)
         if tool in _THINK_TOOLS:
             # (a) consecutive think: no bonus
             if i >= 1 and action_history[i - 1].get("tool") in _THINK_TOOLS:
@@ -273,19 +362,32 @@ def _compute_reasoning_quality_score(action_history: list[dict]) -> float:
             # (b) think is the last step: no bonus (didn't guide any action)
             elif i == len(action_history) - 1:
                 pass
-            # (c) think followed by placeholder/redundancy: no bonus
-            elif i + 1 < len(action_history):
-                next_action = action_history[i + 1]
-                next_tool = next_action.get("tool", "")
-                next_params = next_action.get("parameters", {})
-                if _has_placeholder(next_params) or _is_redundant(
-                    action_history[:i + 1], next_tool, next_params, window=3
-                ):
-                    pass
-                else:
-                    score += 0.01
             else:
-                score += 0.01
+                safe = False
+                next1 = action_history[i + 1] if i + 1 < len(action_history) else None
+                if next1 is not None:
+                    next1_tool = next1.get("tool", "")
+                    next1_params = next1.get("parameters", {})
+                    if next1_tool in _THINK_TOOLS:
+                        # think → think → ?: extend inspection to action[i+2]
+                        # to defeat think → think → placeholder → real tool.
+                        if i + 2 < len(action_history):
+                            next2 = action_history[i + 2]
+                            next2_tool = next2.get("tool", "")
+                            next2_params = next2.get("parameters", {})
+                            if (
+                                next2_tool not in _THINK_TOOLS
+                                and not _has_placeholder(next2_params)
+                            ):
+                                safe = True
+                    elif _has_placeholder(next1_params) or _is_redundant(
+                        action_history[: i + 1], next1_tool, next1_params, window=3
+                    ):
+                        pass  # bypassed: placeholder or redundant follow-up
+                    else:
+                        safe = True  # think → direct non-placeholder tool
+                if safe:
+                    score += 0.01
 
         # B6: Implicit think reward REMOVED (grid search found it inflates long-failure scores)
 
@@ -294,7 +396,7 @@ def _compute_reasoning_quality_score(action_history: list[dict]) -> float:
         # 注意: content=="" 表示未记录(旧数据/测试)，不触发惩罚; 0 < len(content) < 30 才罚
         if tool not in _THINK_TOOLS:
             content = action.get("content", "")
-            if 0 < len(content) < 30:
+            if content and 0 < len(content) < 30:
                 score -= 0.02
 
         per_step_scores.append(score)
@@ -303,20 +405,24 @@ def _compute_reasoning_quality_score(action_history: list[dict]) -> float:
 
     # --- Trajectory-level adjustments (not averaged) ---
 
-    # P5: No reasoning penalty (strengthened to -0.05 via grid search)
+    # P5: No-reasoning penalty (v5: tiered by trajectory length)
     think_count = sum(1 for a in action_history if a["tool"] in _THINK_TOOLS)
-    if think_count == 0 and len(action_history) >= 3:
-        mean_score -= 0.05
+    if think_count == 0:
+        if len(action_history) >= 3:
+            mean_score -= 0.05
+        elif len(action_history) >= 2:
+            mean_score -= 0.02
 
-    # B7: Read tool diversity bonus (reduced to +0.01 via grid search)
+    # B7: Read-tool diversity bonus (v5: threshold 3 → 2, since airline only
+    # has 3 read tools and 3-strike is unreachable in practice)
     all_reads = set(a["tool"] for a in action_history if a.get("tool") in _READ_TOOLS)
-    if len(all_reads) >= 3:
+    if len(all_reads) >= 2:
         mean_score += 0.01
 
-    # P8: Length penalty — penalize excessively long trajectories
-    # v4-optimal grid search: threshold=8, per_step=-0.01
-    length_threshold = 8
-    length_penalty_per_step = -0.01
+    # P8: Length penalty (v5: threshold 8 → 6, per_step -0.01 → -0.005)
+    # airline 优质轨迹集中在 4-6 步，> 6 步多为冗余操作
+    length_threshold = 6
+    length_penalty_per_step = -0.005
     if len(action_history) > length_threshold:
         mean_score += length_penalty_per_step * (len(action_history) - length_threshold)
 

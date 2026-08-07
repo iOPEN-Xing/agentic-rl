@@ -42,10 +42,16 @@ def build_trace_layout(
         if not isinstance(span, (tuple, list)) or len(span) != 2:
             raise ValueError(f"Invalid assistant span at turn {turn_index}: {span!r}")
         start, end = int(span[0]), int(span[1])
-        if start < previous_end:
-            raise ValueError(f"Assistant turn spans overlap: {clipped[-1]} and {(start, end)}")
+        # Order of checks matters: malformed spans (negative start / zero-width)
+        # must produce the dedicated "Invalid assistant turn span" error rather
+        # than triggering an IndexError from a still-empty clipped list in the
+        # overlap branch.
         if start < 0 or end <= start:
             raise ValueError(f"Invalid assistant turn span: {(start, end)}")
+        if start < previous_end:
+            raise ValueError(
+                f"Assistant turn spans overlap: {clipped[-1] if clipped else '∅'} and {(start, end)}"
+            )
         previous_end = end
         if start >= response_length:
             break

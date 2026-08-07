@@ -25,6 +25,7 @@ from verl.tools.schemas import OpenAIFunctionToolSchema, ToolResponse
 from verl.utils.rollout_trace import rollout_trace_op
 
 from src.envs.tau_bench_context import CURRENT_TAU_ENV, CURRENT_TAU_STATE, CURRENT_ASSISTANT_CONTENT
+from src.envs.tau_bench_interaction import record_policy_error_action
 
 logger = logging.getLogger(__name__)
 
@@ -113,6 +114,14 @@ class TauBenchToolBase(BaseTool):
             # (τ-bench 自己的 tool error 样例: "Unknown action update_reservation_insurance")
             err_msg = f"Error: {type(e).__name__}: {e}"
             logger.warning(f"[Tool.execute] {self.name} raised: {err_msg}")
+            # Also record to PRM-Lite so this turn's malformed action is visible
+            # to process reward. Without this, the policy can repeat the same
+            # schema violation across multiple turns with no per-step penalty.
+            record_policy_error_action(
+                tool_name=self.name,
+                parameters=parameters,
+                error_type=type(e).__name__,
+            )
             return (
                 ToolResponse(text=err_msg),
                 0.0,
@@ -144,6 +153,7 @@ class TauBenchToolBase(BaseTool):
             "inc_reward": inc_reward,
             "done": is_done,
             "is_error": bool(obs and obs.startswith("Error:")),
+            "observation": obs,  # v5: PRM-Lite scoring reads obs for soft-failure detection
             "extracted_entities": _extract_entities(obs),
             "content": assistant_content or "",
         })

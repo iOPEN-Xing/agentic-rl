@@ -364,6 +364,7 @@ def compute_grpo_turn_discounted_outcome_advantage(
 
     # Step 1: standard GRPO advantage (group normalize)
     scores = token_level_rewards.sum(dim=-1)
+    valid_trajectories = response_mask.bool().any(dim=-1)
     id2score = defaultdict(list)
     id2mean = {}
     id2std = {}
@@ -371,7 +372,11 @@ def compute_grpo_turn_discounted_outcome_advantage(
     with torch.no_grad():
         bsz = scores.shape[0]
         for i in range(bsz):
-            id2score[index[i]].append(scores[i])
+            # Mirror compute_grpo_outcome_advantage: skip fully-masked
+            # trajectories so they do not silently dilute the group mean/std
+            # when a rollout was invalidated.
+            if valid_trajectories[i]:
+                id2score[index[i]].append(scores[i])
         for idx in id2score:
             if len(id2score[idx]) == 1:
                 id2mean[idx] = torch.tensor(0.0)
@@ -383,6 +388,11 @@ def compute_grpo_turn_discounted_outcome_advantage(
             else:
                 raise ValueError(f"no score in prompt index: {idx}")
         for i in range(bsz):
+            if not valid_trajectories[i]:
+                # Invalidated trajectories must keep advantage 0 so the
+                # token-mean loss ignores them entirely.
+                scores[i] = 0.0
+                continue
             if norm_adv_by_std_in_grpo:
                 scores[i] = (scores[i] - id2mean[index[i]]) / (id2std[index[i]] + epsilon)
             else:
@@ -404,7 +414,18 @@ def compute_grpo_turn_discounted_outcome_advantage(
         log_weights_masked = log_weights.clone()
         log_weights_masked[response_mask == 0] = -float('inf')
         log_weights_max = log_weights_masked.max(dim=1, keepdim=True).values
-        log_weights_stable = log_weights - log_weights_max
+        # If the entire row is masked (invalid trajectory) the max is -inf,
+        # which would otherwise propagate +inf through exp(). The downstream
+        # multiplication by `response_mask` zeros the row anyway, but only
+        # *after* the inf has had a chance to produce NaN via the IEEE
+        # 0 * inf corner case. Replace -inf with 0 so weights_stable stays
+        # finite; the row will be multiplied by `response_mask = 0` regardless.
+        safe_log_weights_max = torch.where(
+            torch.isinf(log_weights_max) & (log_weights_max < 0),
+            torch.zeros_like(log_weights_max),
+            log_weights_max,
+        )
+        log_weights_stable = log_weights - safe_log_weights_max
         weights_stable = torch.exp(log_weights_stable)
         weight_sum = (weights_stable * response_mask.to(torch.float64)).sum(dim=1, keepdim=True).clamp(min=epsilon)
         active_count = active_lengths
@@ -443,6 +464,7 @@ def compute_grpo_lata_outcome_advantage(
 
     # Step 1: standard GRPO advantage (group normalize)
     scores = token_level_rewards.sum(dim=-1)
+    valid_trajectories = response_mask.bool().any(dim=-1)
     id2score = defaultdict(list)
     id2mean = {}
     id2std = {}
@@ -450,7 +472,11 @@ def compute_grpo_lata_outcome_advantage(
     with torch.no_grad():
         bsz = scores.shape[0]
         for i in range(bsz):
-            id2score[index[i]].append(scores[i])
+            # Mirror compute_grpo_outcome_advantage: skip fully-masked
+            # trajectories so they do not silently dilute the group mean/std
+            # when a rollout was invalidated.
+            if valid_trajectories[i]:
+                id2score[index[i]].append(scores[i])
         for idx in id2score:
             if len(id2score[idx]) == 1:
                 id2mean[idx] = torch.tensor(0.0)
@@ -462,6 +488,11 @@ def compute_grpo_lata_outcome_advantage(
             else:
                 raise ValueError(f"no score in prompt index: {idx}")
         for i in range(bsz):
+            if not valid_trajectories[i]:
+                # Invalidated trajectories must keep advantage 0 so the
+                # token-mean loss ignores them entirely.
+                scores[i] = 0.0
+                continue
             if norm_adv_by_std_in_grpo:
                 scores[i] = (scores[i] - id2mean[index[i]]) / (id2std[index[i]] + epsilon)
             else:
@@ -477,7 +508,18 @@ def compute_grpo_lata_outcome_advantage(
         log_weights_masked = log_weights.clone()
         log_weights_masked[response_mask == 0] = -float('inf')
         log_weights_max = log_weights_masked.max(dim=1, keepdim=True).values
-        log_weights_stable = log_weights - log_weights_max
+        # If the entire row is masked (invalid trajectory) the max is -inf,
+        # which would otherwise propagate +inf through exp(). The downstream
+        # multiplication by `response_mask` zeros the row anyway, but only
+        # *after* the inf has had a chance to produce NaN via the IEEE
+        # 0 * inf corner case. Replace -inf with 0 so weights_stable stays
+        # finite; the row will be multiplied by `response_mask = 0` regardless.
+        safe_log_weights_max = torch.where(
+            torch.isinf(log_weights_max) & (log_weights_max < 0),
+            torch.zeros_like(log_weights_max),
+            log_weights_max,
+        )
+        log_weights_stable = log_weights - safe_log_weights_max
         weights_stable = torch.exp(log_weights_stable)
         weight_sum = (weights_stable * response_mask.to(torch.float64)).sum(dim=1, keepdim=True).clamp(min=epsilon)
         active_count = active_lengths

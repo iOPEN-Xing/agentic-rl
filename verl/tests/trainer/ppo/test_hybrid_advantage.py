@@ -258,3 +258,100 @@ def test_trainer_rejects_hybrid_rollouts_without_trace_scores():
     )
     with pytest.raises(ValueError, match="trace_prefix_avg_log_probs"):
         compute_advantage(data, adv_estimator="grpo_hybrid", config=_hybrid_config())
+
+
+def test_turn_discounted_excludes_invalid_trajectories_from_group_stats():
+    """Regression test: previously the turn-discounted and LATA estimators
+    included fully-masked trajectories in the group mean/std, silently
+    diluting the normalization. The fix mirrors compute_grpo_outcome_advantage
+    and skips fully-masked rows when building group statistics.
+    """
+    # 4 valid trajectories in group 0, plus 1 invalid (all-masked).
+    token_level_rewards = torch.tensor(
+        [
+            [0.0] * 10,  # valid, score=0
+            [0.5] + [0.0] * 9,  # valid, score=0.5
+            [1.0] + [0.0] * 9,  # valid, score=1.0
+            [0.0] * 10,  # valid, score=0
+            [0.0] * 10,  # INVALID, all masked, score should be 0
+        ]
+    )
+    response_mask = torch.tensor(
+        [
+            [1, 1, 1, 1, 0, 0, 0, 0, 0, 0],
+            [1, 1, 1, 1, 0, 0, 0, 0, 0, 0],
+            [1, 1, 1, 1, 0, 0, 0, 0, 0, 0],
+            [1, 1, 1, 1, 0, 0, 0, 0, 0, 0],
+            [0, 0, 0, 0, 0, 0, 0, 0, 0, 0],  # fully masked = invalid
+        ],
+        dtype=torch.float32,
+    )
+    index = np.array([0, 0, 0, 0, 0])
+
+    fn = core_algos.compute_grpo_turn_discounted_outcome_advantage
+    advantages, _ = fn(token_level_rewards, response_mask, index)
+
+    # Invalid trajectory must contribute exactly 0
+    assert torch.equal(advantages[4], torch.zeros_like(advantages[4])), (
+        f"Invalid trajectory should have 0 advantage, got {advantages[4]}"
+    )
+
+    # The valid trajectory with the highest score (1.0) must have the highest
+    # advantage on its first token (relative to the valid-only normalization).
+    valid_adv_per_row = advantages[:4].sum(dim=-1)
+    best_idx = int(valid_adv_per_row.argmax().item())
+    assert best_idx == 2, f"Expected sample 2 (score=1.0) to have highest advantage, got {best_idx}"
+
+
+def test_turn_discounted_handles_fully_masked_row_without_nan():
+    """Regression test: when a single trajectory is fully masked, the position-
+    discount weight computation produced -inf / 0 -> +inf in float64, which
+    then became NaN through 0 * inf downstream. The fix replaces -inf with 0
+    in the masked-only max so weights_stable stays finite.
+    """
+    token_level_rewards = torch.zeros(1, 10)
+    response_mask = torch.zeros(1, 10)  # Fully masked
+    index = np.array([0])
+
+    fn = core_algos.compute_grpo_turn_discounted_outcome_advantage
+    advantages, _ = fn(token_level_rewards, response_mask, index)
+
+    assert torch.isfinite(advantages).all(), (
+        f"Fully-masked trajectory produced non-finite advantage: {advantages}"
+    )
+    assert torch.equal(advantages, torch.zeros_like(advantages)), (
+        f"Fully-masked trajectory should have all-zero advantage, got {advantages}"
+    )
+
+
+def test_lata_excludes_invalid_trajectories_from_group_stats():
+    """Same regression as turn_discounted, but for LATA which has the
+    additional 1/sqrt(L) damping. Both estimators were missing the
+    ``valid_trajectories`` filter prior to the fix.
+    """
+    token_level_rewards = torch.tensor(
+        [
+            [0.0] * 10,
+            [0.5] + [0.0] * 9,
+            [1.0] + [0.0] * 9,
+            [0.0] * 10,
+            [0.0] * 10,  # invalid
+        ]
+    )
+    response_mask = torch.tensor(
+        [
+            [1, 1, 1, 1, 0, 0, 0, 0, 0, 0],
+            [1, 1, 1, 1, 0, 0, 0, 0, 0, 0],
+            [1, 1, 1, 1, 0, 0, 0, 0, 0, 0],
+            [1, 1, 1, 1, 0, 0, 0, 0, 0, 0],
+            [0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        ],
+        dtype=torch.float32,
+    )
+    index = np.array([0, 0, 0, 0, 0])
+
+    fn = core_algos.compute_grpo_lata_outcome_advantage
+    advantages, _ = fn(token_level_rewards, response_mask, index)
+
+    assert torch.equal(advantages[4], torch.zeros_like(advantages[4]))
+    assert torch.isfinite(advantages).all()
